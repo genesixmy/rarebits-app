@@ -18,10 +18,10 @@ const SettingsPage = ({ user, categories, onUpdateCategories, onUpdateProfile })
             <Tag className="w-4 h-4" /> Kategori
           </TabsTrigger>
         </TabsList>
-        <TabsContent value="profile" className="mt-6">
+        <TabsContent value="profile" className="mt-6" forceMount>
           <ProfileSettings user={user} onUpdateProfile={onUpdateProfile} />
         </TabsContent>
-        <TabsContent value="categories" className="mt-6">
+        <TabsContent value="categories" className="mt-6" forceMount>
           <CategorySettings
             categories={categories}
             onUpdate={onUpdateCategories}
