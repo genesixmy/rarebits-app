@@ -45,3 +45,4 @@ coverage/
 *.tmp
 *.temp
 .cache/
+node_modules
