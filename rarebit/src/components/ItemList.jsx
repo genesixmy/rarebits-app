@@ -71,6 +71,18 @@ const ItemCard = ({ item, onEdit, onDelete, index }) => {
                 {item.category}
               </span>
             </div>
+
+            {item.quantity && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-semibold">Kuantiti:</span>
+                <span className="font-medium text-foreground">
+                  {item.status === 'terjual' && item.quantity_sold 
+                    ? `${Math.max(0, item.quantity - item.quantity_sold)}/${item.quantity} unit (${item.quantity_sold} terjual)`
+                    : `${item.quantity} unit`
+                  }
+                </span>
+              </div>
+            )}
             
             <div className="flex items-center gap-2">
               <Wallet className="w-4 h-4 text-primary" />

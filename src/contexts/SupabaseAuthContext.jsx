@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/customSupabaseClient';
 
 const AuthContext = createContext();
@@ -6,6 +7,7 @@ const AuthContext = createContext();
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
 
   useEffect(() => {
     const getSession = async () => {
@@ -31,7 +33,15 @@ export function AuthProvider({ children }) {
   const value = {
     signUp: (data) => supabase.auth.signUp(data),
     signIn: (data) => supabase.auth.signInWithPassword(data),
-    signOut: () => supabase.auth.signOut(),
+    signOut: async () => {
+      // Clear all React Query cache before signing out
+      queryClient.clear();
+      // Also clear localStorage/sessionStorage
+      localStorage.clear();
+      sessionStorage.clear();
+      // Then sign out
+      return supabase.auth.signOut();
+    },
     user,
     loading,
   };

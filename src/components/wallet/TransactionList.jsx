@@ -26,12 +26,15 @@ const TransactionList = ({ transactions, wallets, onEdit, onDelete }) => {
           <ul className="space-y-2">
             {transactions.map(tx => {
               const isSale = tx.type === 'jualan';
+              const isInvoicePayment = tx.type === 'pembayaran_invois';
+              const isManualItem = tx.type === 'item_manual';
               const isExpense = tx.type === 'perbelanjaan';
               const isTransferOut = tx.type === 'pemindahan_keluar';
               const isTransferIn = tx.type === 'pemindahan_masuk';
               const isAdjustment = tx.type === 'pelarasan_manual_tambah' || tx.type === 'pelarasan_manual_kurang';
 
               let icon, colorClass, title, subtitle, amountPrefix, amountClass, isEditable = true, isDeletable = true;
+              const isRefund = tx.type === 'refund';
 
               if (isSale) {
                 icon = <TrendingUp className="w-5 h-5 text-green-600 dark:text-green-400" />;
@@ -40,10 +43,31 @@ const TransactionList = ({ transactions, wallets, onEdit, onDelete }) => {
                 subtitle = tx.wallets?.name || 'Akaun Dipadam';
                 amountPrefix = '+';
                 amountClass = 'text-green-600 dark:text-green-400';
+              } else if (isInvoicePayment) {
+                icon = <TrendingUp className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />;
+                colorClass = 'bg-emerald-100 dark:bg-emerald-900/50';
+                title = tx.description || 'Pembayaran Invois';
+                subtitle = tx.wallets?.name || 'Akaun Dipadam';
+                amountPrefix = '+';
+                amountClass = 'text-emerald-600 dark:text-emerald-400';
+                isEditable = false;
+                isDeletable = true;
+              } else if (isManualItem) {
+                icon = <TrendingUp className="w-5 h-5 text-purple-600 dark:text-purple-400" />;
+                colorClass = 'bg-purple-100 dark:bg-purple-900/50';
+                title = tx.description || 'Item Manual';
+                subtitle = tx.wallets?.name || 'Akaun Dipadam';
+                amountPrefix = '+';
+                amountClass = 'text-purple-600 dark:text-purple-400';
+                isEditable = false;
+                isDeletable = true;
               } else if (isExpense) {
                 icon = <TrendingDown className="w-5 h-5 text-red-600 dark:text-red-400" />;
                 colorClass = 'bg-red-100 dark:bg-red-900/50';
-                title = tx.category || 'Perbelanjaan';
+                // Use description if it's a reversal, otherwise use category
+                title = (tx.description && tx.description.startsWith('Pembalikan'))
+                  ? tx.description
+                  : (tx.category || 'Perbelanjaan');
                 subtitle = tx.wallets?.name || 'Akaun Dipadam';
                 amountPrefix = '-';
                 amountClass = 'text-red-600 dark:text-red-400';
@@ -71,7 +95,16 @@ const TransactionList = ({ transactions, wallets, onEdit, onDelete }) => {
                 amountPrefix = tx.type === 'pelarasan_manual_tambah' ? '+' : '-';
                 amountClass = tx.type === 'pelarasan_manual_tambah' ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400';
                 isEditable = false;
-                isDeletable = true; // Manual adjustments are deletable
+                isDeletable = true;
+              } else if (isRefund) {
+                icon = <TrendingDown className="w-5 h-5 text-red-600 dark:text-red-400" />;
+                colorClass = 'bg-red-100 dark:bg-red-900/50';
+                title = tx.description || 'Pemulangan Dana';
+                subtitle = tx.wallets?.name || 'Akaun Dipadam';
+                amountPrefix = '-';
+                amountClass = 'text-red-600 dark:text-red-400';
+                isEditable = false;
+                isDeletable = false;
               }
 
 

@@ -34,20 +34,46 @@ const fetchClientsWithStats = async (userId) => {
     .order('name', { ascending: true });
   if (clientsError) throw clientsError;
 
-  const { data: items, error: itemsError } = await supabase
-    .from('items')
-    .select('client_id, selling_price')
-    .eq('user_id', userId)
-    .eq('status', 'terjual')
-    .not('client_id', 'is', null);
-  if (itemsError) throw itemsError;
+  const { data: invoiceItems, error: invoiceItemsError } = await supabase
+    .from('invoice_items')
+    .select(`
+      id,
+      quantity,
+      unit_price,
+      line_total,
+      is_manual,
+      item_name,
+      invoice:invoices(id, client_id, status, user_id)
+    `)
+    .order('created_at', { ascending: false });
+  if (invoiceItemsError) throw invoiceItemsError;
 
-  const stats = items.reduce((acc, item) => {
-    if (!acc[item.client_id]) {
-      acc[item.client_id] = { purchases: 0, totalSpend: 0 };
+  const paidItems = (invoiceItems || []).filter(invItem =>
+    invItem.invoice?.user_id === userId &&
+    invItem.invoice?.status === 'paid' &&
+    invItem.invoice?.client_id
+  );
+
+  console.log('[ClientsPage] fetchClientsWithStats - invoice items fetched:', {
+    count: paidItems.length,
+  });
+
+  const stats = paidItems.reduce((acc, invItem) => {
+    const clientId = invItem.invoice?.client_id;
+    if (!clientId) return acc;
+
+    if (!acc[clientId]) {
+      acc[clientId] = { purchases: 0, totalSpend: 0 };
     }
-    acc[item.client_id].purchases += 1;
-    acc[item.client_id].totalSpend += parseFloat(item.selling_price) || 0;
+
+    acc[clientId].purchases += 1;
+
+    const quantity = parseInt(invItem.quantity, 10) || 1;
+    const unitPrice = parseFloat(invItem.unit_price) || 0;
+    const lineTotal = parseFloat(invItem.line_total);
+    const amount = Number.isFinite(lineTotal) ? lineTotal : unitPrice * quantity;
+    acc[clientId].totalSpend += amount;
+
     return acc;
   }, {});
 

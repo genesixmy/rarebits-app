@@ -109,8 +109,17 @@ const Dashboard = ({ items, categories }) => {
   const filteredSoldItems = getFilteredItems();
 
   const filteredStats = {
-    totalRevenue: filteredSoldItems.reduce((sum, item) => sum + (parseFloat(item.selling_price) || 0), 0),
-    totalProfit: filteredSoldItems.reduce((sum, item) => sum + ((parseFloat(item.selling_price) || 0) - (parseFloat(item.cost_price) || 0)), 0),
+    totalRevenue: filteredSoldItems.reduce((sum, item) => {
+      // Use actual_sold_amount (invoice quantity × unit price) if available, fallback to selling_price
+      const revenue = parseFloat(item.actual_sold_amount) || parseFloat(item.selling_price) || 0;
+      return sum + revenue;
+    }, 0),
+    totalProfit: filteredSoldItems.reduce((sum, item) => {
+      const revenue = parseFloat(item.actual_sold_amount) || parseFloat(item.selling_price) || 0;
+      const qty = item.invoice_quantity || 1;
+      const costTotal = (parseFloat(item.cost_price) || 0) * qty;
+      return sum + (revenue - costTotal);
+    }, 0),
     soldItemsCount: filteredSoldItems.length
   };
   
@@ -176,7 +185,14 @@ const Dashboard = ({ items, categories }) => {
             <label className="block text-sm text-muted-foreground mb-1">Tarikh Akhir</label>
             <Input type="date" value={dateRange.endDate} onChange={(e) => setDateRange(prev => ({ ...prev, endDate: e.target.value }))} className="bg-white rounded-lg focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background" />
           </div>
-          <Button variant="secondary" onClick={() => setDateRange({ startDate: '', endDate: '' })} className="h-10">Lihat Semua</Button>
+          <Button 
+            variant="secondary" 
+            size="default"
+            onClick={() => setDateRange({ startDate: '', endDate: '' })} 
+            className="h-10 w-full md:w-auto"
+          >
+            Lihat Semua
+          </Button>
         </div>
       </div>
       
@@ -195,7 +211,7 @@ const Dashboard = ({ items, categories }) => {
           </div>
           {items.filter(i => i.status === 'terjual').length > 5 && (
             <div className="w-full sm:w-auto flex justify-start sm:justify-end">
-              <Button asChild variant="secondary" size="sm" className="whitespace-nowrap bg-foreground text-background hover:bg-foreground/90">
+              <Button asChild variant="secondary" size="default" className="h-10 gap-2 whitespace-nowrap bg-foreground text-background hover:bg-foreground/90">
                 <Link to="/sales">Lihat Semua</Link>
               </Button>
             </div>
@@ -215,7 +231,10 @@ const Dashboard = ({ items, categories }) => {
               <tbody>
                 {recentSales.length > 0 ? (
                   recentSales.map((item, index) => {
-                    const profit = (parseFloat(item.selling_price) - parseFloat(item.cost_price));
+                    const revenue = parseFloat(item.actual_sold_amount) || parseFloat(item.selling_price) || 0;
+                    const qty = item.invoice_quantity || 1;
+                    const costTotal = (parseFloat(item.cost_price) || 0) * qty;
+                    const profit = revenue - costTotal;
                     const isLoss = profit < 0;
                     return (
                       <tr key={item.id} className="border-t relative group overflow-hidden">
@@ -232,7 +251,7 @@ const Dashboard = ({ items, categories }) => {
                             RM {Math.abs(profit).toFixed(2)}
                           </div>
                         </td>
-                        <td className="p-4 text-right font-semibold text-foreground">RM{parseFloat(item.selling_price).toFixed(2)}</td>
+                        <td className="p-4 text-right font-semibold text-foreground">RM{(parseFloat(item.actual_sold_amount) || parseFloat(item.selling_price) || 0).toFixed(2)}</td>
                       </tr>
                     );
                   })

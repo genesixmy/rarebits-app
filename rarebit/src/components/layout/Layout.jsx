@@ -13,7 +13,7 @@ const Layout = ({ user, profile, onSignOut, onAddItem, children }) => {
         isSidebarOpen={isSidebarOpen} 
         setSidebarOpen={setSidebarOpen} 
       />
-      <main className="flex-1 flex flex-col min-w-0">
+      <main className="flex-1 flex flex-col min-w-0 overflow-x-hidden">
         <Header 
           user={user}
           profile={profile}
@@ -21,7 +21,7 @@ const Layout = ({ user, profile, onSignOut, onAddItem, children }) => {
           onAddItem={onAddItem}
           onSignOut={onSignOut}
         />
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
+        <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 sm:p-6 lg:p-8 max-w-full">
           {children}
         </div>
       </main>

@@ -13,6 +13,8 @@ import ClientsPage from '@/components/clients/ClientsPage';
 import ClientDetailPage from '@/components/clients/ClientDetailPage';
 import WalletPage from '@/components/wallet/WalletPage';
 import WalletAccountPage from '@/components/wallet/WalletAccountPage';
+import InvoiceListPage from '@/components/invoices/InvoiceListPage';
+import InvoiceFormPage from '@/components/invoices/InvoiceFormPage';
 import Layout from '@/components/layout/Layout';
 import { Loader2, Search } from 'lucide-react';
 import { Input } from '@/components/ui/input';
@@ -37,14 +39,18 @@ const fetchCategories = async (userId) => {
 };
 
 const fetchItems = async (userId) => {
+  console.log('[fetchItems] Fetching items for userId:', userId);
   const { data, error } = await supabase.from('items').select('*').eq('user_id', userId).order('created_at', { ascending: false });
   if (error) throw error;
+  console.log('[fetchItems] Fetched', data?.length || 0, 'items');
   return data;
 };
 
 const fetchClients = async (userId) => {
+  console.log('[fetchClients] Fetching clients for userId:', userId);
   const { data, error } = await supabase.from('clients').select('*, client_phones(*), client_addresses(*)').eq('user_id', userId).order('name', { ascending: true });
   if (error) throw error;
+  console.log('[fetchClients] Fetched', data?.length || 0, 'clients');
   return data;
 };
 
@@ -86,12 +92,16 @@ function App() {
     queryKey: ['items', user?.id],
     queryFn: () => fetchItems(user.id),
     enabled: !!user,
+    staleTime: 0, // Data is immediately stale, force refetch on invalidation
+    gcTime: 1000 * 60 * 10, // Keep in cache for 10 minutes after not used
   });
 
   const { data: clients = [], error: clientsError } = useQuery({
     queryKey: ['clients', user?.id],
     queryFn: () => fetchClients(user.id),
     enabled: !!user,
+    staleTime: 0, // Data is immediately stale, force refetch on invalidation
+    gcTime: 1000 * 60 * 10, // Keep in cache for 10 minutes after not used
   });
   
   const { data: wallets = [], error: walletsError } = useQuery({
@@ -107,6 +117,67 @@ function App() {
     if (clientsError) toast({ title: "Gagal memuatkan pelanggan", description: clientsError.message, variant: "destructive" });
     if (walletsError) toast({ title: "Gagal memuatkan wallet", description: walletsError.message, variant: "destructive" });
   }, [profileError, categoriesError, itemsError, clientsError, walletsError, toast]);
+
+  // Debug: Log when items change
+  useEffect(() => {
+    console.log('[App.jsx] Items updated:', items.length, 'items');
+    console.log('[App.jsx] Sold items:', items.filter(i => i.status === 'terjual').length);
+  }, [items]);
+
+  // Restore editing item on page load or tab recovery
+  useEffect(() => {
+    const restoreEditingState = () => {
+      try {
+        const savedEditingItemId = sessionStorage.getItem('rarebit_editing_item_id');
+        if (savedEditingItemId && items.length > 0) {
+          const itemToEdit = items.find(item => item.id === savedEditingItemId);
+          if (itemToEdit && !editingItem) { // Only restore if not already editing
+            console.log(`[App.jsx] Restored editing item: ${savedEditingItemId}`);
+            setEditingItem(itemToEdit);
+            setShowAddForm(true);
+          }
+        }
+      } catch (error) {
+        console.error('[App.jsx] Error restoring editing state:', error);
+      }
+    };
+
+    // Always try to restore when items are loaded
+    if (items.length > 0) {
+      restoreEditingState();
+    }
+
+    // Also restore when tab comes back into focus
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && items.length > 0) {
+        console.log('[App.jsx] Tab became visible, attempting restore');
+        // Add a small delay to let any closing effects complete first
+        setTimeout(restoreEditingState, 50);
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [items, editingItem]);
+
+  // Save editing item ID whenever editing state changes
+  useEffect(() => {
+    if (editingItem?.id) {
+      try {
+        sessionStorage.setItem('rarebit_editing_item_id', editingItem.id);
+        console.log(`[App.jsx] Saved editing item ID: ${editingItem.id}`);
+      } catch (error) {
+        console.error('[App.jsx] Error saving editing item ID:', error);
+      }
+    } else {
+      try {
+        sessionStorage.removeItem('rarebit_editing_item_id');
+        console.log('[App.jsx] Cleared editing item ID');
+      } catch (error) {
+        console.error('[App.jsx] Error clearing editing item ID:', error);
+      }
+    }
+  }, [editingItem]);
 
   // Auth state listener
   useEffect(() => {
@@ -311,7 +382,7 @@ function App() {
 
   const pageTitle = {
     '/': 'Papan Pemuka', '/inventory': 'Inventori', '/sales': 'Jualan',
-    '/clients': 'Pelanggan', '/wallet': 'Wallet', '/settings': 'Tetapan'
+    '/clients': 'Pelanggan', '/wallet': 'Wallet', '/invoices': 'Invois', '/settings': 'Tetapan'
   }[location.pathname] || 'Papan Pemuka';
 
   return (
@@ -348,6 +419,9 @@ function App() {
               <Route path="/clients/:id" element={<ClientDetailPage />} />
               <Route path="/wallet" element={<WalletPage />} />
               <Route path="/wallet/account/:accountId" element={<WalletAccountPage />} />
+              <Route path="/invoices" element={<InvoiceListPage />} />
+              <Route path="/invoices/create" element={<InvoiceFormPage />} />
+              <Route path="/invoices/:invoiceId" element={<InvoiceFormPage />} />
               <Route path="/settings" element={<SettingsPage user={user} categories={categories} onUpdateCategories={() => queryClient.invalidateQueries({ queryKey: ['categories', user.id] })} onUpdateProfile={() => queryClient.invalidateQueries({ queryKey: ['profile', user.id] })} />} />
             </Routes>
           </motion.div>
@@ -359,7 +433,15 @@ function App() {
           <AddItemForm 
             item={editingItem} 
             onSave={(data) => itemMutation.mutate({ itemData: data, originalStatus: editingItem?.status })}
-            onCancel={() => { setShowAddForm(false); setEditingItem(null); }} 
+            onCancel={() => { 
+              try {
+                sessionStorage.removeItem('rarebit_editing_item_id');
+              } catch (e) {
+                console.error('Error clearing sessionStorage:', e);
+              }
+              setShowAddForm(false); 
+              setEditingItem(null); 
+            }} 
             categories={categories}
             clients={clients}
             wallets={wallets.filter(w => w.account_type === 'Business')}

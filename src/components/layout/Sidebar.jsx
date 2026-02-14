@@ -2,7 +2,7 @@ import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { Home, Package, Receipt, Settings, Users, Wallet } from 'lucide-react';
+import { Home, Package, Receipt, Settings, Users, Wallet, FileText, Link2 } from 'lucide-react';
 
 const Sidebar = ({ isSidebarOpen, setSidebarOpen }) => {
   const location = useLocation();
@@ -13,8 +13,16 @@ const Sidebar = ({ isSidebarOpen, setSidebarOpen }) => {
 
   const navItems = [
     { path: '/', label: 'Papan Pemuka', icon: <Home className="w-5 h-5" /> },
-    { path: '/inventory', label: 'Inventori', icon: <Package className="w-5 h-5" /> },
+    {
+      path: '/inventory',
+      label: 'Inventori',
+      icon: <Package className="w-5 h-5" />,
+      children: [
+        { path: '/inventory/catalogs', label: 'Katalog', icon: <Link2 className="w-4 h-4" /> },
+      ],
+    },
     { path: '/sales', label: 'Jualan', icon: <Receipt className="w-5 h-5" /> },
+    { path: '/invoices', label: 'Invois', icon: <FileText className="w-5 h-5" /> },
     { path: '/clients', label: 'Pelanggan', icon: <Users className="w-5 h-5" /> },
     { path: '/wallet', label: 'Wallet', icon: <Wallet className="w-5 h-5" /> },
     { path: '/settings', label: 'Tetapan', icon: <Settings className="w-5 h-5" /> },
@@ -33,23 +41,48 @@ const Sidebar = ({ isSidebarOpen, setSidebarOpen }) => {
           </div>
           <nav className="flex-1 px-4 py-2 space-y-2">
             {navItems.map(item => (
-              <Button 
-                asChild 
-                key={item.path} 
-                variant="ghost" 
-                onClick={() => setSidebarOpen(false)} 
-                className={cn(
-                  "w-full justify-start gap-3 text-base h-12 rounded-lg",
-                  isActive(item.path) 
-                    ? "bg-primary/10 text-primary hover:bg-primary/10 font-semibold" 
-                    : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+              <div key={item.path} className="space-y-1">
+                <Button
+                  asChild
+                  variant="ghost"
+                  onClick={() => setSidebarOpen(false)}
+                  className={cn(
+                    "w-full justify-start gap-3 text-base h-12 rounded-lg",
+                    isActive(item.path)
+                      ? "bg-primary/10 text-primary hover:bg-primary/10 font-semibold"
+                      : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+                  )}
+                >
+                  <Link to={item.path}>
+                    {item.icon}
+                    {item.label}
+                  </Link>
+                </Button>
+
+                {Array.isArray(item.children) && item.children.length > 0 && (
+                  <div className="space-y-1 pl-7">
+                    {item.children.map((child) => (
+                      <Button
+                        asChild
+                        key={child.path}
+                        variant="ghost"
+                        onClick={() => setSidebarOpen(false)}
+                        className={cn(
+                          "h-10 w-full justify-start gap-2 rounded-lg text-sm",
+                          isActive(child.path)
+                            ? "bg-primary/10 text-primary hover:bg-primary/10 font-semibold"
+                            : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+                        )}
+                      >
+                        <Link to={child.path}>
+                          {child.icon}
+                          {child.label}
+                        </Link>
+                      </Button>
+                    ))}
+                  </div>
                 )}
-              >
-                <Link to={item.path}>
-                  {item.icon}
-                  {item.label}
-                </Link>
-              </Button>
+              </div>
             ))}
           </nav>
           <div className="p-4 text-center text-xs text-muted-foreground">

@@ -103,6 +103,8 @@ const WalletPage = () => {
     queryKey: ['wallets', user?.id],
     queryFn: () => fetchWallets(user.id),
     enabled: !!user,
+    staleTime: 0, // Consider data always stale so refetch updates display
+    gcTime: 1000 * 60 * 5, // Cache for 5 minutes
   });
 
   const { data: allTransactions = [], isLoading: isLoadingTransactions, isError: isTransactionsError, refetch: refetchTransactions, isRefetching: isRefetchingTransactions } = useQuery({
@@ -322,23 +324,70 @@ const WalletPage = () => {
 
   const transferFundsMutation = useMutation({
     mutationFn: async (transferData) => {
-      const { error } = await supabase.rpc('transfer_funds_between_wallets', {
+      console.log('[WalletPage] Starting transfer:', {
+        source: transferData.source_wallet_id,
+        destination: transferData.destination_wallet_id,
+        amount: transferData.amount,
+      });
+
+      const { data, error } = await supabase.rpc('transfer_funds_between_wallets', {
         p_user_id: user.id,
         p_source_wallet_id: transferData.source_wallet_id,
         p_destination_wallet_id: transferData.destination_wallet_id,
-        p_amount: transferData.amount,
+        p_amount: parseFloat(transferData.amount),
         p_transaction_date: transferData.transaction_date,
         p_description: transferData.description,
       });
-      if (error) throw error;
+
+      console.log('[WalletPage] Transfer RPC response:', { data, error });
+
+      if (error) {
+        console.error('[WalletPage] Transfer RPC error:', error);
+        throw error;
+      }
+
+      if (!data || data.length === 0) {
+        console.error('[WalletPage] No response from transfer function');
+        throw new Error('No response from server');
+      }
+
+      const response = data[0];
+      console.log('[WalletPage] Transfer result:', response);
+
+      // Log debug info if available
+      if (response.debug_info) {
+        console.log('[WalletPage] Debug info:', response.debug_info);
+      }
+
+      if (!response.success) {
+        const errorMsg = response.message || 'Transfer failed';
+        if (response.debug_info) {
+          console.error('[WalletPage] Transfer error with debug:', errorMsg, response.debug_info);
+        }
+        throw new Error(errorMsg);
+      }
+
+      return response;
     },
-    onSuccess: () => {
+    onSuccess: async (response) => {
+      console.log('[WalletPage] Transfer successful:', response);
+
+      // Invalidate queries to mark as stale
       queryClient.invalidateQueries({ queryKey: ['wallets', user.id] });
       queryClient.invalidateQueries({ queryKey: ['transactions', user.id, 'all'] });
-      toast({ title: "Pemindahan dana berjaya!" });
+
+      // Force immediate refetch to update UI
+      console.log('[WalletPage] Forcing refetch of wallets and transactions');
+      await Promise.all([
+        refetchWallets(),
+        refetchTransactions()
+      ]);
+
+      toast({ title: "Pemindahan dana berjaya!", description: response.message });
       setIsTransferModalOpen(false);
     },
     onError: (error) => {
+      console.error('[WalletPage] Transfer mutation error:', error);
       toast({ title: "Gagal memindahkan dana", description: error.message, variant: "destructive" });
     },
   });
@@ -577,7 +626,8 @@ const WalletPage = () => {
           <AlertDialogFooter>
             <AlertDialogCancel>Batal</AlertDialogCancel>
             <AlertDialogAction onClick={() => deleteTransactionMutation.mutate(deletingTransaction)} disabled={deleteTransactionMutation.isPending} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
-               {deletingTransaction?.type.startsWith('pemindahan') ? 'Padam Pemindahan' : (deleteTransactionMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Padam')}
+              {deleteTransactionMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
+              {deletingTransaction?.type.startsWith('pemindahan') ? 'Padam Pemindahan' : 'Padam'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

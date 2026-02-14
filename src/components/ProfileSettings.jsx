@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Loader2, Upload, Save } from 'lucide-react';
 import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar';
 import { useProfileForm } from '@/contexts/ProfileFormContext';
+import imageCompression from 'browser-image-compression';
 
 const ProfileSettings = ({ user, onUpdateProfile }) => {
   const { toast } = useToast();
@@ -115,10 +116,25 @@ const ProfileSettings = ({ user, onUpdateProfile }) => {
         throw new Error('Anda mesti memilih imej untuk dimuat naik.');
       }
       const file = event.target.files[0];
+      const originalSize = (file.size / 1024 / 1024).toFixed(2); // Convert to MB
+
+      // Compress avatar before uploading
+      const options = {
+        maxSizeMB: 0.3, // Max 300 KB for avatars
+        maxWidthOrHeight: 256, // Avatar is small
+        useWebWorker: true,
+        quality: 0.8,
+      };
+
+      const compressedFile = await imageCompression(file, options);
+      const compressedSize = (compressedFile.size / 1024 / 1024).toFixed(2); // Convert to MB
+
+      console.log(`[ProfileSettings] Avatar compressed: ${originalSize}MB → ${compressedSize}MB`);
+
       const fileExt = file.name.split('.').pop();
       const fileName = `${user.id}-${Date.now()}.${fileExt}`;
       const filePath = `${fileName}`;
-      
+
       if (formData.avatarUrl) {
         const oldFilePath = formData.avatarUrl.split('/avatars/')[1];
         if (oldFilePath) {
@@ -126,13 +142,13 @@ const ProfileSettings = ({ user, onUpdateProfile }) => {
         }
       }
 
-      const { error: uploadError } = await supabase.storage.from('avatars').upload(filePath, file);
+      const { error: uploadError } = await supabase.storage.from('avatars').upload(filePath, compressedFile);
       if (uploadError) throw uploadError;
-      
+
       const { data } = supabase.storage.from('avatars').getPublicUrl(filePath);
       const newAvatarUrl = data.publicUrl;
       updateFormField('avatarUrl', newAvatarUrl);
-      
+
       const { error: updateError } = await supabase.from('profiles').upsert({
         id: user.id,
         avatar_url: newAvatarUrl,
@@ -140,7 +156,10 @@ const ProfileSettings = ({ user, onUpdateProfile }) => {
       });
       if (updateError) throw updateError;
 
-      toast({ title: 'Avatar berjaya dikemaskini!' });
+      toast({
+        title: 'Avatar berjaya dikemaskini!',
+        description: `Dipadatkan: ${originalSize}MB → ${compressedSize}MB`
+      });
       if (onUpdateProfile) {
         onUpdateProfile();
       }

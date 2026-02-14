@@ -3,7 +3,6 @@ import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator, DropdownMenuLabel } from '@/components/ui/dropdown-menu';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Menu, Plus, LogOut } from 'lucide-react';
-import { ThemeToggle } from '@/components/ThemeToggle';
 
 const Header = ({ user, profile, onToggleSidebar, onAddItem, onSignOut }) => {
   return (
@@ -13,7 +12,6 @@ const Header = ({ user, profile, onToggleSidebar, onAddItem, onSignOut }) => {
       </Button>
       <div className="flex-grow" />
       <div className="flex items-center gap-4">
-        <ThemeToggle />
         <Button onClick={onAddItem} className="flex items-center gap-2 text-white brand-gradient brand-gradient-hover px-4 py-2 h-10">
           <Plus className="w-4 h-4" />
           <span className="hidden sm:inline font-semibold">Tambah Item</span>

@@ -1,12 +1,14 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { 
+import { Loader2,
   Package, 
   TrendingUp, 
+  TrendingDown,
   BarChart3,
   Calendar,
   Wallet,
@@ -17,6 +19,7 @@ import { useToast } from '@/components/ui/use-toast';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend, BarChart, Bar, XAxis, YAxis, CartesianGrid, AreaChart, Area } from 'recharts';
 import { cn } from '@/lib/utils';
 import { useTheme } from '@/contexts/ThemeProvider';
+import { supabase } from '@/lib/customSupabaseClient';
 
 const StatCard = ({ title, value, icon, subtext, delay, isHighlighted = false, chartData }) => {
   const { theme } = useTheme();
@@ -88,32 +91,189 @@ const Dashboard = ({ items, categories }) => {
   const { toast } = useToast();
   const { theme } = useTheme();
   const [dateRange, setDateRange] = useState(getInitialDateRange());
-  
-  const getFilteredItems = () => {
-    if (dateRange.startDate && dateRange.endDate) {
-      const start = new Date(dateRange.startDate);
-      const end = new Date(dateRange.endDate);
-      end.setHours(23, 59, 59, 999);
+  const [userId, setUserId] = useState(null);
 
-      return items.filter(item => {
-        if (item.status === 'terjual' && item.date_sold) {
-          const soldDate = new Date(item.date_sold);
-          return soldDate >= start && soldDate <= end;
-        }
-        return false;
-      });
+  // Get current user ID
+  useEffect(() => {
+    const getUser = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      setUserId(user?.id);
+    };
+    getUser();
+  }, []);
+
+  // Fetch invoice items (all sales records) instead of items table
+  const { data: invoiceItems = [], isLoading: isLoadingSales } = useQuery({
+    queryKey: ['dashboard-sales', userId],
+    queryFn: async () => {
+      if (!userId) return [];
+      
+      const { data, error } = await supabase
+        .from('invoice_items')
+        .select(`
+          id,
+          item_id,
+          quantity,
+          unit_price,
+          line_total,
+          is_manual,
+          item_name,
+          items(id, name, cost_price, category, user_id),
+          invoices(id, invoice_date, status, platform, user_id, created_at, updated_at)
+        `);
+
+      if (error) {
+        console.error('[Dashboard] Error fetching invoice items:', error);
+        return [];
+      }
+
+      // Filter to only current user's invoices with paid status
+      return (data || []).filter(invItem => 
+        invItem.invoices && 
+        invItem.invoices.user_id === userId &&
+        invItem.invoices.status === 'paid'
+      );
+    },
+    enabled: !!userId
+  });
+
+  // Fetch Business wallet IDs
+  const { data: businessWallets = [] } = useQuery({
+    queryKey: ['business-wallets', userId],
+    queryFn: async () => {
+      if (!userId) return [];
+      
+      const { data, error } = await supabase
+        .from('wallets')
+        .select('id')
+        .eq('user_id', userId)
+        .eq('account_type', 'Business');
+      
+      if (error) {
+        console.error('[Dashboard] Error fetching business wallets:', error);
+        return [];
+      }
+      return data || [];
+    },
+    enabled: !!userId
+  });
+
+  const businessWalletIds = businessWallets.map(w => w.id);
+
+  // Fetch Business expenses only
+  const { data: businessExpenses = 0 } = useQuery({
+    queryKey: ['dashboard-expenses', userId, businessWalletIds.length, dateRange.startDate, dateRange.endDate],
+    queryFn: async () => {
+      console.log('[Dashboard] Expenses query executing:', { userId, walletCount: businessWalletIds.length, startDate: dateRange.startDate, endDate: dateRange.endDate });
+      
+      if (!userId || businessWalletIds.length === 0) return 0;
+      
+      // Adjust end date to include full day - use full ISO timestamp format
+      const endDate = new Date(dateRange.endDate);
+      endDate.setHours(23, 59, 59, 999);
+      const endDateISO = endDate.toISOString();
+      
+      const { data, error } = await supabase
+        .from('transactions')
+        .select('amount')
+        .eq('user_id', userId)
+        .eq('type', 'perbelanjaan')
+        .in('wallet_id', businessWalletIds)
+        .gte('transaction_date', dateRange.startDate)
+        .lte('transaction_date', endDateISO);
+      
+      if (error) {
+        console.error('[Dashboard] Error fetching expenses:', error);
+        return 0;
+      }
+      
+      const total = (data || []).reduce((sum, tx) => sum + (parseFloat(tx.amount) || 0), 0);
+      console.log('[Dashboard] Expenses fetched:', { count: data?.length || 0, total, data });
+      return total;
+    },
+    enabled: !!userId && businessWalletIds.length > 0 && !!dateRange.startDate && !!dateRange.endDate
+  });
+
+  // Fetch refunds (implicitly Business-only since refunds come from invoices)
+  // RLS policies handle user filtering automatically - no need for explicit user_id check
+  const { data: totalRefunds = 0 } = useQuery({
+    queryKey: ['dashboard-refunds', userId, dateRange.startDate, dateRange.endDate],
+    queryFn: async () => {
+      console.log('[Dashboard] Refunds query executing:', { userId, startDate: dateRange.startDate, endDate: dateRange.endDate });
+      
+      if (!userId) return 0;
+      
+      // Adjust end date to include full day - use full ISO timestamp format
+      const endDate = new Date(dateRange.endDate);
+      endDate.setHours(23, 59, 59, 999);
+      const endDateISO = endDate.toISOString();
+      
+      const { data, error } = await supabase
+        .from('refunds')
+        .select('amount')
+        // RLS security: user can only see refunds from their own invoices
+        .gte('created_at', dateRange.startDate)
+        .lte('created_at', endDateISO);
+      
+      if (error) {
+        console.error('[Dashboard] Error fetching refunds:', error);
+        return 0;
+      }
+      
+      const total = (data || []).reduce((sum, ref) => sum + (parseFloat(ref.amount) || 0), 0);
+      console.log('[Dashboard] Refunds fetched:', { count: data?.length || 0, total, data });
+      return total;
+    },
+    enabled: !!userId && !!dateRange.startDate && !!dateRange.endDate
+  });
+
+  // Filter by date range
+  const getFilteredSales = () => {
+    if (!dateRange.startDate || !dateRange.endDate) {
+      return invoiceItems;
     }
-    return items.filter(item => item.status === 'terjual');
+
+    const start = new Date(dateRange.startDate);
+    const end = new Date(dateRange.endDate);
+    end.setHours(23, 59, 59, 999);
+
+    return invoiceItems.filter(sale => {
+      if (sale.invoices?.invoice_date) {
+        const saleDate = new Date(sale.invoices.invoice_date);
+        return saleDate >= start && saleDate <= end;
+      }
+      return false;
+    });
   };
-  
-  const filteredSoldItems = getFilteredItems();
+
+  const filteredSales = getFilteredSales();
+
+  // Calculate stats from invoice_items
+  const totalCost = filteredSales.reduce((sum, sale) => {
+    const costPrice = parseFloat(sale.items?.cost_price) || 0;
+    const cost = costPrice * (sale.quantity || 1);
+    return sum + cost;
+  }, 0);
 
   const filteredStats = {
-    totalRevenue: filteredSoldItems.reduce((sum, item) => sum + (parseFloat(item.selling_price) || 0), 0),
-    totalProfit: filteredSoldItems.reduce((sum, item) => sum + ((parseFloat(item.selling_price) || 0) - (parseFloat(item.cost_price) || 0)), 0),
-    soldItemsCount: filteredSoldItems.length
+    totalRevenue: filteredSales.reduce((sum, sale) => {
+      return sum + (parseFloat(sale.line_total) || 0);
+    }, 0),
+    totalCost: totalCost,
+    totalExpenses: parseFloat(businessExpenses) || 0,
+    totalRefunds: parseFloat(totalRefunds) || 0,
+    totalProfit: filteredSales.reduce((sum, sale) => {
+      const revenue = parseFloat(sale.line_total) || 0;
+      const costPrice = parseFloat(sale.items?.cost_price) || 0;
+      const cost = costPrice * (sale.quantity || 1);
+      return sum + (revenue - cost);
+    }, 0) - (parseFloat(businessExpenses) || 0) - (parseFloat(totalRefunds) || 0),
+    soldItemsCount: filteredSales.length,
+    totalQuantitySold: filteredSales.reduce((sum, sale) => {
+      return sum + (sale.quantity || 0);
+    }, 0)
   };
-  
+
   const profitMargin = filteredStats.totalRevenue > 0 ? ((filteredStats.totalProfit / filteredStats.totalRevenue) * 100).toFixed(1) : 0;
 
   const globalStats = {
@@ -122,17 +282,24 @@ const Dashboard = ({ items, categories }) => {
     soldItems: items.filter(item => item.status === 'terjual').length,
   };
 
-  const categoryStats = filteredSoldItems.reduce((acc, item) => {
-    acc[item.category] = (acc[item.category] || 0) + 1;
+  const categoryStats = filteredSales.reduce((acc, sale) => {
+    const category = sale.is_manual ? 'Manual' : (sale.items?.category || 'Lain-lain');
+    acc[category] = (acc[category] || 0) + 1;
     return acc;
   }, {});
 
-  const platformStats = filteredSoldItems.reduce((acc, item) => {
-    (item.sold_platforms || []).forEach(platform => {
-      acc[platform] = (acc[platform] || 0) + 1;
-    });
+  // Calculate platform stats from invoice platform field
+  const platformStats = filteredSales.reduce((acc, sale) => {
+    const platform = sale.invoices?.platform || 'Manual';
+    acc[platform] = (acc[platform] || 0) + 1;
     return acc;
   }, {});
+
+  console.log('[Dashboard] Platform stats calculated:', { 
+    filteredSalesCount: filteredSales.length, 
+    platformStats,
+    platformBarData: Object.entries(platformStats).map(([name, value]) => ({ name, jumlah: value }))
+  });
 
   const categoryPieData = Object.entries(categoryStats).map(([name, value]) => ({ name, value }));
   const platformBarData = Object.entries(platformStats).map(([name, value]) => ({ name, jumlah: value }));
@@ -144,9 +311,12 @@ const Dashboard = ({ items, categories }) => {
   
   const defaultColors = ['#3b82f6', '#10b981', '#f97316', '#a855f7', '#ef4444', '#6366f1', '#f43f5e'];
 
-  const recentSales = items
-    .filter(item => item.status === 'terjual' && item.date_sold)
-    .sort((a, b) => new Date(b.date_sold) - new Date(a.date_sold))
+  const recentSales = filteredSales
+    .sort((a, b) => {
+      const aTime = a.invoices?.updated_at || a.invoices?.created_at || a.invoices?.invoice_date || 0;
+      const bTime = b.invoices?.updated_at || b.invoices?.created_at || b.invoices?.invoice_date || 0;
+      return new Date(bTime) - new Date(aTime);
+    })
     .slice(0, 5);
 
   const isDark = theme === 'dark';
@@ -165,26 +335,54 @@ const Dashboard = ({ items, categories }) => {
     <div className="space-y-6">
       <h1 className="page-title">Papan Pemuka</h1>
       
-      <div className="px-6 py-4 bg-background rounded-2xl shadow-sm">
-        <h2 className="text-lg font-semibold leading-none tracking-tight mb-4">Tapis Tarikh Jualan</h2>
-        <div className="flex flex-col md:flex-row md:items-end gap-4">
-          <div className="flex-1">
-            <label className="block text-sm text-muted-foreground mb-1">Tarikh Mula</label>
-            <Input type="date" value={dateRange.startDate} onChange={(e) => setDateRange(prev => ({ ...prev, startDate: e.target.value }))} className="bg-white rounded-lg focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background" />
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg font-semibold">Tapis Tarikh Jualan</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="flex flex-col sm:flex-row gap-4 w-full">
+            <div className="flex-1">
+              <label className="block text-xs font-medium text-muted-foreground mb-2">Tarikh Mula</label>
+              <Input 
+                type="date" 
+                value={dateRange.startDate} 
+                onChange={(e) => setDateRange(prev => ({ ...prev, startDate: e.target.value }))} 
+                className="w-full h-10"
+              />
+            </div>
+            <div className="flex-1">
+              <label className="block text-xs font-medium text-muted-foreground mb-2">Tarikh Akhir</label>
+              <Input 
+                type="date" 
+                value={dateRange.endDate} 
+                onChange={(e) => setDateRange(prev => ({ ...prev, endDate: e.target.value }))} 
+                className="w-full h-10"
+              />
+            </div>
+            <div className="flex items-end">
+              <Button 
+                variant="outline"
+                size="default"
+                onClick={() => setDateRange(getInitialDateRange())} 
+                className="whitespace-nowrap w-full sm:w-auto h-10"
+              >
+                Tetapkan Semula
+              </Button>
+            </div>
           </div>
-          <div className="flex-1">
-            <label className="block text-sm text-muted-foreground mb-1">Tarikh Akhir</label>
-            <Input type="date" value={dateRange.endDate} onChange={(e) => setDateRange(prev => ({ ...prev, endDate: e.target.value }))} className="bg-white rounded-lg focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background" />
-          </div>
-          <Button variant="secondary" onClick={() => setDateRange({ startDate: '', endDate: '' })} className="h-10">Lihat Semua</Button>
-        </div>
-      </div>
+        </CardContent>
+      </Card>
       
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <StatCard title="Jumlah Item" value={globalStats.totalItems} icon={<Package />} subtext={`${globalStats.availableItems} tersedia`} delay={0.2} chartData={dummyChartData} />
-        <StatCard title="Item Terjual" value={filteredStats.soldItemsCount} icon={<CheckCircle />} subtext={`${globalStats.totalItems > 0 ? ((globalStats.soldItems / globalStats.totalItems) * 100).toFixed(1) : 0}% terjual`} delay={0.3} chartData={dummyChartData.slice().reverse()} />
+        <StatCard title="Kuantiti Terjual" value={filteredStats.totalQuantitySold} icon={<CheckCircle />} subtext={`Daripada ${filteredStats.soldItemsCount} item`} delay={0.3} chartData={dummyChartData.slice().reverse()} />
         <StatCard title="Jumlah Hasil" value={`RM ${filteredStats.totalRevenue.toFixed(2)}`} icon={<Wallet />} subtext={`Daripada ${filteredStats.soldItemsCount} jualan`} delay={0.4} chartData={dummyChartData} />
-        <StatCard title="Jumlah Keuntungan" value={`RM ${filteredStats.totalProfit.toFixed(2)}`} icon={<TrendingUp />} subtext={`${profitMargin}% margin`} delay={0.5} isHighlighted={true} chartData={dummyChartData.slice().reverse()} />
+        <StatCard title="Jumlah Perbelanjaan" value={`RM ${filteredStats.totalExpenses.toFixed(2)}`} icon={<TrendingDown />} subtext="Perbelanjaan perniagaan" delay={0.45} chartData={dummyChartData} />
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <StatCard title="Jumlah Pemulangan" value={`RM ${filteredStats.totalRefunds.toFixed(2)}`} icon={<TrendingDown />} subtext="Dana yang dikembalikan" delay={0.47} chartData={dummyChartData} />
+        <StatCard title="Keuntungan Bersih" value={`RM ${filteredStats.totalProfit.toFixed(2)}`} icon={<TrendingUp />} subtext={`${profitMargin}% margin`} delay={0.5} isHighlighted={true} chartData={dummyChartData.slice().reverse()} />
       </div>
 
       <Card>
@@ -193,9 +391,9 @@ const Dashboard = ({ items, categories }) => {
             <CardTitle className="text-lg font-semibold">Jualan Terkini</CardTitle>
             <p className="text-sm text-muted-foreground">Senarai Jualan Semua Platform</p>
           </div>
-          {items.filter(i => i.status === 'terjual').length > 5 && (
+          {filteredSales.length > 5 && (
             <div className="w-full sm:w-auto flex justify-start sm:justify-end">
-              <Button asChild variant="secondary" size="sm" className="whitespace-nowrap bg-foreground text-background hover:bg-foreground/90">
+              <Button asChild variant="secondary" size="default" className="h-10 gap-2 whitespace-nowrap bg-foreground text-background hover:bg-foreground/90">
                 <Link to="/sales">Lihat Semua</Link>
               </Button>
             </div>
@@ -213,26 +411,36 @@ const Dashboard = ({ items, categories }) => {
                 </tr>
               </thead>
               <tbody>
-                {recentSales.length > 0 ? (
-                  recentSales.map((item, index) => {
-                    const profit = (parseFloat(item.selling_price) - parseFloat(item.cost_price));
+                {isLoadingSales ? (
+                  <tr>
+                    <td colSpan="4" className="text-center py-8">
+                      <Loader2 className="w-6 h-6 animate-spin mx-auto" />
+                    </td>
+                  </tr>
+                ) : recentSales.length > 0 ? (
+                  recentSales.map((sale, index) => {
+                    const quantity = sale.quantity || 1;
+                    const costPrice = parseFloat(sale.items?.cost_price) || 0;
+                    const totalCost = costPrice * quantity;
+                    const totalRevenue = parseFloat(sale.line_total) || 0;
+                    const profit = totalRevenue - totalCost;
                     const isLoss = profit < 0;
                     return (
-                      <tr key={item.id} className="border-t relative group overflow-hidden">
+                      <tr key={`${sale.id}-${index}`} className="border-t relative group overflow-hidden">
                         <td className="p-4 font-semibold text-foreground flex items-center gap-3">
                           <div className="absolute left-0 top-0 h-full w-1 bg-primary scale-y-0 group-hover:scale-y-100 transition-transform origin-center duration-300" />
                           <div className="transition-transform duration-300 group-hover:translate-x-2">
-                            {item.name}
+                            {sale.is_manual ? (sale.item_name || 'Item Manual') : (sale.items?.name || 'Item Tidak Dikenali')}
                           </div>
                         </td>
-                        <td className="p-4 text-muted-foreground">{new Date(item.date_sold).toLocaleDateString()}</td>
+                        <td className="p-4 text-muted-foreground">{new Date(sale.invoices?.invoice_date || new Date()).toLocaleDateString()}</td>
                         <td className="p-4">
                           <div className={cn("inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium", isLoss ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700")}>
                             {isLoss ? <XCircle className="w-3 h-3" /> : <CheckCircle className="w-3 h-3" />}
                             RM {Math.abs(profit).toFixed(2)}
                           </div>
                         </td>
-                        <td className="p-4 text-right font-semibold text-foreground">RM{parseFloat(item.selling_price).toFixed(2)}</td>
+                        <td className="p-4 text-right font-semibold text-foreground">RM{totalRevenue.toFixed(2)}</td>
                       </tr>
                     );
                   })

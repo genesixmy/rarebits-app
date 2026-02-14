@@ -20,13 +20,51 @@ const fetchClientDetails = async (clientId) => {
     .single();
   if (clientError) throw clientError;
 
-  const { data: items, error: itemsError } = await supabase
-    .from('items')
-    .select('*')
-    .eq('client_id', clientId)
-    .eq('status', 'terjual')
-    .order('date_sold', { ascending: false });
-  if (itemsError) throw itemsError;
+  const { data: invoiceItems, error: invoiceItemsError } = await supabase
+    .from('invoice_items')
+    .select(`
+      id,
+      item_id,
+      item_name,
+      is_manual,
+      quantity,
+      unit_price,
+      line_total,
+      item:items(id, name, cost_price, category),
+      invoice:invoices(id, invoice_date, status, platform, client_id, user_id)
+    `)
+    .order('created_at', { ascending: false });
+
+  if (invoiceItemsError) throw invoiceItemsError;
+
+  const items = (invoiceItems || [])
+    .filter(invItem =>
+      invItem.invoice?.client_id === clientId &&
+      invItem.invoice?.status === 'paid'
+    )
+    .map(invItem => {
+      const quantity = parseInt(invItem.quantity, 10) || 1;
+      const unitPrice = parseFloat(invItem.unit_price) || 0;
+      const lineTotal = parseFloat(invItem.line_total);
+      const totalRevenue = Number.isFinite(lineTotal) ? lineTotal : unitPrice * quantity;
+      const unitCost = parseFloat(invItem.item?.cost_price) || 0;
+      const totalCost = unitCost * quantity;
+
+      const isManual = invItem.is_manual || !invItem.item_id;
+      const name = isManual ? (invItem.item_name || 'Item Manual') : (invItem.item?.name || 'Item');
+      const category = isManual ? 'Manual' : (invItem.item?.category || 'Lain-lain');
+
+      return {
+        id: invItem.id,
+        name,
+        category,
+        cost_price: totalCost,
+        selling_price: totalRevenue,
+        sold_platforms: invItem.invoice?.platform ? [invItem.invoice.platform] : [],
+        date_sold: invItem.invoice?.invoice_date,
+      };
+    })
+    .sort((a, b) => new Date(b.date_sold || 0) - new Date(a.date_sold || 0));
 
   return { ...client, items };
 };
