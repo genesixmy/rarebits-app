@@ -4,11 +4,22 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Trash2, Tag, Wallet, FileText, X } from 'lucide-react';
+import { Trash2, Tag, Wallet, FileText, X, Star, Loader2 } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
 import { cn, formatCurrency } from '@/lib/utils';
 
-const ItemCard = ({ item, onEdit, onDelete, index, isSelected, onSelectChange, categories = [], clients = [] }) => {
+const ItemCard = ({
+  item,
+  onEdit,
+  onDelete,
+  onToggleFavorite,
+  isFavoriteUpdating = false,
+  index,
+  isSelected,
+  onSelectChange,
+  categories = [],
+  clients = []
+}) => {
   const navigate = useNavigate();
   const { toast } = useToast();
 
@@ -73,6 +84,7 @@ const ItemCard = ({ item, onEdit, onDelete, index, isSelected, onSelectChange, c
       })
     : [];
   const coverImageUrl = item.image_url || sortedMedia.find((media) => media.is_cover)?.url || sortedMedia[0]?.url || '';
+  const isFavorite = Boolean(item.is_favorite);
   
   // Format prices - ensure no extra decimals or hidden characters
   const costPriceDisplay = formatCurrency(item.cost_price);
@@ -88,6 +100,12 @@ const ItemCard = ({ item, onEdit, onDelete, index, isSelected, onSelectChange, c
   const handleCheckboxClick = (e) => {
     e.stopPropagation();
     onSelectChange(item.id);
+  };
+
+  const handleToggleFavorite = (e) => {
+    e.stopPropagation();
+    if (!onToggleFavorite || isFavoriteUpdating) return;
+    onToggleFavorite(item);
   };
 
   return (
@@ -133,9 +151,26 @@ const ItemCard = ({ item, onEdit, onDelete, index, isSelected, onSelectChange, c
             <h3 className="font-semibold text-md text-foreground line-clamp-2 flex-1">
               {item.name}
             </h3>
-            <span className={cn('status-badge ml-2', statusClasses[item.status] || 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200')}>
-              {item.status}
-            </span>
+            <div className="ml-2 flex items-center gap-1">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                onClick={handleToggleFavorite}
+                title={isFavorite ? 'Buang dari kegemaran' : 'Tandakan sebagai kegemaran'}
+                disabled={isFavoriteUpdating}
+              >
+                {isFavoriteUpdating ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Star className={cn('h-4 w-4', isFavorite ? 'fill-amber-400 text-amber-500' : 'text-muted-foreground')} />
+                )}
+              </Button>
+              <span className={cn('status-badge', statusClasses[item.status] || 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200')}>
+                {item.status}
+              </span>
+            </div>
           </div>
 
           <div className="space-y-2 text-sm text-muted-foreground flex-1">
@@ -195,7 +230,16 @@ const ItemCard = ({ item, onEdit, onDelete, index, isSelected, onSelectChange, c
   );
 };
 
-const ItemList = ({ items, onEdit, onDelete, onBulkDelete, categories = [], clients = [] }) => {
+const ItemList = ({
+  items,
+  onEdit,
+  onDelete,
+  onBulkDelete,
+  onToggleFavorite,
+  favoriteUpdatingIds = new Set(),
+  categories = [],
+  clients = []
+}) => {
   const [selectedItems, setSelectedItems] = useState(new Set());
 
   if (items.length === 0) {
@@ -304,6 +348,8 @@ const ItemList = ({ items, onEdit, onDelete, onBulkDelete, categories = [], clie
               item={item}
               onEdit={onEdit}
               onDelete={onDelete}
+              onToggleFavorite={onToggleFavorite}
+              isFavoriteUpdating={favoriteUpdatingIds.has(item.id)}
               index={index}
               isSelected={selectedItems.has(item.id)}
               onSelectChange={handleSelectItem}

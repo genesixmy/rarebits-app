@@ -4,6 +4,14 @@ import { TrendingUp, TrendingDown, MoreVertical, Edit, Trash2, ArrowRightLeft, A
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import {
+  TRANSACTION_CLASSIFICATIONS,
+  classificationBadgeClass,
+  classificationLabel,
+  getTransactionDirection,
+  isTransferLegacyType,
+  resolveTransactionClassification,
+} from './transactionClassification';
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -11,11 +19,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 const TransactionList = ({ transactions, wallets, onEdit, onDelete }) => {
-  const getWalletName = (walletId) => {
-    const wallet = wallets.find(w => w.id === walletId);
-    return wallet ? wallet.name : 'Akaun Dipadam';
-  };
-
   return (
     <Card className="h-full">
       <CardHeader>
@@ -24,108 +27,103 @@ const TransactionList = ({ transactions, wallets, onEdit, onDelete }) => {
       <CardContent>
         {transactions.length > 0 ? (
           <ul className="space-y-2">
-            {transactions.map(tx => {
-              const isSale = tx.type === 'jualan';
-              const isInvoicePayment = tx.type === 'pembayaran_invois';
-              const isManualItem = tx.type === 'item_manual';
-              const isExpense = tx.type === 'perbelanjaan';
-              const isTransferOut = tx.type === 'pemindahan_keluar';
-              const isTransferIn = tx.type === 'pemindahan_masuk';
-              const isAdjustment = tx.type === 'pelarasan_manual_tambah' || tx.type === 'pelarasan_manual_kurang';
-
-              let icon, colorClass, title, subtitle, amountPrefix, amountClass, isEditable = true, isDeletable = true;
+            {transactions.map((tx) => {
+              const classification = resolveTransactionClassification(tx);
+              const direction = getTransactionDirection(tx);
+              const isSale = classification === TRANSACTION_CLASSIFICATIONS.SALE;
+              const isExpense = classification === TRANSACTION_CLASSIFICATIONS.EXPENSE;
+              const isTopup = classification === TRANSACTION_CLASSIFICATIONS.TOPUP;
+              const isTransferOut = classification === TRANSACTION_CLASSIFICATIONS.TRANSFER_OUT;
+              const isTransferIn = classification === TRANSACTION_CLASSIFICATIONS.TRANSFER_IN;
+              const isAdjustment = classification === TRANSACTION_CLASSIFICATIONS.ADJUSTMENT;
               const isRefund = tx.type === 'refund';
+              const isLegacyInvoicePayment = tx.type === 'pembayaran_invois';
+              const isLegacyManualSale = tx.type === 'item_manual';
+
+              const amountPrefix = direction < 0 ? '-' : '+';
+              const amountClass = direction < 0 ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400';
+
+              let icon;
+              let colorClass;
+              let title;
+              let subtitle = tx.wallets?.name || 'Akaun Dipadam';
+              let isEditable = true;
+              let isDeletable = true;
 
               if (isSale) {
-                icon = <TrendingUp className="w-5 h-5 text-green-600 dark:text-green-400" />;
-                colorClass = 'bg-green-100 dark:bg-green-900/50';
-                title = tx.description || 'Jualan';
-                subtitle = tx.wallets?.name || 'Akaun Dipadam';
-                amountPrefix = '+';
-                amountClass = 'text-green-600 dark:text-green-400';
-              } else if (isInvoicePayment) {
                 icon = <TrendingUp className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />;
                 colorClass = 'bg-emerald-100 dark:bg-emerald-900/50';
-                title = tx.description || 'Pembayaran Invois';
-                subtitle = tx.wallets?.name || 'Akaun Dipadam';
-                amountPrefix = '+';
-                amountClass = 'text-emerald-600 dark:text-emerald-400';
+                title = tx.description || 'Jualan';
                 isEditable = false;
-                isDeletable = true;
-              } else if (isManualItem) {
-                icon = <TrendingUp className="w-5 h-5 text-purple-600 dark:text-purple-400" />;
-                colorClass = 'bg-purple-100 dark:bg-purple-900/50';
-                title = tx.description || 'Item Manual';
-                subtitle = tx.wallets?.name || 'Akaun Dipadam';
-                amountPrefix = '+';
-                amountClass = 'text-purple-600 dark:text-purple-400';
-                isEditable = false;
-                isDeletable = true;
               } else if (isExpense) {
                 icon = <TrendingDown className="w-5 h-5 text-red-600 dark:text-red-400" />;
                 colorClass = 'bg-red-100 dark:bg-red-900/50';
-                // Use description if it's a reversal, otherwise use category
                 title = (tx.description && tx.description.startsWith('Pembalikan'))
                   ? tx.description
-                  : (tx.category || 'Perbelanjaan');
-                subtitle = tx.wallets?.name || 'Akaun Dipadam';
-                amountPrefix = '-';
-                amountClass = 'text-red-600 dark:text-red-400';
+                  : (tx.category || tx.description || 'Perbelanjaan');
               } else if (isTransferOut) {
                 icon = <ArrowRight className="w-5 h-5 text-orange-600 dark:text-orange-400" />;
                 colorClass = 'bg-orange-100 dark:bg-orange-900/50';
-                title = tx.category || 'Pemindahan Keluar';
-                subtitle = tx.wallets?.name || 'Akaun Dipadam';
-                amountPrefix = '-';
-                amountClass = 'text-orange-600 dark:text-orange-400';
+                title = tx.category || tx.description || 'Pemindahan Keluar';
                 isEditable = false;
               } else if (isTransferIn) {
-                 icon = <ArrowLeft className="w-5 h-5 text-blue-600 dark:text-blue-400" />;
+                icon = <ArrowLeft className="w-5 h-5 text-blue-600 dark:text-blue-400" />;
                 colorClass = 'bg-blue-100 dark:bg-blue-900/50';
-                title = tx.category || 'Pemindahan Masuk';
-                subtitle = tx.wallets?.name || 'Akaun Dipadam';
-                amountPrefix = '+';
-                amountClass = 'text-blue-600 dark:text-blue-400';
+                title = tx.category || tx.description || 'Pemindahan Masuk';
                 isEditable = false;
+              } else if (isTopup) {
+                icon = <TrendingUp className="w-5 h-5 text-teal-600 dark:text-teal-400" />;
+                colorClass = 'bg-teal-100 dark:bg-teal-900/50';
+                title = tx.description || tx.category || 'Tambah Modal';
               } else if (isAdjustment) {
-                 icon = <Settings2 className="w-5 h-5 text-slate-600 dark:text-slate-400" />;
+                icon = <Settings2 className="w-5 h-5 text-slate-600 dark:text-slate-400" />;
                 colorClass = 'bg-slate-100 dark:bg-slate-900/50';
-                title = tx.description || 'Pelarasan Baki';
-                subtitle = tx.wallets?.name || 'Akaun Dipadam';
-                amountPrefix = tx.type === 'pelarasan_manual_tambah' ? '+' : '-';
-                amountClass = tx.type === 'pelarasan_manual_tambah' ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400';
+                title = tx.description || tx.category || 'Pelarasan Baki';
                 isEditable = false;
-                isDeletable = true;
-              } else if (isRefund) {
-                icon = <TrendingDown className="w-5 h-5 text-red-600 dark:text-red-400" />;
-                colorClass = 'bg-red-100 dark:bg-red-900/50';
-                title = tx.description || 'Pemulangan Dana';
-                subtitle = tx.wallets?.name || 'Akaun Dipadam';
-                amountPrefix = '-';
-                amountClass = 'text-red-600 dark:text-red-400';
-                isEditable = false;
-                isDeletable = false;
+              } else {
+                icon = <ArrowRightLeft className="w-5 h-5 text-slate-600 dark:text-slate-400" />;
+                colorClass = 'bg-slate-100 dark:bg-slate-900/50';
+                title = tx.description || 'Transaksi';
               }
 
+              if (isLegacyInvoicePayment || isLegacyManualSale || isTransferLegacyType(tx.type)) {
+                isEditable = false;
+              }
+
+              if (isRefund) {
+                isEditable = false;
+                isDeletable = false;
+                title = tx.description || 'Pemulangan Dana';
+              }
+
+              const typeBadgeLabel = classificationLabel(classification);
+              const typeBadgeClass = classificationBadgeClass(classification);
 
               return (
-                <li key={tx.id} className="flex items-center justify-between p-2 rounded-lg hover:bg-muted/50">
-                  <div className="flex items-center gap-3 flex-1 min-w-0">
-                    <div className={cn("p-2 rounded-full", colorClass)}>
+                <li key={tx.id} className="flex items-center justify-between rounded-lg p-2 hover:bg-muted/50">
+                  <div className="flex min-w-0 flex-1 items-center gap-3">
+                    <div className={cn("rounded-full p-2", colorClass)}>
                       {icon}
                     </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="font-semibold truncate">{title}</p>
-                      <p className="text-sm text-muted-foreground truncate">{new Date(tx.transaction_date).toLocaleDateString()} • {subtitle}</p>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <p className="truncate font-semibold">{title}</p>
+                        <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium", typeBadgeClass)}>
+                          {typeBadgeLabel}
+                        </span>
+                      </div>
+                      <p className="truncate text-sm text-muted-foreground">
+                        {new Date(tx.transaction_date).toLocaleDateString()} - {subtitle}
+                      </p>
                     </div>
                   </div>
                   <div className="flex items-center gap-2 pl-2">
-                    <p className={cn("font-bold text-right", amountClass)}>
-                      {amountPrefix}RM {parseFloat(tx.amount).toFixed(2)}
+                    <p className={cn("text-right font-bold", amountClass)}>
+                      {amountPrefix}RM {Math.abs(parseFloat(tx.amount) || 0).toFixed(2)}
                     </p>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" size="icon" className="h-8 w-8 flex-shrink-0">
+                        <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0">
                           <MoreVertical className="h-4 w-4" />
                         </Button>
                       </DropdownMenuTrigger>
@@ -136,7 +134,7 @@ const TransactionList = ({ transactions, wallets, onEdit, onDelete }) => {
                           </DropdownMenuItem>
                         )}
                         {isDeletable && (
-                          <DropdownMenuItem onClick={() => onDelete(tx)} className="text-destructive focus:text-destructive focus:bg-destructive/10">
+                          <DropdownMenuItem onClick={() => onDelete(tx)} className="text-destructive focus:bg-destructive/10 focus:text-destructive">
                             <Trash2 className="mr-2 h-4 w-4" /> Padam
                           </DropdownMenuItem>
                         )}
@@ -148,7 +146,7 @@ const TransactionList = ({ transactions, wallets, onEdit, onDelete }) => {
             })}
           </ul>
         ) : (
-          <div className="text-center py-8">
+          <div className="py-8 text-center">
             <ArrowRightLeft className="mx-auto h-12 w-12 text-muted-foreground" />
             <h3 className="mt-4 text-lg font-semibold">Tiada transaksi lagi</h3>
             <p className="mt-1 text-sm text-muted-foreground">Tambah transaksi baharu untuk melihatnya di sini.</p>
@@ -160,3 +158,4 @@ const TransactionList = ({ transactions, wallets, onEdit, onDelete }) => {
 };
 
 export default TransactionList;
+

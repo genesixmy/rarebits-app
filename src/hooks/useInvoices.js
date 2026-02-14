@@ -31,6 +31,7 @@ export const useInvoices = (filters = {}) => {
             item_id,
             quantity,
             unit_price,
+            cost_price,
             line_total,
             item:items(id, name, category)
           ),
@@ -93,6 +94,7 @@ export const useInvoiceDetail = (invoiceId) => {
             item_id,
             quantity,
             unit_price,
+            cost_price,
             line_total,
             is_manual,
             item_name,
@@ -278,20 +280,25 @@ export const useCreateInvoice = () => {
           console.log('[useCreateInvoice] Adding manual item to invoice:', manualItem);
 
           const itemPrice = parseFloat(manualItem.selling_price) || 0;
-          const itemQuantity = manualItem.quantity || 1;
+          const itemCost = parseFloat(manualItem.cost_price) || 0;
+          const itemQuantity = Math.max(1, parseInt(manualItem.quantity, 10) || 1);
           totalAmount += itemPrice * itemQuantity;
 
           console.log('[useCreateInvoice] RPC parameters:', {
             p_invoice_id: invoice.id,
             p_item_name: manualItem.name,
+            p_quantity: itemQuantity,
             p_unit_price: itemPrice,
+            p_cost_price: itemCost,
             p_user_id: userId,
           });
 
           const { data: rpcResult, error: rpcError } = await supabase.rpc('add_manual_item_to_invoice', {
             p_invoice_id: invoice.id,
             p_item_name: manualItem.name,
-            p_unit_price: itemPrice.toString(),
+            p_quantity: itemQuantity,
+            p_unit_price: itemPrice,
+            p_cost_price: itemCost,
             p_user_id: userId,
           });
 

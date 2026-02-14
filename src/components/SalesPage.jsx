@@ -50,10 +50,11 @@ const SalesPage = ({ items }) => {
           item_id,
           quantity,
           unit_price,
+          cost_price,
           line_total,
           is_manual,
           item_name,
-          item:items(id, name, cost_price, category),
+          item:items(id, name, category),
           invoice:invoices(id, invoice_date, status, user_id)
         `)
         .order('created_at', { ascending: false });
@@ -80,7 +81,7 @@ const SalesPage = ({ items }) => {
         name: (invItem.is_manual || !invItem.item_id)
           ? (invItem.item_name || 'Item Manual')
           : (invItem.item?.name || 'Item'),
-        cost_price: (invItem.is_manual || !invItem.item_id) ? 0 : (invItem.item?.cost_price || 0),
+        cost_price: parseFloat(invItem.cost_price) || 0,
         category: (invItem.is_manual || !invItem.item_id) ? 'Manual' : (invItem.item?.category || 'Lain-lain'),
         selling_price: invItem.unit_price,
         quantity_sold: invItem.quantity,

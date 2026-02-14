@@ -12,7 +12,7 @@ import { formatCurrency } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { Trash2, Plus, X, ChevronLeft, ChevronDown, ChevronUp } from 'lucide-react';
+import { Trash2, Plus, X, ChevronLeft, ChevronDown, ChevronUp, Star } from 'lucide-react';
 import { format } from 'date-fns';
 import { ms } from 'date-fns/locale';
 import toast from 'react-hot-toast';
@@ -129,7 +129,9 @@ const InvoiceFormPage = () => {
   const [showItemSelector, setShowItemSelector] = useState(false);
   const [showManualItemForm, setShowManualItemForm] = useState(false);
   const [manualItemName, setManualItemName] = useState('');
+  const [manualItemQuantity, setManualItemQuantity] = useState('1');
   const [manualItemPrice, setManualItemPrice] = useState('');
+  const [manualItemCost, setManualItemCost] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [initialItemLoaded, setInitialItemLoaded] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -237,6 +239,7 @@ const InvoiceFormPage = () => {
         .select('*, client:clients(id, name), inventory_reservations(id, quantity_reserved, customer_id, customer_name, created_at)')
         .eq('user_id', userId)
         .neq('status', 'terjual')
+        .order('is_favorite', { ascending: false })
         .order('created_at', { ascending: false });
 
       console.log('[InvoiceFormPage] Available items query result:', { data, error, count: data?.length });
@@ -433,7 +436,7 @@ const InvoiceFormPage = () => {
       .sort((a, b) => b.reservedForClient - a.reservedForClient);
   }, [filteredAvailableItems, selectedClientId, reservedForClientByItemId]);
 
-  const sortedAvailableItems = useMemo(() => {
+  const baseSortedAvailableItems = useMemo(() => {
     if (!selectedClientId || reservedForClientByItemId.size === 0) return filteredAvailableItems;
     const suggestedIds = reservedForClientByItemId;
     return [...filteredAvailableItems].sort((a, b) => {
@@ -446,6 +449,19 @@ const InvoiceFormPage = () => {
       return 0;
     });
   }, [filteredAvailableItems, selectedClientId, reservedForClientByItemId]);
+
+  const sortedAvailableItems = useMemo(() => {
+    return baseSortedAvailableItems
+      .map((item, index) => ({ item, index }))
+      .sort((a, b) => {
+        const aFavorite = Boolean(a.item.is_favorite);
+        const bFavorite = Boolean(b.item.is_favorite);
+
+        if (aFavorite !== bFavorite) return aFavorite ? -1 : 1;
+        return a.index - b.index;
+      })
+      .map((entry) => entry.item);
+  }, [baseSortedAvailableItems]);
 
   // Calculate totals
   const subtotal = selectedItems.reduce(
@@ -581,23 +597,46 @@ const InvoiceFormPage = () => {
   };
 
   const handleAddManualItem = () => {
-    if (!manualItemName.trim() || !manualItemPrice) {
-      toast.error('Sila isi nama dan harga item');
+    const cleanedName = manualItemName.trim();
+    const parsedQuantity = parseInt(manualItemQuantity, 10);
+    const parsedSellingPrice = parseFloat(manualItemPrice);
+    const parsedCostPrice = manualItemCost === '' ? 0 : parseFloat(manualItemCost);
+
+    if (!cleanedName) {
+      toast.error('Sila isi nama item manual');
+      return;
+    }
+
+    if (!Number.isFinite(parsedQuantity) || parsedQuantity < 1) {
+      toast.error('Kuantiti manual mesti sekurang-kurangnya 1');
+      return;
+    }
+
+    if (!Number.isFinite(parsedSellingPrice) || parsedSellingPrice < 0) {
+      toast.error('Harga jual manual mesti 0 atau lebih');
+      return;
+    }
+
+    if (!Number.isFinite(parsedCostPrice) || parsedCostPrice < 0) {
+      toast.error('Kos manual mesti 0 atau lebih');
       return;
     }
 
     const newManualItem = {
       id: `manual-${Date.now()}`,
-      name: manualItemName,
-      selling_price: parseFloat(manualItemPrice),
-      quantity: 1,
+      name: cleanedName,
+      selling_price: parsedSellingPrice,
+      cost_price: parsedCostPrice,
+      quantity: parsedQuantity,
       category: 'Manual',
       is_manual: true,
     };
 
     setManualItems([...manualItems, newManualItem]);
     setManualItemName('');
+    setManualItemQuantity('1');
     setManualItemPrice('');
+    setManualItemCost('');
     setShowManualItemForm(false);
     toast.success('Item manual ditambah');
   };
@@ -928,6 +967,9 @@ const InvoiceFormPage = () => {
                       <div className="flex-1">
                         <p className="font-medium">{item.name}</p>
                         <p className="text-sm text-gray-600">Manual Item</p>
+                        <p className="text-xs text-gray-500">
+                          Kos: {formatCurrency(item.cost_price || 0)} / unit
+                        </p>
                       </div>
                       <div className="flex items-center gap-4">
                         <div className="flex items-center gap-2">
@@ -1037,7 +1079,15 @@ const InvoiceFormPage = () => {
                           >
                             <div className="flex items-start justify-between gap-4">
                               <div className="flex-1">
-                                <p className="font-medium">{item.name}</p>
+                                <div className="flex items-center gap-2">
+                                  <p className="font-medium">{item.name}</p>
+                                  {item.is_favorite ? (
+                                    <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800">
+                                      <Star className="mr-1 h-3 w-3 fill-amber-500 text-amber-500" />
+                                      Favorite
+                                    </span>
+                                  ) : null}
+                                </div>
                                 <p className="text-sm text-gray-600">{item.category}</p>
                                 <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
                                   <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-700">
@@ -1170,12 +1220,35 @@ const InvoiceFormPage = () => {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium mb-1">Harga (RM)</label>
+                  <label className="block text-sm font-medium mb-1">Kuantiti</label>
+                  <Input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={manualItemQuantity}
+                    onChange={(e) => setManualItemQuantity(e.target.value)}
+                    placeholder="1"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium mb-1">Harga Jual (RM)</label>
                   <Input
                     type="number"
                     step="0.01"
+                    min="0"
                     value={manualItemPrice}
                     onChange={(e) => setManualItemPrice(e.target.value)}
+                    placeholder="0.00"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium mb-1">Kos (RM)</label>
+                  <Input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={manualItemCost}
+                    onChange={(e) => setManualItemCost(e.target.value)}
                     placeholder="0.00"
                   />
                 </div>
@@ -1191,7 +1264,9 @@ const InvoiceFormPage = () => {
                     onClick={() => {
                       setShowManualItemForm(false);
                       setManualItemName('');
+                      setManualItemQuantity('1');
                       setManualItemPrice('');
+                      setManualItemCost('');
                     }}
                     className="flex-1 w-full"
                   >

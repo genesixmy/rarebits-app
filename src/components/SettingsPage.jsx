@@ -19,7 +19,7 @@ const SettingsPage = ({ user, categories, onUpdateCategories, onUpdateProfile })
             <Tag className="w-4 h-4" /> Kategori
           </TabsTrigger>
           <TabsTrigger value="invoice" className="gap-2">
-            <FileText className="w-4 h-4" /> Invois
+            <FileText className="w-4 h-4" /> Brand
           </TabsTrigger>
         </TabsList>
         <TabsContent value="profile" className="mt-6">

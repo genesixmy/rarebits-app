@@ -39,6 +39,12 @@ const isValidHttpUrl = (value) => {
   }
 };
 
+const normalizeMarketplaceUrl = (value) => {
+  const normalized = normalizeTextValue(value);
+  if (!normalized) return null;
+  return isValidHttpUrl(normalized) ? normalized : null;
+};
+
 const extractCatalogCodeFromUrl = (value) => {
   if (typeof value !== 'string' || value.trim().length === 0) return '';
   try {
@@ -58,6 +64,11 @@ const mapSettingsToForm = (settings) => ({
   phone: settings?.phone || '',
   email: settings?.email || '',
   website: settings?.website || '',
+  shopee_url: settings?.shopee_url || '',
+  tiktok_url: settings?.tiktok_url || '',
+  lazada_url: settings?.lazada_url || '',
+  carousell_url: settings?.carousell_url || '',
+  show_marketplace_links: settings?.show_marketplace_links ?? true,
   fax: settings?.fax || '',
   logo_url: settings?.logo_url || '',
   tax_number: settings?.tax_number || '',
@@ -151,6 +162,22 @@ const InvoiceSettings = ({ userId }) => {
     }
     return '';
   }, [catalogLinkOptions, qrUrlSource, selectedCatalogCode]);
+  const marketplaceUrlErrors = useMemo(() => {
+    const entries = [
+      { key: 'shopee_url', label: 'Shopee URL' },
+      { key: 'tiktok_url', label: 'TikTok Shop URL' },
+      { key: 'lazada_url', label: 'Lazada URL' },
+      { key: 'carousell_url', label: 'Carousell URL' },
+    ];
+
+    return entries.reduce((acc, entry) => {
+      const raw = formData?.[entry.key];
+      if (typeof raw === 'string' && raw.trim().length > 0 && !isValidHttpUrl(raw)) {
+        acc[entry.key] = `${entry.label} mesti bermula dengan http:// atau https://`;
+      }
+      return acc;
+    }, {});
+  }, [formData]);
 
   const setField = (field, value) => {
     setFormData((prev) => ({ ...prev, [field]: value }));
@@ -162,6 +189,11 @@ const InvoiceSettings = ({ userId }) => {
     phone: normalizeTextValue(baseData.phone),
     email: normalizeTextValue(baseData.email),
     website: normalizeTextValue(baseData.website),
+    shopee_url: normalizeMarketplaceUrl(baseData.shopee_url),
+    tiktok_url: normalizeMarketplaceUrl(baseData.tiktok_url),
+    lazada_url: normalizeMarketplaceUrl(baseData.lazada_url),
+    carousell_url: normalizeMarketplaceUrl(baseData.carousell_url),
+    show_marketplace_links: Boolean(baseData.show_marketplace_links),
     fax: normalizeTextValue(baseData.fax),
     logo_url: normalizeTextValue(baseData.logo_url),
     show_logo: Boolean(baseData.show_logo_a4),
@@ -209,6 +241,15 @@ const InvoiceSettings = ({ userId }) => {
         variant: 'destructive',
         title: 'URL QR tidak sah',
         description: qrUrlError,
+      });
+      return;
+    }
+    const firstMarketplaceError = Object.values(marketplaceUrlErrors)[0];
+    if (firstMarketplaceError) {
+      toast({
+        variant: 'destructive',
+        title: 'Pautan marketplace tidak sah',
+        description: firstMarketplaceError,
       });
       return;
     }
@@ -453,6 +494,86 @@ const InvoiceSettings = ({ userId }) => {
           <p className="text-xs text-muted-foreground">
             Tetapan paparan logo ikut template ada di bahagian A4 dan Thermal/Paperang di bawah.
           </p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Pautan Marketplace (Optional)</CardTitle>
+          <CardDescription>Pautan ini dipaparkan pada katalog awam sebagai ikon sahaja.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <div>
+              <label htmlFor="marketplace-shopee" className="mb-1 block text-sm font-medium text-muted-foreground">
+                Shopee URL
+              </label>
+              <Input
+                id="marketplace-shopee"
+                value={formData.shopee_url}
+                onChange={(event) => setField('shopee_url', event.target.value)}
+                placeholder="https://shopee.com.my/..."
+              />
+              <p className="mt-1 text-xs text-muted-foreground">Contoh: https://shopee.com.my/nama-kedai</p>
+              {marketplaceUrlErrors.shopee_url && <p className="mt-1 text-xs text-red-600">{marketplaceUrlErrors.shopee_url}</p>}
+            </div>
+
+            <div>
+              <label htmlFor="marketplace-tiktok" className="mb-1 block text-sm font-medium text-muted-foreground">
+                TikTok Shop URL
+              </label>
+              <Input
+                id="marketplace-tiktok"
+                value={formData.tiktok_url}
+                onChange={(event) => setField('tiktok_url', event.target.value)}
+                placeholder="https://www.tiktok.com/@..."
+              />
+              <p className="mt-1 text-xs text-muted-foreground">Contoh: https://www.tiktok.com/@kedai</p>
+              {marketplaceUrlErrors.tiktok_url && <p className="mt-1 text-xs text-red-600">{marketplaceUrlErrors.tiktok_url}</p>}
+            </div>
+
+            <div>
+              <label htmlFor="marketplace-lazada" className="mb-1 block text-sm font-medium text-muted-foreground">
+                Lazada URL
+              </label>
+              <Input
+                id="marketplace-lazada"
+                value={formData.lazada_url}
+                onChange={(event) => setField('lazada_url', event.target.value)}
+                placeholder="https://www.lazada.com.my/shop/..."
+              />
+              <p className="mt-1 text-xs text-muted-foreground">Contoh: https://www.lazada.com.my/shop/nama-kedai</p>
+              {marketplaceUrlErrors.lazada_url && <p className="mt-1 text-xs text-red-600">{marketplaceUrlErrors.lazada_url}</p>}
+            </div>
+
+            <div>
+              <label htmlFor="marketplace-carousell" className="mb-1 block text-sm font-medium text-muted-foreground">
+                Carousell URL
+              </label>
+              <Input
+                id="marketplace-carousell"
+                value={formData.carousell_url}
+                onChange={(event) => setField('carousell_url', event.target.value)}
+                placeholder="https://carousell.app.link/..."
+              />
+              <p className="mt-1 text-xs text-muted-foreground">Contoh: https://www.carousell.com/u/nama-kedai</p>
+              {marketplaceUrlErrors.carousell_url && <p className="mt-1 text-xs text-red-600">{marketplaceUrlErrors.carousell_url}</p>}
+            </div>
+          </div>
+
+          <div className="flex items-start gap-3 rounded-lg border p-3">
+            <Checkbox
+              id="show-marketplace-links"
+              checked={formData.show_marketplace_links}
+              onCheckedChange={(checked) => setField('show_marketplace_links', checked === true)}
+            />
+            <div>
+              <label htmlFor="show-marketplace-links" className="text-sm font-medium text-foreground">
+                Papar ikon marketplace pada katalog awam
+              </label>
+              <p className="text-xs text-muted-foreground">Jika off, pautan disimpan tapi ikon tidak dipaparkan.</p>
+            </div>
+          </div>
         </CardContent>
       </Card>
 

@@ -29,8 +29,9 @@ const fetchClientDetails = async (clientId) => {
       is_manual,
       quantity,
       unit_price,
+      cost_price,
       line_total,
-      item:items(id, name, cost_price, category),
+      item:items(id, name, category, cost_price),
       invoice:invoices(id, invoice_date, status, platform, client_id, user_id)
     `)
     .order('created_at', { ascending: false });
@@ -47,12 +48,21 @@ const fetchClientDetails = async (clientId) => {
       const unitPrice = parseFloat(invItem.unit_price) || 0;
       const lineTotal = parseFloat(invItem.line_total);
       const totalRevenue = Number.isFinite(lineTotal) ? lineTotal : unitPrice * quantity;
-      const unitCost = parseFloat(invItem.item?.cost_price) || 0;
-      const totalCost = unitCost * quantity;
 
       const isManual = invItem.is_manual || !invItem.item_id;
+      const snapshotUnitCost = parseFloat(invItem.cost_price);
+      const fallbackItemUnitCost = parseFloat(invItem.item?.cost_price);
+      const normalizedSnapshotUnitCost = Number.isFinite(snapshotUnitCost)
+        ? Math.max(snapshotUnitCost, 0)
+        : null;
+      const normalizedFallbackUnitCost = Number.isFinite(fallbackItemUnitCost)
+        ? Math.max(fallbackItemUnitCost, 0)
+        : 0;
+      const unitCost = normalizedSnapshotUnitCost ?? (isManual ? 0 : normalizedFallbackUnitCost);
+      const totalCost = unitCost * quantity;
       const name = isManual ? (invItem.item_name || 'Item Manual') : (invItem.item?.name || 'Item');
       const category = isManual ? 'Manual' : (invItem.item?.category || 'Lain-lain');
+      const profitAmount = totalRevenue - totalCost;
 
       return {
         id: invItem.id,
@@ -60,6 +70,7 @@ const fetchClientDetails = async (clientId) => {
         category,
         cost_price: totalCost,
         selling_price: totalRevenue,
+        profit_amount: profitAmount,
         sold_platforms: invItem.invoice?.platform ? [invItem.invoice.platform] : [],
         date_sold: invItem.invoice?.invoice_date,
       };
@@ -325,7 +336,9 @@ const ClientDetailPage = () => {
                 <tbody>
                   {currentPurchaseHistory.length > 0 ? (
                     currentPurchaseHistory.map(item => {
-                      const profit = (parseFloat(item.selling_price) || 0) - (parseFloat(item.cost_price) || 0);
+                      const profit = Number.isFinite(item.profit_amount)
+                        ? item.profit_amount
+                        : ((parseFloat(item.selling_price) || 0) - (parseFloat(item.cost_price) || 0));
                       const isLoss = profit < 0;
                       return (
                         <tr key={item.id} className="border-t relative group overflow-hidden">

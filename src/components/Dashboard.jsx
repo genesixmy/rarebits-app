@@ -20,6 +20,7 @@ import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend, BarChart, Ba
 import { cn } from '@/lib/utils';
 import { useTheme } from '@/contexts/ThemeProvider';
 import { supabase } from '@/lib/customSupabaseClient';
+import { resolveTransactionClassification, TRANSACTION_CLASSIFICATIONS } from '@/components/wallet/transactionClassification';
 
 const StatCard = ({ title, value, icon, subtext, delay, isHighlighted = false, chartData }) => {
   const { theme } = useTheme();
@@ -115,10 +116,11 @@ const Dashboard = ({ items, categories }) => {
           item_id,
           quantity,
           unit_price,
+          cost_price,
           line_total,
           is_manual,
           item_name,
-          items(id, name, cost_price, category, user_id),
+          items(id, name, category, user_id),
           invoices(id, invoice_date, status, platform, user_id, created_at, updated_at)
         `);
 
@@ -175,9 +177,8 @@ const Dashboard = ({ items, categories }) => {
       
       const { data, error } = await supabase
         .from('transactions')
-        .select('amount')
+        .select('amount, type, transaction_type, category, invoice_id')
         .eq('user_id', userId)
-        .eq('type', 'perbelanjaan')
         .in('wallet_id', businessWalletIds)
         .gte('transaction_date', dateRange.startDate)
         .lte('transaction_date', endDateISO);
@@ -187,7 +188,13 @@ const Dashboard = ({ items, categories }) => {
         return 0;
       }
       
-      const total = (data || []).reduce((sum, tx) => sum + (parseFloat(tx.amount) || 0), 0);
+      const total = (data || []).reduce((sum, tx) => {
+        const classification = resolveTransactionClassification(tx);
+        if (classification !== TRANSACTION_CLASSIFICATIONS.EXPENSE) {
+          return sum;
+        }
+        return sum + Math.abs(parseFloat(tx.amount) || 0);
+      }, 0);
       console.log('[Dashboard] Expenses fetched:', { count: data?.length || 0, total, data });
       return total;
     },
@@ -250,7 +257,7 @@ const Dashboard = ({ items, categories }) => {
 
   // Calculate stats from invoice_items
   const totalCost = filteredSales.reduce((sum, sale) => {
-    const costPrice = parseFloat(sale.items?.cost_price) || 0;
+    const costPrice = parseFloat(sale.cost_price) || 0;
     const cost = costPrice * (sale.quantity || 1);
     return sum + cost;
   }, 0);
@@ -264,7 +271,7 @@ const Dashboard = ({ items, categories }) => {
     totalRefunds: parseFloat(totalRefunds) || 0,
     totalProfit: filteredSales.reduce((sum, sale) => {
       const revenue = parseFloat(sale.line_total) || 0;
-      const costPrice = parseFloat(sale.items?.cost_price) || 0;
+      const costPrice = parseFloat(sale.cost_price) || 0;
       const cost = costPrice * (sale.quantity || 1);
       return sum + (revenue - cost);
     }, 0) - (parseFloat(businessExpenses) || 0) - (parseFloat(totalRefunds) || 0),
@@ -420,7 +427,7 @@ const Dashboard = ({ items, categories }) => {
                 ) : recentSales.length > 0 ? (
                   recentSales.map((sale, index) => {
                     const quantity = sale.quantity || 1;
-                    const costPrice = parseFloat(sale.items?.cost_price) || 0;
+                    const costPrice = parseFloat(sale.cost_price) || 0;
                     const totalCost = costPrice * quantity;
                     const totalRevenue = parseFloat(sale.line_total) || 0;
                     const profit = totalRevenue - totalCost;

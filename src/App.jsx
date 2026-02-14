@@ -133,6 +133,7 @@ function App() {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterCategory, setFilterCategory] = useState('all');
   const [filterStatus, setFilterStatus] = useState('all');
+  const [favoriteUpdatingIds, setFavoriteUpdatingIds] = useState(new Set());
   const inventoryRefetchTimeoutRef = useRef(null);
   const previousPathRef = useRef(location.pathname);
 
@@ -817,6 +818,69 @@ function App() {
     }
   });
 
+  const toggleFavoriteMutation = useMutation({
+    mutationFn: async ({ itemId, nextValue }) => {
+      const { data, error } = await supabase
+        .from('items')
+        .update({ is_favorite: nextValue })
+        .eq('id', itemId)
+        .eq('user_id', user.id)
+        .select('id, is_favorite')
+        .single();
+
+      if (error) throw error;
+      return data;
+    },
+    onMutate: async ({ itemId, nextValue }) => {
+      await queryClient.cancelQueries({ queryKey: ['items', user.id] });
+
+      const previousItems = queryClient.getQueryData(['items', user.id]);
+
+      queryClient.setQueryData(['items', user.id], (currentItems = []) =>
+        currentItems.map((item) =>
+          item.id === itemId ? { ...item, is_favorite: nextValue } : item
+        )
+      );
+
+      setFavoriteUpdatingIds((prev) => {
+        const next = new Set(prev);
+        next.add(itemId);
+        return next;
+      });
+
+      return { previousItems };
+    },
+    onError: (error, variables, context) => {
+      if (context?.previousItems) {
+        queryClient.setQueryData(['items', user.id], context.previousItems);
+      }
+      toast({
+        title: "Gagal kemas kini kegemaran",
+        description: error.message,
+        variant: "destructive"
+      });
+    },
+    onSettled: (_data, _error, variables) => {
+      setFavoriteUpdatingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(variables.itemId);
+        return next;
+      });
+
+      queryClient.invalidateQueries({ queryKey: ['items', user.id] });
+      queryClient.invalidateQueries({ queryKey: ['available-items', user.id] });
+    }
+  });
+
+  const handleToggleFavorite = useCallback((item) => {
+    if (!item?.id) return;
+
+    toggleFavoriteMutation.mutate({
+      itemId: item.id,
+      nextValue: !Boolean(item.is_favorite),
+    });
+  }, [toggleFavoriteMutation]);
+
   const filteredItems = items.filter(item => 
     ((item.name || '').toLowerCase().includes(searchTerm.toLowerCase()) || (item.category || '').toLowerCase().includes(searchTerm.toLowerCase())) &&
     (filterCategory === 'all' || item.category === filterCategory) &&
@@ -908,7 +972,7 @@ function App() {
                       </div>
                     </CardContent>
                   </Card>
-                  {isLoadingItems || itemMutation.isPending || deleteItemMutation.isPending ? <div className="flex justify-center py-12"><Loader2 className="w-8 h-8 animate-spin" /></div> : <ItemList items={filteredItems} categories={categories} clients={clients} onEdit={(item) => { setEditingItem(item); setShowAddForm(true); }} onDelete={deleteItemMutation.mutate} onBulkDelete={async (itemIds) => {
+                  {isLoadingItems || itemMutation.isPending || deleteItemMutation.isPending ? <div className="flex justify-center py-12"><Loader2 className="w-8 h-8 animate-spin" /></div> : <ItemList items={filteredItems} categories={categories} clients={clients} onEdit={(item) => { setEditingItem(item); setShowAddForm(true); }} onDelete={deleteItemMutation.mutate} onToggleFavorite={handleToggleFavorite} favoriteUpdatingIds={favoriteUpdatingIds} onBulkDelete={async (itemIds) => {
                     console.log('[App] Bulk deleting items:', itemIds);
                     for (const itemId of itemIds) {
                       await new Promise((resolve) => {
@@ -932,7 +996,9 @@ function App() {
               <Route path="/invoices/:invoiceId/edit" element={<InvoiceFormPage />} />
               <Route path="/catalogs" element={<CatalogCreatePage userId={user.id} items={items} categories={categories} />} />
               <Route path="/catalogs/create" element={<CatalogCreatePage userId={user.id} items={items} categories={categories} />} />
+              <Route path="/catalogs/:catalogId/edit" element={<CatalogCreatePage userId={user.id} items={items} categories={categories} />} />
               <Route path="/inventory/catalogs" element={<CatalogCreatePage userId={user.id} items={items} categories={categories} />} />
+              <Route path="/inventory/catalogs/:catalogId/edit" element={<CatalogCreatePage userId={user.id} items={items} categories={categories} />} />
               <Route path="/clients" element={<ClientsPage />} />
               <Route path="/clients/:id" element={<ClientDetailPage />} />
               <Route path="/wallet" element={<WalletPage />} />

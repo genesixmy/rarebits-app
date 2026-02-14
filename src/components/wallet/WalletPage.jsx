@@ -15,6 +15,11 @@ import TransferFormModal from '@/components/wallet/TransferFormModal';
 import TransactionList from '@/components/wallet/TransactionList';
 import WalletAnalytics from '@/components/wallet/WalletAnalytics';
 import {
+  isTransferLegacyType,
+  isTransferOutLegacyType,
+  manualTypeToLegacyType,
+} from '@/components/wallet/transactionClassification';
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -219,12 +224,12 @@ const WalletPage = () => {
     return allTransactions.filter(tx => {
         const txWalletType = walletIdToTypeMap.get(tx.wallet_id);
 
-        if (tx.type === 'pemindahan_keluar' || tx.type === 'pemindahan_masuk') {
+        if (isTransferLegacyType(tx.type)) {
             const relatedTransferTx = allTransactions.find(otherTx => otherTx.transfer_id === tx.transfer_id && otherTx.id !== tx.id);
             if (!relatedTransferTx) return false; // Incomplete transfer data
 
-            const sourceWalletType = walletIdToTypeMap.get(tx.type === 'pemindahan_keluar' ? tx.wallet_id : relatedTransferTx.wallet_id);
-            const destWalletType = walletIdToTypeMap.get(tx.type === 'pemindahan_masuk' ? tx.wallet_id : relatedTransferTx.wallet_id);
+            const sourceWalletType = walletIdToTypeMap.get(isTransferOutLegacyType(tx.type) ? tx.wallet_id : relatedTransferTx.wallet_id);
+            const destWalletType = walletIdToTypeMap.get(isTransferOutLegacyType(tx.type) ? relatedTransferTx.wallet_id : tx.wallet_id);
             
             return sourceWalletType === accountTypeFilter || destWalletType === accountTypeFilter;
         }
@@ -275,12 +280,47 @@ const WalletPage = () => {
                 p_new_category: transactionData.category
             };
         } else {
+            const parsedAmount = parseFloat(transactionData.amount);
+            if (!Number.isFinite(parsedAmount)) {
+              throw new Error('Jumlah transaksi tidak sah');
+            }
+
+            if (transactionData.type === 'adjustment') {
+              const { data: walletSnapshot, error: walletError } = await supabase
+                .from('wallets')
+                .select('balance')
+                .eq('id', transactionData.wallet_id)
+                .eq('user_id', user.id)
+                .single();
+
+              if (walletError || !walletSnapshot) {
+                throw new Error('Wallet tidak ditemui untuk pelarasan');
+              }
+
+              const delta = transactionData.adjustment_direction === 'decrease'
+                ? -Math.abs(parsedAmount)
+                : Math.abs(parsedAmount);
+              const nextBalance = (parseFloat(walletSnapshot.balance) || 0) + delta;
+              if (nextBalance < 0) {
+                throw new Error('Pelarasan menyebabkan baki negatif');
+              }
+
+              const { error: adjustmentError } = await supabase.rpc('adjust_wallet_balance_manually', {
+                p_user_id: user.id,
+                p_wallet_id: transactionData.wallet_id,
+                p_new_balance: nextBalance,
+              });
+
+              if (adjustmentError) throw adjustmentError;
+              return isEditing;
+            }
+
             rpcName = 'add_transaction_and_update_wallet';
             params = {
                 p_user_id: user.id,
                 p_wallet_id: transactionData.wallet_id,
-                p_type: transactionData.type,
-                p_amount: transactionData.amount,
+                p_type: manualTypeToLegacyType(transactionData.type, transactionData.adjustment_direction),
+                p_amount: Math.abs(parsedAmount),
                 p_description: transactionData.description,
                 p_category: transactionData.category,
                 p_transaction_date: transactionData.transaction_date,
@@ -305,8 +345,9 @@ const WalletPage = () => {
 
   const deleteTransactionMutation = useMutation({
     mutationFn: async (transaction) => {
-        const rpcName = transaction.type.startsWith('pemindahan') ? 'delete_transfer_transactions' : 'delete_transaction_and_adjust_wallet';
-        const params = transaction.type.startsWith('pemindahan') ? { p_transfer_id: transaction.transfer_id, p_user_id: user.id } : { p_transaction_id: transaction.id, p_user_id: user.id };
+        const isTransfer = isTransferLegacyType(transaction.type);
+        const rpcName = isTransfer ? 'delete_transfer_transactions' : 'delete_transaction_and_adjust_wallet';
+        const params = isTransfer ? { p_transfer_id: transaction.transfer_id, p_user_id: user.id } : { p_transaction_id: transaction.id, p_user_id: user.id };
         const { error } = await supabase.rpc(rpcName, params);
         if (error) throw error;
     },
@@ -627,7 +668,7 @@ const WalletPage = () => {
             <AlertDialogCancel>Batal</AlertDialogCancel>
             <AlertDialogAction onClick={() => deleteTransactionMutation.mutate(deletingTransaction)} disabled={deleteTransactionMutation.isPending} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
               {deleteTransactionMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
-              {deletingTransaction?.type.startsWith('pemindahan') ? 'Padam Pemindahan' : 'Padam'}
+              {isTransferLegacyType(deletingTransaction?.type) ? 'Padam Pemindahan' : 'Padam'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
