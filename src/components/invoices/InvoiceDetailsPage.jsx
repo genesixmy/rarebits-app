@@ -149,7 +149,12 @@ const buildInvoicePrintSettings = (settings) => {
   const footerNotes = normalizeOptionalText(settings?.footer_notes);
   const qrLabel = pickFirstNonEmptyText(settings?.qr_label, 'Scan untuk lihat katalog');
   const qrUrlRaw = normalizeOptionalText(settings?.qr_url);
+  const qrModeRaw = normalizeOptionalText(settings?.qr_mode).toLowerCase();
+  const qrMode = qrModeRaw === 'none' || qrModeRaw === 'url'
+    ? qrModeRaw
+    : (qrUrlRaw ? 'url' : 'none');
   const hasValidQrUrl = isValidHttpUrl(qrUrlRaw);
+  const canShowQr = qrMode !== 'none' && hasValidQrUrl;
 
   return {
     companyName,
@@ -171,11 +176,12 @@ const buildInvoicePrintSettings = (settings) => {
     showTaxThermal: Boolean((settings?.thermal_show_tax ?? settings?.show_tax ?? false) && taxNumber),
     taxNumber,
     footerNotes,
+    qrMode,
     qrLabel,
-    qrUrl: hasValidQrUrl ? qrUrlRaw : '',
-    showQrA4: Boolean(settings?.qr_enabled_a4 && hasValidQrUrl),
-    showQrThermal: Boolean(settings?.qr_enabled_thermal && hasValidQrUrl),
-    showQrPaperang: Boolean(settings?.qr_enabled_paperang && hasValidQrUrl),
+    qrUrl: canShowQr ? qrUrlRaw : '',
+    showQrA4: Boolean(settings?.qr_enabled_a4 && canShowQr),
+    showQrThermal: Boolean(settings?.qr_enabled_thermal && canShowQr),
+    showQrPaperang: Boolean(settings?.qr_enabled_paperang && canShowQr),
     showGeneratedByA4: settings?.show_generated_by_a4 ?? legacyShowGeneratedBy,
     showGeneratedByThermal: settings?.show_generated_by_thermal ?? false,
     showGeneratedByPaperang: settings?.show_generated_by_paperang ?? false,

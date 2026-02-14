@@ -508,13 +508,23 @@ const WalletPage = () => {
 
         <AccountTypeFilter filter={accountTypeFilter} setFilter={setAccountTypeFilter} />
 
-        <Card className="brand-gradient text-white">
-          <CardHeader>
-            <CardTitle className="text-lg font-semibold text-white/90">Jumlah Baki ({accountTypeFilter})</CardTitle>
+        <Card className="overflow-hidden rounded-3xl border border-transparent bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white shadow-[0_20px_45px_-22px_rgba(124,58,237,0.8)]">
+          <CardHeader className="pb-3">
+            <div className="flex items-center gap-3">
+              <span className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-white/95 text-violet-600">
+                <WalletIcon className="h-4 w-4 text-violet-600" />
+              </span>
+              <CardTitle className="text-base font-semibold text-white">Jumlah Baki ({accountTypeFilter})</CardTitle>
+            </div>
           </CardHeader>
-          <CardContent>
-            <p className="text-4xl font-bold">RM {totalBalance.toFixed(2)}</p>
-            <p className="text-sm text-white/80 mt-1">Dari {filteredWallets.length} akaun</p>
+          <CardContent className="pt-0">
+            <p className="text-xl font-bold leading-none tracking-tight md:text-2xl">RM {totalBalance.toFixed(2)}</p>
+            <div className="mt-3 flex items-center gap-2">
+              <span className="inline-flex h-4 w-4 items-center justify-center rounded-md bg-white/20 text-white">
+                <BarChart2 className="h-3 w-3 text-white" />
+              </span>
+              <p className="text-xs font-medium text-white/90">Dari {filteredWallets.length} akaun</p>
+            </div>
           </CardContent>
         </Card>
 

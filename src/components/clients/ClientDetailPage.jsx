@@ -52,13 +52,14 @@ const fetchClientDetails = async (clientId) => {
       const isManual = invItem.is_manual || !invItem.item_id;
       const snapshotUnitCost = parseFloat(invItem.cost_price);
       const fallbackItemUnitCost = parseFloat(invItem.item?.cost_price);
-      const normalizedSnapshotUnitCost = Number.isFinite(snapshotUnitCost)
-        ? Math.max(snapshotUnitCost, 0)
-        : null;
-      const normalizedFallbackUnitCost = Number.isFinite(fallbackItemUnitCost)
-        ? Math.max(fallbackItemUnitCost, 0)
-        : 0;
-      const unitCost = normalizedSnapshotUnitCost ?? (isManual ? 0 : normalizedFallbackUnitCost);
+      const hasSnapshotCost = Number.isFinite(snapshotUnitCost) && snapshotUnitCost > 0;
+      const hasFallbackCost = Number.isFinite(fallbackItemUnitCost) && fallbackItemUnitCost >= 0;
+
+      const unitCost = hasSnapshotCost
+        ? snapshotUnitCost
+        : (!isManual && hasFallbackCost)
+          ? fallbackItemUnitCost
+          : (Number.isFinite(snapshotUnitCost) && snapshotUnitCost >= 0 ? snapshotUnitCost : 0);
       const totalCost = unitCost * quantity;
       const name = isManual ? (invItem.item_name || 'Item Manual') : (invItem.item?.name || 'Item');
       const category = isManual ? 'Manual' : (invItem.item?.category || 'Lain-lain');

@@ -16,16 +16,58 @@ import { Loader2,
   XCircle
 } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
-import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend, BarChart, Bar, XAxis, YAxis, CartesianGrid, AreaChart, Area } from 'recharts';
+import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend, BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts';
 import { cn } from '@/lib/utils';
 import { useTheme } from '@/contexts/ThemeProvider';
 import { supabase } from '@/lib/customSupabaseClient';
 import { resolveTransactionClassification, TRANSACTION_CLASSIFICATIONS } from '@/components/wallet/transactionClassification';
 
-const StatCard = ({ title, value, icon, subtext, delay, isHighlighted = false, chartData }) => {
-  const { theme } = useTheme();
-  const isDark = theme === 'dark';
-  const chartColor = isHighlighted ? '#fff' : (isDark ? '#a78bfa' : '#8b5cf6');
+const StatCard = ({ title, value, icon, subtext, delay, isHighlighted = false, tone = 'sky' }) => {
+  const toneMap = {
+    sky: {
+      iconWrap: 'bg-sky-100',
+      icon: 'text-sky-600',
+      trendWrap: 'bg-sky-100',
+      trendIcon: 'text-sky-600',
+    },
+    amber: {
+      iconWrap: 'bg-amber-100',
+      icon: 'text-amber-600',
+      trendWrap: 'bg-amber-100',
+      trendIcon: 'text-amber-600',
+    },
+    emerald: {
+      iconWrap: 'bg-emerald-100',
+      icon: 'text-emerald-600',
+      trendWrap: 'bg-emerald-100',
+      trendIcon: 'text-emerald-600',
+    },
+    fuchsia: {
+      iconWrap: 'bg-fuchsia-100',
+      icon: 'text-fuchsia-600',
+      trendWrap: 'bg-fuchsia-100',
+      trendIcon: 'text-fuchsia-600',
+    },
+    rose: {
+      iconWrap: 'bg-rose-100',
+      icon: 'text-rose-600',
+      trendWrap: 'bg-rose-100',
+      trendIcon: 'text-rose-600',
+    },
+    indigo: {
+      iconWrap: 'bg-indigo-100',
+      icon: 'text-indigo-600',
+      trendWrap: 'bg-indigo-100',
+      trendIcon: 'text-indigo-600',
+    },
+    lime: {
+      iconWrap: 'bg-lime-100',
+      icon: 'text-lime-600',
+      trendWrap: 'bg-lime-100',
+      trendIcon: 'text-lime-600',
+    },
+  };
+  const toneStyle = toneMap[tone] || toneMap.sky;
 
   return (
     <motion.div
@@ -33,34 +75,49 @@ const StatCard = ({ title, value, icon, subtext, delay, isHighlighted = false, c
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay }}
     >
-      <Card className={cn("relative overflow-hidden", isHighlighted && 'brand-gradient text-white')}>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className={cn("text-sm font-medium", isHighlighted ? 'text-white/80' : 'text-muted-foreground')}>
-            {title}
-          </CardTitle>
-          {React.cloneElement(icon, { className: cn('h-5 w-5', isHighlighted ? 'text-white/80' : 'text-muted-foreground') })}
+      <Card
+        className={cn(
+          "overflow-hidden rounded-3xl border transition-all duration-300",
+          isHighlighted
+            ? "border-transparent bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white shadow-[0_20px_45px_-22px_rgba(124,58,237,0.8)]"
+            : "border-slate-200/80 bg-card shadow-sm hover:-translate-y-0.5 hover:shadow-lg"
+        )}
+      >
+        <CardHeader className="pb-3">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3">
+              <span
+                className={cn(
+                  "inline-flex h-10 w-10 items-center justify-center rounded-full",
+                  isHighlighted ? "bg-white/95 text-sky-500" : toneStyle.iconWrap
+                )}
+              >
+                {React.cloneElement(icon, { className: cn('h-4 w-4', isHighlighted ? 'text-sky-500' : toneStyle.icon) })}
+              </span>
+              <CardTitle className={cn("text-base md:text-base font-semibold", isHighlighted ? 'text-white' : 'text-foreground')}>
+                {title}
+              </CardTitle>
+            </div>
+          </div>
         </CardHeader>
-        <CardContent>
-          <div className={cn("text-2xl font-bold", isHighlighted ? 'text-white' : 'text-foreground')}>
+        <CardContent className="pt-0">
+          <div className={cn("text-xl md:text-2xl font-bold leading-none tracking-tight", isHighlighted ? 'text-white' : 'text-foreground')}>
             {value}
           </div>
-          <p className={cn("text-xs mt-1", isHighlighted ? 'text-white/80' : 'text-muted-foreground')}>
-            {subtext}
-          </p>
+          <div className="mt-3 flex items-center gap-2">
+            <span
+              className={cn(
+                "inline-flex h-4 w-4 items-center justify-center rounded-md",
+                isHighlighted ? "bg-white/20 text-white" : toneStyle.trendWrap
+              )}
+            >
+              <BarChart3 className={cn("h-3 w-3", isHighlighted ? 'text-white' : toneStyle.trendIcon)} />
+            </span>
+            <p className={cn("text-xs font-medium", isHighlighted ? 'text-white/90' : 'text-muted-foreground')}>
+              {subtext}
+            </p>
+          </div>
         </CardContent>
-        <div className="absolute bottom-0 left-0 right-0 h-16 opacity-50">
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={chartData}>
-              <defs>
-                <linearGradient id={`color${title.replace(/\s/g, '')}`} x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor={chartColor} stopOpacity={0.4}/>
-                  <stop offset="95%" stopColor={chartColor} stopOpacity={0}/>
-                </linearGradient>
-              </defs>
-              <Area type="monotone" dataKey="value" stroke={chartColor} strokeWidth={2} fillOpacity={1} fill={`url(#color${title.replace(/\s/g, '')})`} />
-            </AreaChart>
-          </ResponsiveContainer>
-        </div>
       </Card>
     </motion.div>
   );
@@ -120,7 +177,7 @@ const Dashboard = ({ items, categories }) => {
           line_total,
           is_manual,
           item_name,
-          items(id, name, category, user_id),
+          items(id, name, category, cost_price, user_id),
           invoices(id, invoice_date, status, platform, user_id, created_at, updated_at)
         `);
 
@@ -161,6 +218,33 @@ const Dashboard = ({ items, categories }) => {
   });
 
   const businessWalletIds = businessWallets.map(w => w.id);
+
+  // Fetch primary business wallet balance (independent from date filters)
+  const { data: businessWalletBalance = null } = useQuery({
+    queryKey: ['dashboard-business-wallet-balance', userId],
+    queryFn: async () => {
+      if (!userId) return null;
+
+      const { data, error } = await supabase
+        .from('wallets')
+        .select('id, name, balance, account_type, created_at')
+        .eq('user_id', userId)
+        .eq('account_type', 'Business')
+        .order('created_at', { ascending: true })
+        .limit(1)
+        .maybeSingle();
+
+      if (error) {
+        console.error('[Dashboard] Error fetching business wallet balance:', error);
+        return null;
+      }
+
+      return data || null;
+    },
+    enabled: !!userId,
+    refetchOnWindowFocus: true,
+    staleTime: 30 * 1000,
+  });
 
   // Fetch Business expenses only
   const { data: businessExpenses = 0 } = useQuery({
@@ -255,9 +339,30 @@ const Dashboard = ({ items, categories }) => {
 
   const filteredSales = getFilteredSales();
 
+  // Legacy safety: some old invoice lines may not have snapshot cost_price populated.
+  // For non-manual items, fallback to item.cost_price when line cost is 0/null.
+  const getEffectiveCostPrice = (sale) => {
+    const lineCostPrice = parseFloat(sale?.cost_price);
+    const hasLineCost = Number.isFinite(lineCostPrice) && lineCostPrice > 0;
+    if (hasLineCost) return lineCostPrice;
+
+    if (!sale?.is_manual) {
+      const itemFallbackCost = parseFloat(sale?.items?.cost_price);
+      if (Number.isFinite(itemFallbackCost) && itemFallbackCost >= 0) {
+        return itemFallbackCost;
+      }
+    }
+
+    if (Number.isFinite(lineCostPrice) && lineCostPrice >= 0) {
+      return lineCostPrice;
+    }
+
+    return 0;
+  };
+
   // Calculate stats from invoice_items
   const totalCost = filteredSales.reduce((sum, sale) => {
-    const costPrice = parseFloat(sale.cost_price) || 0;
+    const costPrice = getEffectiveCostPrice(sale);
     const cost = costPrice * (sale.quantity || 1);
     return sum + cost;
   }, 0);
@@ -271,7 +376,7 @@ const Dashboard = ({ items, categories }) => {
     totalRefunds: parseFloat(totalRefunds) || 0,
     totalProfit: filteredSales.reduce((sum, sale) => {
       const revenue = parseFloat(sale.line_total) || 0;
-      const costPrice = parseFloat(sale.cost_price) || 0;
+      const costPrice = getEffectiveCostPrice(sale);
       const cost = costPrice * (sale.quantity || 1);
       return sum + (revenue - cost);
     }, 0) - (parseFloat(businessExpenses) || 0) - (parseFloat(totalRefunds) || 0),
@@ -333,11 +438,6 @@ const Dashboard = ({ items, categories }) => {
   const tooltipBorder = isDark ? '#374151' : '#e5e7eb';
   const tooltipTextColor = isDark ? '#f3f4f6' : '#111827';
 
-  const dummyChartData = [
-    { name: 'A', value: 400 }, { name: 'B', value: 300 }, { name: 'C', value: 600 },
-    { name: 'D', value: 500 }, { name: 'E', value: 800 }, { name: 'F', value: 700 },
-  ];
-
   return (
     <div className="space-y-6">
       <h1 className="page-title">Papan Pemuka</h1>
@@ -381,15 +481,66 @@ const Dashboard = ({ items, categories }) => {
       </Card>
       
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <StatCard title="Jumlah Item" value={globalStats.totalItems} icon={<Package />} subtext={`${globalStats.availableItems} tersedia`} delay={0.2} chartData={dummyChartData} />
-        <StatCard title="Kuantiti Terjual" value={filteredStats.totalQuantitySold} icon={<CheckCircle />} subtext={`Daripada ${filteredStats.soldItemsCount} item`} delay={0.3} chartData={dummyChartData.slice().reverse()} />
-        <StatCard title="Jumlah Hasil" value={`RM ${filteredStats.totalRevenue.toFixed(2)}`} icon={<Wallet />} subtext={`Daripada ${filteredStats.soldItemsCount} jualan`} delay={0.4} chartData={dummyChartData} />
-        <StatCard title="Jumlah Perbelanjaan" value={`RM ${filteredStats.totalExpenses.toFixed(2)}`} icon={<TrendingDown />} subtext="Perbelanjaan perniagaan" delay={0.45} chartData={dummyChartData} />
+        <StatCard
+          title="Jumlah Item"
+          value={globalStats.totalItems}
+          icon={<Package />}
+          subtext={`${globalStats.availableItems} tersedia`}
+          delay={0.2}
+          tone="sky"
+        />
+        <StatCard
+          title="Kuantiti Terjual"
+          value={filteredStats.totalQuantitySold}
+          icon={<CheckCircle />}
+          subtext={`Daripada ${filteredStats.soldItemsCount} item`}
+          delay={0.3}
+          tone="amber"
+        />
+        <StatCard
+          title="Jumlah Hasil"
+          value={`RM ${filteredStats.totalRevenue.toFixed(2)}`}
+          icon={<Wallet />}
+          subtext={`Daripada ${filteredStats.soldItemsCount} jualan`}
+          delay={0.4}
+          tone="emerald"
+        />
+        <StatCard
+          title="Jumlah Perbelanjaan"
+          value={`RM ${filteredStats.totalExpenses.toFixed(2)}`}
+          icon={<TrendingDown />}
+          subtext="Perbelanjaan perniagaan"
+          delay={0.45}
+          tone="fuchsia"
+        />
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <StatCard title="Jumlah Pemulangan" value={`RM ${filteredStats.totalRefunds.toFixed(2)}`} icon={<TrendingDown />} subtext="Dana yang dikembalikan" delay={0.47} chartData={dummyChartData} />
-        <StatCard title="Keuntungan Bersih" value={`RM ${filteredStats.totalProfit.toFixed(2)}`} icon={<TrendingUp />} subtext={`${profitMargin}% margin`} delay={0.5} isHighlighted={true} chartData={dummyChartData.slice().reverse()} />
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <StatCard
+          title="Jumlah Pemulangan"
+          value={`RM ${filteredStats.totalRefunds.toFixed(2)}`}
+          icon={<TrendingDown />}
+          subtext="Dana yang dikembalikan"
+          delay={0.47}
+          tone="rose"
+        />
+        <StatCard
+          title="Baki Business"
+          value={`RM ${parseFloat(businessWalletBalance?.balance || 0).toFixed(2)}`}
+          icon={<Wallet />}
+          subtext={businessWalletBalance?.name ? `${businessWalletBalance.name} (live)` : 'Belum ada wallet Business'}
+          delay={0.49}
+          tone="indigo"
+        />
+        <StatCard
+          title="Keuntungan Bersih"
+          value={`RM ${filteredStats.totalProfit.toFixed(2)}`}
+          icon={<TrendingUp />}
+          subtext={`${profitMargin}% margin`}
+          delay={0.5}
+          isHighlighted={true}
+          tone="lime"
+        />
       </div>
 
       <Card>
@@ -427,7 +578,7 @@ const Dashboard = ({ items, categories }) => {
                 ) : recentSales.length > 0 ? (
                   recentSales.map((sale, index) => {
                     const quantity = sale.quantity || 1;
-                    const costPrice = parseFloat(sale.cost_price) || 0;
+                    const costPrice = getEffectiveCostPrice(sale);
                     const totalCost = costPrice * quantity;
                     const totalRevenue = parseFloat(sale.line_total) || 0;
                     const profit = totalRevenue - totalCost;

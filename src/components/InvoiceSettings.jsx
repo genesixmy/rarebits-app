@@ -45,6 +45,12 @@ const normalizeMarketplaceUrl = (value) => {
   return isValidHttpUrl(normalized) ? normalized : null;
 };
 
+const normalizeQrMode = (mode, qrUrl) => {
+  const normalizedMode = typeof mode === 'string' ? mode.trim().toLowerCase() : '';
+  if (normalizedMode === 'none' || normalizedMode === 'url') return normalizedMode;
+  return normalizeTextValue(qrUrl) ? 'url' : 'none';
+};
+
 const extractCatalogCodeFromUrl = (value) => {
   if (typeof value !== 'string' || value.trim().length === 0) return '';
   try {
@@ -81,6 +87,7 @@ const mapSettingsToForm = (settings) => ({
   qr_enabled_a4: settings?.qr_enabled_a4 ?? false,
   qr_enabled_thermal: settings?.qr_enabled_thermal ?? false,
   qr_enabled_paperang: settings?.qr_enabled_paperang ?? false,
+  qr_mode: normalizeQrMode(settings?.qr_mode, settings?.qr_url),
   qr_label: settings?.qr_label || DEFAULT_INVOICE_SETTINGS.qr_label,
   qr_url: settings?.qr_url || '',
   show_tax: settings?.show_tax ?? false,
@@ -147,13 +154,16 @@ const InvoiceSettings = ({ userId }) => {
 
   const isBusy = isSaving || isUploadingLogo;
   const hasLogo = useMemo(() => !!formData.logo_url, [formData.logo_url]);
+  const isQrDisabled = formData.qr_mode === 'none';
   const qrUrlError = useMemo(() => {
+    if (isQrDisabled) return '';
     if (!formData.qr_url || formData.qr_url.trim().length === 0) return '';
     return isValidHttpUrl(formData.qr_url)
       ? ''
       : 'URL tidak sah. Guna format penuh seperti https://example.com';
-  }, [formData.qr_url]);
+  }, [formData.qr_url, isQrDisabled]);
   const qrCatalogError = useMemo(() => {
+    if (isQrDisabled) return '';
     if (qrUrlSource !== 'catalog') return '';
     if (catalogLinkOptions.length === 0) return 'Belum ada link katalog. Cipta katalog dahulu.';
     if (!selectedCatalogCode) return 'Sila pilih satu link katalog.';
@@ -161,7 +171,7 @@ const InvoiceSettings = ({ userId }) => {
       return 'Link katalog dipilih tidak ditemui.';
     }
     return '';
-  }, [catalogLinkOptions, qrUrlSource, selectedCatalogCode]);
+  }, [catalogLinkOptions, isQrDisabled, qrUrlSource, selectedCatalogCode]);
   const marketplaceUrlErrors = useMemo(() => {
     const entries = [
       { key: 'shopee_url', label: 'Shopee URL' },
@@ -203,6 +213,7 @@ const InvoiceSettings = ({ userId }) => {
     qr_enabled_a4: Boolean(baseData.qr_enabled_a4),
     qr_enabled_thermal: Boolean(baseData.qr_enabled_thermal),
     qr_enabled_paperang: Boolean(baseData.qr_enabled_paperang),
+    qr_mode: normalizeQrMode(baseData.qr_mode, baseData.qr_url),
     qr_label: normalizeTextValue(baseData.qr_label) || DEFAULT_INVOICE_SETTINGS.qr_label,
     qr_url: normalizeTextValue(baseData.qr_url),
     tax_number: normalizeTextValue(baseData.tax_number),
@@ -228,7 +239,7 @@ const InvoiceSettings = ({ userId }) => {
 
   const handleSave = async (event) => {
     event.preventDefault();
-    if (qrCatalogError) {
+    if (!isQrDisabled && qrCatalogError) {
       toast({
         variant: 'destructive',
         title: 'Pilihan URL QR tidak lengkap',
@@ -236,7 +247,7 @@ const InvoiceSettings = ({ userId }) => {
       });
       return;
     }
-    if (qrUrlError) {
+    if (!isQrDisabled && qrUrlError) {
       toast({
         variant: 'destructive',
         title: 'URL QR tidak sah',
@@ -264,6 +275,20 @@ const InvoiceSettings = ({ userId }) => {
         title: 'Gagal menyimpan tetapan invois',
         description: error.message,
       });
+    }
+  };
+
+  const handleQrModeChange = (nextModeRaw) => {
+    const nextMode = nextModeRaw === 'none' ? 'none' : 'url';
+    setField('qr_mode', nextMode);
+
+    if (nextMode === 'url' && qrUrlSource === 'catalog') {
+      const fallbackCode = selectedCatalogCode || catalogLinkOptions[0]?.public_code || '';
+      setSelectedCatalogCode(fallbackCode);
+      const selectedOption = catalogLinkOptions.find((option) => option.public_code === fallbackCode);
+      if (selectedOption?.url) {
+        setField('qr_url', selectedOption.url);
+      }
     }
   };
 
@@ -579,6 +604,53 @@ const InvoiceSettings = ({ userId }) => {
 
       <Card>
         <CardHeader>
+          <CardTitle>Tax / Registration</CardTitle>
+          <CardDescription>Maklumat ini boleh dipaparkan jika perniagaan anda perlukan butiran cukai.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <div>
+              <label htmlFor="tax-number" className="mb-1 block text-sm font-medium text-muted-foreground">
+                No. Cukai
+              </label>
+              <Input
+                id="tax-number"
+                value={formData.tax_number}
+                onChange={(event) => setField('tax_number', event.target.value)}
+                placeholder="Contoh: SST123456"
+              />
+            </div>
+            <div>
+              <label htmlFor="business-reg-no" className="mb-1 block text-sm font-medium text-muted-foreground">
+                No. Pendaftaran Perniagaan / SSM
+              </label>
+              <Input
+                id="business-reg-no"
+                value={formData.business_reg_no}
+                onChange={(event) => setField('business_reg_no', event.target.value)}
+                placeholder="Contoh: 202301012345"
+              />
+            </div>
+          </div>
+
+          <div className="flex items-start gap-3 rounded-lg border p-3">
+            <Checkbox
+              id="show-tax"
+              checked={formData.show_tax}
+              onCheckedChange={(checked) => setField('show_tax', checked === true)}
+            />
+            <div>
+              <label htmlFor="show-tax" className="text-sm font-medium text-foreground">
+                Papar maklumat cukai pada cetakan
+              </label>
+              <p className="text-xs text-muted-foreground">Sesuai jika anda perlu paparkan nombor cukai pada invois rasmi.</p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>A4 Template</CardTitle>
           <CardDescription>Tetapan khusus untuk cetakan invois A4.</CardDescription>
         </CardHeader>
@@ -628,55 +700,8 @@ const InvoiceSettings = ({ userId }) => {
 
       <Card>
         <CardHeader>
-          <CardTitle>Tax / Registration</CardTitle>
-          <CardDescription>Maklumat ini boleh dipaparkan jika perniagaan anda perlukan butiran cukai.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <div>
-              <label htmlFor="tax-number" className="mb-1 block text-sm font-medium text-muted-foreground">
-                No. Cukai
-              </label>
-              <Input
-                id="tax-number"
-                value={formData.tax_number}
-                onChange={(event) => setField('tax_number', event.target.value)}
-                placeholder="Contoh: SST123456"
-              />
-            </div>
-            <div>
-              <label htmlFor="business-reg-no" className="mb-1 block text-sm font-medium text-muted-foreground">
-                No. Pendaftaran Perniagaan / SSM
-              </label>
-              <Input
-                id="business-reg-no"
-                value={formData.business_reg_no}
-                onChange={(event) => setField('business_reg_no', event.target.value)}
-                placeholder="Contoh: 202301012345"
-              />
-            </div>
-          </div>
-
-          <div className="flex items-start gap-3 rounded-lg border p-3">
-            <Checkbox
-              id="show-tax"
-              checked={formData.show_tax}
-              onCheckedChange={(checked) => setField('show_tax', checked === true)}
-            />
-            <div>
-              <label htmlFor="show-tax" className="text-sm font-medium text-foreground">
-                Papar maklumat cukai pada cetakan
-              </label>
-              <p className="text-xs text-muted-foreground">Sesuai jika anda perlu paparkan nombor cukai pada invois rasmi.</p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Thermal/Paperang Template</CardTitle>
-          <CardDescription>Thermal biasanya ringkas, logo boleh buat resit nampak semak.</CardDescription>
+          <CardTitle>Thermal Template</CardTitle>
+          <CardDescription>Tetapan khusus untuk cetakan thermal.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -692,16 +717,6 @@ const InvoiceSettings = ({ userId }) => {
             </div>
             <div className="flex items-start gap-3 rounded-lg border p-3">
               <Checkbox
-                id="show-logo-paperang"
-                checked={formData.show_logo_paperang}
-                onCheckedChange={(checked) => setField('show_logo_paperang', checked === true)}
-              />
-              <label htmlFor="show-logo-paperang" className="text-sm font-medium text-foreground">
-                Logo pada Paperang
-              </label>
-            </div>
-            <div className="flex items-start gap-3 rounded-lg border p-3">
-              <Checkbox
                 id="qr-enabled-thermal"
                 checked={formData.qr_enabled_thermal}
                 onCheckedChange={(checked) => setField('qr_enabled_thermal', checked === true)}
@@ -710,19 +725,6 @@ const InvoiceSettings = ({ userId }) => {
                 QR pada Thermal
               </label>
             </div>
-            <div className="flex items-start gap-3 rounded-lg border p-3">
-              <Checkbox
-                id="qr-enabled-paperang"
-                checked={formData.qr_enabled_paperang}
-                onCheckedChange={(checked) => setField('qr_enabled_paperang', checked === true)}
-              />
-              <label htmlFor="qr-enabled-paperang" className="text-sm font-medium text-foreground">
-                QR pada Paperang
-              </label>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <div className="flex items-start gap-3 rounded-lg border p-3">
               <Checkbox
                 id="thermal-show-address"
@@ -783,6 +785,37 @@ const InvoiceSettings = ({ userId }) => {
                 Generated by (Thermal)
               </label>
             </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Paperang Template</CardTitle>
+          <CardDescription>Tetapan khusus untuk export Paperang.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <div className="flex items-start gap-3 rounded-lg border p-3">
+              <Checkbox
+                id="show-logo-paperang"
+                checked={formData.show_logo_paperang}
+                onCheckedChange={(checked) => setField('show_logo_paperang', checked === true)}
+              />
+              <label htmlFor="show-logo-paperang" className="text-sm font-medium text-foreground">
+                Logo pada Paperang
+              </label>
+            </div>
+            <div className="flex items-start gap-3 rounded-lg border p-3">
+              <Checkbox
+                id="qr-enabled-paperang"
+                checked={formData.qr_enabled_paperang}
+                onCheckedChange={(checked) => setField('qr_enabled_paperang', checked === true)}
+              />
+              <label htmlFor="qr-enabled-paperang" className="text-sm font-medium text-foreground">
+                QR pada Paperang
+              </label>
+            </div>
             <div className="flex items-start gap-3 rounded-lg border p-3 md:col-span-2">
               <Checkbox
                 id="show-generated-by-paperang"
@@ -795,81 +828,112 @@ const InvoiceSettings = ({ userId }) => {
             </div>
           </div>
 
-          <div className="space-y-4 rounded-lg border p-4">
-            <p className="text-sm font-medium text-foreground">Kandungan QR (untuk semua template)</p>
-            <div>
-              <label htmlFor="qr-label" className="mb-1 block text-sm font-medium text-muted-foreground">
-                Label QR
-              </label>
-              <Input
-                id="qr-label"
-                value={formData.qr_label}
-                onChange={(event) => setField('qr_label', event.target.value)}
-                placeholder="Scan untuk lihat katalog"
-              />
-            </div>
-            <div>
-              <label htmlFor="qr-url-source" className="mb-1 block text-sm font-medium text-muted-foreground">
-                Sumber URL QR
-              </label>
-              <Select
-                id="qr-url-source"
-                value={qrUrlSource}
-                onChange={(event) => handleQrSourceChange(event.target.value)}
-              >
-                <option value="custom">Custom URL</option>
-                <option value="catalog" disabled={catalogLinkOptions.length === 0}>
-                  Link Katalog Sedia Ada
-                </option>
-              </Select>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Hanya satu pilihan boleh digunakan pada satu masa.
-              </p>
-            </div>
-            <div>
-              <label htmlFor="qr-catalog-link" className="mb-1 block text-sm font-medium text-muted-foreground">
-                Pilih Link Katalog
-              </label>
-              <Select
-                id="qr-catalog-link"
-                value={selectedCatalogCode}
-                onChange={(event) => handleCatalogLinkChange(event.target.value)}
-                disabled={qrUrlSource !== 'catalog' || catalogLinkOptions.length === 0}
-              >
-                <option value="">
-                  {isCatalogLinksLoading ? 'Memuatkan link katalog...' : 'Pilih link katalog'}
-                </option>
-                {catalogLinkOptions.map((option) => (
-                  <option key={option.id} value={option.public_code}>
-                    {option.title || 'Katalog'} - {option.public_code}
-                  </option>
-                ))}
-              </Select>
-              {qrCatalogError ? (
-                <p className="mt-1 text-xs text-red-600">{qrCatalogError}</p>
-              ) : (
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Jika pilih katalog, URL QR auto ikut link katalog terpilih.
-                </p>
-              )}
-            </div>
-            <div>
-              <label htmlFor="qr-url" className="mb-1 block text-sm font-medium text-muted-foreground">
-                URL QR
-              </label>
-              <Input
-                id="qr-url"
-                value={formData.qr_url}
-                onChange={(event) => setField('qr_url', event.target.value)}
-                placeholder="https://rarebits.my/catalog/xyz"
-                disabled={qrUrlSource !== 'custom'}
-              />
-              <p className="mt-1 text-xs text-muted-foreground">
-                Contoh: https://rarebits.my/catalog/xyz atau https://wa.me/60123456789?text=Hai
-              </p>
-              {qrUrlError && <p className="mt-1 text-xs text-red-600">{qrUrlError}</p>}
-            </div>
+          <p className="rounded-md border border-dashed border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+            Maklumat telefon/website/emel/alamat untuk Paperang ikut tetapan Thermal di atas.
+          </p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Kandungan QR</CardTitle>
+          <CardDescription>Tetapan ini dikongsi untuk A4, Thermal, dan Paperang.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div>
+            <label htmlFor="qr-mode" className="mb-1 block text-sm font-medium text-muted-foreground">
+              Kandungan QR
+            </label>
+            <Select
+              id="qr-mode"
+              value={formData.qr_mode || 'none'}
+              onChange={(event) => handleQrModeChange(event.target.value)}
+            >
+              <option value="none">Tiada (Jangan letak QR)</option>
+              <option value="url">Pautan (URL)</option>
+            </Select>
           </div>
+
+          {isQrDisabled ? (
+            <p className="rounded-md border border-dashed border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+              QR tidak akan dipaparkan pada resit.
+            </p>
+          ) : (
+            <>
+              <div>
+                <label htmlFor="qr-label" className="mb-1 block text-sm font-medium text-muted-foreground">
+                  Label QR
+                </label>
+                <Input
+                  id="qr-label"
+                  value={formData.qr_label}
+                  onChange={(event) => setField('qr_label', event.target.value)}
+                  placeholder="Scan untuk lihat katalog"
+                />
+              </div>
+              <div>
+                <label htmlFor="qr-url-source" className="mb-1 block text-sm font-medium text-muted-foreground">
+                  Sumber URL QR
+                </label>
+                <Select
+                  id="qr-url-source"
+                  value={qrUrlSource}
+                  onChange={(event) => handleQrSourceChange(event.target.value)}
+                >
+                  <option value="custom">Custom URL</option>
+                  <option value="catalog" disabled={catalogLinkOptions.length === 0}>
+                    Link Katalog Sedia Ada
+                  </option>
+                </Select>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Hanya satu pilihan boleh digunakan pada satu masa.
+                </p>
+              </div>
+              <div>
+                <label htmlFor="qr-catalog-link" className="mb-1 block text-sm font-medium text-muted-foreground">
+                  Pilih Link Katalog
+                </label>
+                <Select
+                  id="qr-catalog-link"
+                  value={selectedCatalogCode}
+                  onChange={(event) => handleCatalogLinkChange(event.target.value)}
+                  disabled={qrUrlSource !== 'catalog' || catalogLinkOptions.length === 0}
+                >
+                  <option value="">
+                    {isCatalogLinksLoading ? 'Memuatkan link katalog...' : 'Pilih link katalog'}
+                  </option>
+                  {catalogLinkOptions.map((option) => (
+                    <option key={option.id} value={option.public_code}>
+                      {option.title || 'Katalog'} - {option.public_code}
+                    </option>
+                  ))}
+                </Select>
+                {qrCatalogError ? (
+                  <p className="mt-1 text-xs text-red-600">{qrCatalogError}</p>
+                ) : (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Jika pilih katalog, URL QR auto ikut link katalog terpilih.
+                  </p>
+                )}
+              </div>
+              <div>
+                <label htmlFor="qr-url" className="mb-1 block text-sm font-medium text-muted-foreground">
+                  URL QR
+                </label>
+                <Input
+                  id="qr-url"
+                  value={formData.qr_url}
+                  onChange={(event) => setField('qr_url', event.target.value)}
+                  placeholder="https://rarebits.my/catalog/xyz"
+                  disabled={qrUrlSource !== 'custom'}
+                />
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Contoh: https://rarebits.my/catalog/xyz atau https://wa.me/60123456789?text=Hai
+                </p>
+                {qrUrlError && <p className="mt-1 text-xs text-red-600">{qrUrlError}</p>}
+              </div>
+            </>
+          )}
         </CardContent>
       </Card>
 

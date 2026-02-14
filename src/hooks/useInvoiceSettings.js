@@ -21,6 +21,7 @@ export const DEFAULT_INVOICE_SETTINGS = {
   qr_enabled_a4: false,
   qr_enabled_thermal: false,
   qr_enabled_paperang: false,
+  qr_mode: 'none',
   qr_label: 'Scan untuk lihat katalog',
   qr_url: '',
   tax_number: '',
@@ -38,6 +39,16 @@ export const DEFAULT_INVOICE_SETTINGS = {
   show_generated_by_paperang: false,
 };
 
+const normalizeQrMode = (mode, qrUrl) => {
+  const normalizedMode = typeof mode === 'string' ? mode.trim().toLowerCase() : '';
+  if (normalizedMode === 'none' || normalizedMode === 'url') {
+    return normalizedMode;
+  }
+
+  const hasQrUrl = typeof qrUrl === 'string' && qrUrl.trim().length > 0;
+  return hasQrUrl ? 'url' : 'none';
+};
+
 const normalizeInvoiceSettings = (settings) => ({
   ...DEFAULT_INVOICE_SETTINGS,
   ...(settings || {}),
@@ -48,6 +59,7 @@ const normalizeInvoiceSettings = (settings) => ({
   qr_enabled_a4: settings?.qr_enabled_a4 ?? DEFAULT_INVOICE_SETTINGS.qr_enabled_a4,
   qr_enabled_thermal: settings?.qr_enabled_thermal ?? DEFAULT_INVOICE_SETTINGS.qr_enabled_thermal,
   qr_enabled_paperang: settings?.qr_enabled_paperang ?? DEFAULT_INVOICE_SETTINGS.qr_enabled_paperang,
+  qr_mode: normalizeQrMode(settings?.qr_mode, settings?.qr_url),
   qr_label: settings?.qr_label ?? DEFAULT_INVOICE_SETTINGS.qr_label,
   qr_url: settings?.qr_url ?? DEFAULT_INVOICE_SETTINGS.qr_url,
   show_tax: settings?.show_tax ?? DEFAULT_INVOICE_SETTINGS.show_tax,
@@ -62,6 +74,13 @@ const normalizeInvoiceSettings = (settings) => ({
   show_generated_by_thermal: settings?.show_generated_by_thermal ?? DEFAULT_INVOICE_SETTINGS.show_generated_by_thermal,
   show_generated_by_paperang: settings?.show_generated_by_paperang ?? DEFAULT_INVOICE_SETTINGS.show_generated_by_paperang,
 });
+
+const isMissingQrModeColumnError = (error) => {
+  if (!error) return false;
+  const code = typeof error.code === 'string' ? error.code : '';
+  const message = typeof error.message === 'string' ? error.message : '';
+  return code === 'PGRST204' && message.toLowerCase().includes('qr_mode');
+};
 
 export const useInvoiceSettings = (userIdProp) => {
   const queryClient = useQueryClient();
@@ -111,11 +130,26 @@ export const useInvoiceSettings = (userIdProp) => {
         updated_at: new Date().toISOString(),
       };
 
-      const { data, error } = await supabase
+      const executeUpsert = (dataPayload) => supabase
         .from('invoice_settings')
-        .upsert(upsertPayload, { onConflict: 'user_id' })
+        .upsert(dataPayload, { onConflict: 'user_id' })
         .select('*')
         .single();
+
+      let { data, error } = await executeUpsert(upsertPayload);
+
+      // Backward-compatible fallback for environments where migration adding
+      // invoice_settings.qr_mode has not been applied yet.
+      if (isMissingQrModeColumnError(error)) {
+        const { qr_mode: _qrMode, ...legacyPayload } = upsertPayload;
+        if (upsertPayload.qr_mode === 'none') {
+          legacyPayload.qr_url = null;
+          legacyPayload.qr_enabled_a4 = false;
+          legacyPayload.qr_enabled_thermal = false;
+          legacyPayload.qr_enabled_paperang = false;
+        }
+        ({ data, error } = await executeUpsert(legacyPayload));
+      }
 
       if (error) throw error;
       return normalizeInvoiceSettings(data);

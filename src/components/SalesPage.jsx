@@ -54,7 +54,7 @@ const SalesPage = ({ items }) => {
           line_total,
           is_manual,
           item_name,
-          item:items(id, name, category),
+          item:items(id, name, category, cost_price),
           invoice:invoices(id, invoice_date, status, user_id)
         `)
         .order('created_at', { ascending: false });
@@ -74,6 +74,25 @@ const SalesPage = ({ items }) => {
 
   // Transform invoice items to sales records format
   const soldItems = useMemo(() => {
+    const getEffectiveUnitCost = (invItem) => {
+      const isManual = invItem.is_manual || !invItem.item_id;
+      const snapshotUnitCost = parseFloat(invItem.cost_price);
+      const fallbackItemUnitCost = parseFloat(invItem.item?.cost_price);
+
+      const hasSnapshotCost = Number.isFinite(snapshotUnitCost) && snapshotUnitCost > 0;
+      if (hasSnapshotCost) return snapshotUnitCost;
+
+      if (!isManual && Number.isFinite(fallbackItemUnitCost) && fallbackItemUnitCost >= 0) {
+        return fallbackItemUnitCost;
+      }
+
+      if (Number.isFinite(snapshotUnitCost) && snapshotUnitCost >= 0) {
+        return snapshotUnitCost;
+      }
+
+      return 0;
+    };
+
     return invoiceItems
       .filter(invItem => invItem.invoice && invItem.invoice.status === 'paid')
       .map(invItem => ({
@@ -81,7 +100,7 @@ const SalesPage = ({ items }) => {
         name: (invItem.is_manual || !invItem.item_id)
           ? (invItem.item_name || 'Item Manual')
           : (invItem.item?.name || 'Item'),
-        cost_price: parseFloat(invItem.cost_price) || 0,
+        cost_price: getEffectiveUnitCost(invItem),
         category: (invItem.is_manual || !invItem.item_id) ? 'Manual' : (invItem.item?.category || 'Lain-lain'),
         selling_price: invItem.unit_price,
         quantity_sold: invItem.quantity,
