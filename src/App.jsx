@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Helmet } from 'react-helmet';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Routes, Route, useLocation, useNavigate } from 'react-router-dom';
@@ -209,6 +209,11 @@ function App() {
     queryFn: () => fetchAllWallets(user.id),
     enabled: !!user,
   });
+
+  const businessWallets = useMemo(
+    () => wallets.filter((wallet) => wallet.account_type === 'Business'),
+    [wallets]
+  );
 
   const scheduleInventoryRefetch = useCallback(() => {
     if (!user || location.pathname !== '/inventory') return;
@@ -764,27 +769,24 @@ function App() {
 
                     console.log("[deleteItemMutation] Empty invoice deleted successfully");
                 } else {
-                    // Recalculate invoice totals
-                    console.log("[deleteItemMutation] Recalculating invoice totals...");
+                    // Recalculate using server-side source of truth.
+                    console.log("[deleteItemMutation] Recalculating invoice totals via RPC...");
 
-                    const { data: invoiceItems } = await supabase
-                        .from('invoice_items')
-                        .select('line_total')
-                        .eq('invoice_id', itemToDelete.invoice_id);
+                    const { data: recalcResult, error: recalcError } = await supabase.rpc(
+                        'recalculate_invoice_totals',
+                        {
+                            p_invoice_id: itemToDelete.invoice_id,
+                            p_user_id: user.id
+                        }
+                    );
 
-                    const newTotal = invoiceItems?.reduce((sum, item) => sum + (item.line_total || 0), 0) || 0;
+                    if (recalcError) {
+                        throw new Error(`Gagal mengemas kini jumlah invois: ${recalcError.message}`);
+                    }
 
-                    const { error: updateInvoiceError } = await supabase
-                        .from('invoices')
-                        .update({
-                            subtotal: newTotal,
-                            total_amount: newTotal,
-                            updated_at: new Date().toISOString()
-                        })
-                        .eq('id', itemToDelete.invoice_id);
-
-                    if (updateInvoiceError) {
-                        throw new Error(`Gagal mengemas kini jumlah invois: ${updateInvoiceError.message}`);
+                    const recalcResponse = Array.isArray(recalcResult) ? recalcResult[0] : null;
+                    if (!recalcResponse?.success) {
+                        throw new Error(recalcResponse?.message || 'Gagal mengemas kini jumlah invois');
                     }
 
                     console.log("[deleteItemMutation] Invoice totals recalculated");
@@ -1011,14 +1013,14 @@ function App() {
 
       <AnimatePresence>
         {(showAddForm || editingItem) && (
-          <ItemFormProvider itemId={editingItem?.id} categories={categories} wallets={wallets.filter(w => w.account_type === 'Business')}>
+          <ItemFormProvider itemId={editingItem?.id} categories={categories} wallets={businessWallets}>
             <AddItemForm 
               item={editingItem} 
               onSave={(data) => itemMutation.mutateAsync({ itemData: data, originalStatus: editingItem?.status })}
               onCancel={() => { setShowAddForm(false); setEditingItem(null); }} 
               categories={categories}
               clients={clients}
-              wallets={wallets.filter(w => w.account_type === 'Business')}
+              wallets={businessWallets}
               isSaving={itemMutation.isPending}
               onClientAdded={() => queryClient.invalidateQueries({ queryKey: ['clients', user.id]})}
             />

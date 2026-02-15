@@ -1,6 +1,19 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { useInvoiceDetail, useRemoveItemFromInvoice, useUpdateInvoiceStatus, useDeleteInvoice, useMarkInvoiceAsPaid, useReverseInvoicePayment, useProcessRefund } from '@/hooks/useInvoices';
+import {
+  useInvoiceDetail,
+  useRemoveItemFromInvoice,
+  useUpdateInvoiceStatus,
+  useDeleteInvoice,
+  useMarkInvoiceAsPaid,
+  useReverseInvoicePayment,
+  useProcessRefund,
+  useInvoiceShipment,
+  useSaveInvoiceShipment,
+  useUpdateInvoiceShipmentStatus,
+  useUpdateInvoiceShippingCharged,
+  useMarkShipmentCourierPaid,
+} from '@/hooks/useInvoices';
 import { useInvoiceSettings } from '@/hooks/useInvoiceSettings';
 import { formatCurrency } from '@/lib/utils';
 import { supabase } from '@/lib/customSupabaseClient';
@@ -56,6 +69,78 @@ const normalizeOptionalText = (value) => {
   if (typeof value !== 'string') return '';
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : '';
+};
+
+const SHIPPING_VALUE_CAP = 9999;
+const COURIER_MAX_LENGTH = 50;
+const TRACKING_NO_MAX_LENGTH = 64;
+const TRACKING_NO_PATTERN = /^[A-Za-z0-9\- ]*$/;
+const SHIPMENT_NOTES_MAX_LENGTH = 500;
+
+const normalizeWhitespaceText = (value) => {
+  if (typeof value !== 'string') return '';
+  return value.trim().replace(/\s+/g, ' ');
+};
+
+const normalizeCurrencyInput = (value, { label = 'Nilai', allowEmptyAsZero = true } = {}) => {
+  const rawValue = value === null || value === undefined ? '' : String(value);
+  const cleaned = rawValue.replace(/,/g, '').replace(/\s+/g, '');
+
+  if (!cleaned) {
+    if (allowEmptyAsZero) {
+      return { ok: true, value: 0, display: '0.00' };
+    }
+    return { ok: false, message: `${label} diperlukan.` };
+  }
+
+  const parsed = Number.parseFloat(cleaned);
+  if (!Number.isFinite(parsed)) {
+    return { ok: false, message: `${label} tidak sah.` };
+  }
+
+  const rounded = Math.round(parsed * 100) / 100;
+  if (rounded < 0) {
+    return { ok: false, message: `${label} mesti 0 atau lebih.` };
+  }
+
+  if (rounded > SHIPPING_VALUE_CAP) {
+    return { ok: false, message: 'Nombor terlalu besar - semak semula.' };
+  }
+
+  return { ok: true, value: rounded, display: rounded.toFixed(2) };
+};
+
+const toLocalDateTimeInputValue = (value = new Date()) => {
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) return '';
+  const timezoneOffsetMs = parsed.getTimezoneOffset() * 60000;
+  const localDate = new Date(parsed.getTime() - timezoneOffsetMs);
+  return localDate.toISOString().slice(0, 16);
+};
+
+const validateDeliveryTextFields = ({ courier, trackingNo }) => {
+  const nextErrors = { courier: '', trackingNo: '' };
+  const normalizedCourier = normalizeWhitespaceText(courier);
+  const normalizedTrackingNo = normalizeWhitespaceText(trackingNo);
+
+  if (normalizedCourier.length > COURIER_MAX_LENGTH) {
+    nextErrors.courier = `Nama courier maksimum ${COURIER_MAX_LENGTH} aksara.`;
+  }
+
+  if (normalizedTrackingNo.length > TRACKING_NO_MAX_LENGTH) {
+    nextErrors.trackingNo = `Tracking no maksimum ${TRACKING_NO_MAX_LENGTH} aksara.`;
+  } else if (normalizedTrackingNo && !TRACKING_NO_PATTERN.test(normalizedTrackingNo)) {
+    nextErrors.trackingNo = 'Tracking no hanya boleh guna huruf, nombor, dash dan ruang.';
+  }
+
+  return {
+    errors: nextErrors,
+    hasError: Boolean(nextErrors.courier || nextErrors.trackingNo),
+    values: {
+      courier: normalizedCourier,
+      trackingNo: normalizedTrackingNo,
+    },
+  };
 };
 
 const isValidHttpUrl = (value) => {
@@ -198,9 +283,27 @@ const InvoiceDetailsPage = () => {
   const [refundReason, setRefundReason] = useState('');
   const [refundNotes, setRefundNotes] = useState('');
   const [showPrintOptions, setShowPrintOptions] = useState(false);
+  const [showCourierPaidModal, setShowCourierPaidModal] = useState(false);
+  const [courierPaidCost, setCourierPaidCost] = useState('');
+  const [courierPaidCostError, setCourierPaidCostError] = useState('');
+  const [courierPaidDate, setCourierPaidDate] = useState(() => toLocalDateTimeInputValue(new Date()));
+  const [courierPaidDateError, setCourierPaidDateError] = useState('');
+  const [courierPaidNotes, setCourierPaidNotes] = useState('');
+  const [courierPaidNotesError, setCourierPaidNotesError] = useState('');
+  const [shippingChargedInput, setShippingChargedInput] = useState('0.00');
+  const [shippingChargedError, setShippingChargedError] = useState('');
+  const [deliveryFieldErrors, setDeliveryFieldErrors] = useState({
+    courier: '',
+    trackingNo: '',
+  });
+  const [deliveryForm, setDeliveryForm] = useState({
+    courier: '',
+    trackingNo: '',
+  });
 
   // Fetch invoice details
   const { data: invoice, isLoading, error } = useInvoiceDetail(invoiceId);
+  const { data: shipment, isLoading: isShipmentLoading } = useInvoiceShipment(invoiceId);
   const { settings: invoiceSettings } = useInvoiceSettings(invoice?.user_id);
   const printSettings = useMemo(
     () => buildInvoicePrintSettings(invoiceSettings),
@@ -222,6 +325,170 @@ const InvoiceDetailsPage = () => {
   const markInvoiceAsPaid = useMarkInvoiceAsPaid();
   const reversePayment = useReverseInvoicePayment();
   const processRefund = useProcessRefund();
+  const saveInvoiceShipment = useSaveInvoiceShipment();
+  const updateInvoiceShipmentStatus = useUpdateInvoiceShipmentStatus();
+  const updateInvoiceShippingCharged = useUpdateInvoiceShippingCharged();
+  const markShipmentCourierPaid = useMarkShipmentCourierPaid();
+
+  useEffect(() => {
+    setDeliveryForm({
+      courier: shipment?.courier || '',
+      trackingNo: shipment?.tracking_no || '',
+    });
+  }, [shipment?.courier, shipment?.tracking_no]);
+
+  useEffect(() => {
+    if (shipment?.shipping_cost && Number(shipment.shipping_cost) > 0) {
+      setCourierPaidCost(String(shipment.shipping_cost));
+    }
+  }, [shipment?.shipping_cost]);
+
+  useEffect(() => {
+    if (!showCourierPaidModal) return;
+
+    setCourierPaidCost((current) => {
+      if (current.trim() !== '') return current;
+      if (shipment?.shipping_cost && Number(shipment.shipping_cost) > 0) {
+        return String(shipment.shipping_cost);
+      }
+      return '';
+    });
+
+    setCourierPaidDate(toLocalDateTimeInputValue(new Date()));
+    setCourierPaidNotes(shipment?.notes || '');
+    setCourierPaidDateError('');
+    setCourierPaidNotesError('');
+  }, [showCourierPaidModal, shipment?.shipping_cost, shipment?.notes]);
+
+  useEffect(() => {
+    const normalizedShipping = normalizeCurrencyInput(invoice?.shipping_charged ?? 0, {
+      label: 'Caj pos',
+      allowEmptyAsZero: true,
+    });
+
+    if (normalizedShipping.ok) {
+      setShippingChargedInput(normalizedShipping.display);
+      setShippingChargedError('');
+    }
+  }, [invoice?.shipping_charged]);
+
+  const validateShippingChargedInput = ({ commitDisplay = false } = {}) => {
+    const normalized = normalizeCurrencyInput(shippingChargedInput, {
+      label: 'Caj pos',
+      allowEmptyAsZero: true,
+    });
+
+    if (!normalized.ok) {
+      setShippingChargedError(normalized.message);
+      return { ok: false, message: normalized.message };
+    }
+
+    if (commitDisplay) {
+      setShippingChargedInput(normalized.display);
+    }
+    setShippingChargedError('');
+    return { ok: true, value: normalized.value, display: normalized.display };
+  };
+
+  const validateCourierPaidCostInput = ({ commitDisplay = false } = {}) => {
+    const normalized = normalizeCurrencyInput(courierPaidCost, {
+      label: 'Kos courier',
+      allowEmptyAsZero: false,
+    });
+
+    if (!normalized.ok) {
+      setCourierPaidCostError(normalized.message);
+      return { ok: false, message: normalized.message };
+    }
+
+    if (commitDisplay) {
+      setCourierPaidCost(normalized.display);
+    }
+    setCourierPaidCostError('');
+    return { ok: true, value: normalized.value, display: normalized.display };
+  };
+
+  const validateCourierPaidDateInput = () => {
+    const rawDate = String(courierPaidDate || '').trim();
+    const fallbackDisplay = toLocalDateTimeInputValue(new Date());
+
+    if (!rawDate) {
+      setCourierPaidDate(fallbackDisplay);
+      setCourierPaidDateError('');
+      return { ok: true, iso: new Date().toISOString() };
+    }
+
+    const parsed = new Date(rawDate);
+    if (Number.isNaN(parsed.getTime())) {
+      const message = 'Tarikh bayaran tidak sah.';
+      setCourierPaidDateError(message);
+      return { ok: false, message };
+    }
+
+    setCourierPaidDateError('');
+    return { ok: true, iso: parsed.toISOString() };
+  };
+
+  const validateCourierPaidNotesInput = ({ normalize = false } = {}) => {
+    const cleaned = String(courierPaidNotes || '').trim();
+
+    if (cleaned.length > SHIPMENT_NOTES_MAX_LENGTH) {
+      const message = `Catatan maksimum ${SHIPMENT_NOTES_MAX_LENGTH} aksara.`;
+      setCourierPaidNotesError(message);
+      return { ok: false, message };
+    }
+
+    if (normalize) {
+      setCourierPaidNotes(cleaned);
+    }
+
+    setCourierPaidNotesError('');
+    return { ok: true, value: cleaned };
+  };
+
+  const validateDeliveryInput = ({ commitNormalized = false } = {}) => {
+    const validation = validateDeliveryTextFields(deliveryForm);
+    setDeliveryFieldErrors(validation.errors);
+
+    if (validation.hasError) {
+      return { ok: false, errors: validation.errors };
+    }
+
+    if (commitNormalized) {
+      setDeliveryForm(validation.values);
+    }
+
+    return { ok: true, values: validation.values };
+  };
+
+  const persistShippingCharged = async ({ silentSuccess = false } = {}) => {
+    const validated = validateShippingChargedInput({ commitDisplay: true });
+    if (!validated.ok) {
+      return false;
+    }
+
+    const currentShipping = Math.max(parseFloat(invoice?.shipping_charged) || 0, 0);
+    if (Math.abs(currentShipping - validated.value) <= 0.0001) {
+      return true;
+    }
+
+    try {
+      await updateInvoiceShippingCharged.mutateAsync({
+        invoiceId,
+        shippingCharged: validated.value,
+      });
+
+      if (!silentSuccess) {
+        toast.success('Caj pos berjaya dikemaskini');
+      }
+      return true;
+    } catch (shippingError) {
+      const message = shippingError?.message || 'Gagal kemaskini caj pos';
+      setShippingChargedError(message);
+      toast.error(message);
+      return false;
+    }
+  };
 
   const handleRemoveItem = async (itemId) => {
     try {
@@ -238,6 +505,11 @@ const InvoiceDetailsPage = () => {
 
   const handleStatusChange = async (newStatus) => {
     try {
+      if (newStatus === 'finalized' || newStatus === 'paid') {
+        const shippingReady = await persistShippingCharged({ silentSuccess: true });
+        if (!shippingReady) return;
+      }
+
       if (newStatus === 'paid') {
         const availabilityCheck = await validateInvoiceAvailability();
         if (!availabilityCheck.ok) return;
@@ -1457,6 +1729,9 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
 
   const handleMarkAsPaid = async () => {
     try {
+      const shippingReady = await persistShippingCharged({ silentSuccess: true });
+      if (!shippingReady) return;
+
       const availabilityCheck = await validateInvoiceAvailability();
       if (!availabilityCheck.ok) return;
 
@@ -1468,6 +1743,96 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
       console.error('[InvoiceDetailsPage] Error marking as paid:', error);
       toast.error('Ralat: ' + (error.message || 'Gagal menandai sebagai dibayar'));
     }
+  };
+
+  const handleSaveTracking = async () => {
+    try {
+      const deliveryValidation = validateDeliveryInput({ commitNormalized: true });
+      if (!deliveryValidation.ok) {
+        const message = deliveryValidation.errors.courier || deliveryValidation.errors.trackingNo;
+        toast.error(message || 'Sila semak maklumat penghantaran');
+        return;
+      }
+
+      await saveInvoiceShipment.mutateAsync({
+        invoiceId,
+        courier: deliveryValidation.values.courier,
+        trackingNo: deliveryValidation.values.trackingNo,
+      });
+      toast.success('Tracking berjaya disimpan');
+    } catch (saveError) {
+      console.error('[InvoiceDetailsPage] Error saving shipment tracking:', saveError);
+      toast.error(saveError?.message || 'Gagal simpan tracking');
+    }
+  };
+
+  const handleUpdateShipmentStatus = async (shipStatus) => {
+    try {
+      const deliveryValidation = validateDeliveryInput({ commitNormalized: true });
+      if (!deliveryValidation.ok) {
+        const message = deliveryValidation.errors.courier || deliveryValidation.errors.trackingNo;
+        toast.error(message || 'Sila semak maklumat penghantaran');
+        return;
+      }
+
+      await updateInvoiceShipmentStatus.mutateAsync({
+        invoiceId,
+        shipStatus,
+        courier: deliveryValidation.values.courier,
+        trackingNo: deliveryValidation.values.trackingNo,
+      });
+      if (shipStatus === 'shipped') {
+        toast.success('Status penghantaran: Shipped');
+      } else if (shipStatus === 'delivered') {
+        toast.success('Status penghantaran: Delivered');
+      } else {
+        toast.success('Status penghantaran dikemaskini');
+      }
+    } catch (statusError) {
+      console.error('[InvoiceDetailsPage] Error updating shipment status:', statusError);
+      toast.error('Gagal kemaskini status penghantaran');
+    }
+  };
+
+  const handleMarkCourierPaid = async () => {
+    try {
+      const shippingCostValidation = validateCourierPaidCostInput({ commitDisplay: true });
+      if (!shippingCostValidation.ok) {
+        toast.error(shippingCostValidation.message || 'Kos courier tidak sah');
+        return;
+      }
+
+      const paidDateValidation = validateCourierPaidDateInput();
+      if (!paidDateValidation.ok) {
+        toast.error(paidDateValidation.message || 'Tarikh bayaran tidak sah');
+        return;
+      }
+
+      const notesValidation = validateCourierPaidNotesInput({ normalize: true });
+      if (!notesValidation.ok) {
+        toast.error(notesValidation.message || 'Catatan tidak sah');
+        return;
+      }
+
+      await markShipmentCourierPaid.mutateAsync({
+        invoiceId,
+        shippingCost: shippingCostValidation.value,
+        paidAt: paidDateValidation.iso,
+        notes: notesValidation.value,
+      });
+      toast.success('Bayaran courier berjaya direkod');
+      setShowCourierPaidModal(false);
+      setCourierPaidCost('');
+      setCourierPaidDate(toLocalDateTimeInputValue(new Date()));
+      setCourierPaidNotes('');
+    } catch (markPaidError) {
+      console.error('[InvoiceDetailsPage] Error marking courier paid:', markPaidError);
+      toast.error(markPaidError.message || 'Gagal rekod bayaran courier');
+    }
+  };
+
+  const handleSaveShippingCharged = async () => {
+    await persistShippingCharged({ silentSuccess: false });
   };
 
   const handleReversePayment = async () => {
@@ -1542,6 +1907,30 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
     return labels[status] || status;
   };
 
+  const getShipmentStatusBadgeColor = (shipStatus) => {
+    const statusColors = {
+      not_required: 'bg-slate-100 text-slate-700',
+      pending: 'bg-amber-100 text-amber-800',
+      shipped: 'bg-blue-100 text-blue-800',
+      delivered: 'bg-emerald-100 text-emerald-800',
+      returned: 'bg-rose-100 text-rose-800',
+      cancelled: 'bg-red-100 text-red-800',
+    };
+    return statusColors[shipStatus] || 'bg-slate-100 text-slate-700';
+  };
+
+  const getShipmentStatusLabel = (shipStatus) => {
+    const labels = {
+      not_required: 'Tak Perlu Pos',
+      pending: 'Pending',
+      shipped: 'Shipped',
+      delivered: 'Delivered',
+      returned: 'Returned',
+      cancelled: 'Cancelled',
+    };
+    return labels[shipStatus] || 'Pending';
+  };
+
   if (isLoading) {
     return (
       <div className="p-6">
@@ -1557,6 +1946,25 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
       </div>
     );
   }
+
+  const shippingChargedAmount = Math.max(parseFloat(invoice.shipping_charged) || 0, 0);
+  const shippingMethod = String(invoice.shipping_method || '').trim().toLowerCase();
+  const deliveryNotRequired = shippingChargedAmount === 0
+    && (invoice.shipping_required === false || ['pickup', 'meetup', 'selfpickup'].includes(shippingMethod));
+  const shipmentStatus = deliveryNotRequired ? 'not_required' : (shipment?.ship_status || 'pending');
+  const deliveryActionsDisabled = invoice.status !== 'paid';
+  const isSavingDelivery = saveInvoiceShipment.isPending || updateInvoiceShipmentStatus.isPending;
+  const isSavingShippingCharged = updateInvoiceShippingCharged.isPending;
+  const hasCourierPaid = Boolean(shipment?.courier_paid);
+  const hasShipmentRecord = Boolean(shipment?.id || invoice?.shipment_id);
+  const canShowCourierPaidAction = !deliveryNotRequired && invoice.status === 'paid' && hasShipmentRecord;
+  const courierPayAllowedByStatus = ['pending', 'shipped', 'delivered'].includes(shipmentStatus);
+  const canMarkCourierPaid = canShowCourierPaidAction && courierPayAllowedByStatus && !hasCourierPaid;
+  const isMarkingCourierPaid = markShipmentCourierPaid.isPending;
+  const shippingCostValue = Math.max(parseFloat(shipment?.shipping_cost) || 0, 0);
+  const isShippingCostRecorded = Boolean(shipment && (shipment.courier_paid || shippingCostValue > 0));
+  const shippingProfitValue = shippingChargedAmount - shippingCostValue;
+  const hasTrackingNumber = normalizeWhitespaceText(shipment?.tracking_no || deliveryForm.trackingNo || '').length > 0;
 
   return (
     <div className="space-y-6 p-6">
@@ -1843,6 +2251,12 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                     {formatCurrency(invoice.tax_amount)}
                   </span>
                 </div>
+                <div className="flex justify-between text-sm">
+                  <span>Caj Pos Dikutip:</span>
+                  <span className="font-medium">
+                    {formatCurrency(invoice.shipping_charged || 0)}
+                  </span>
+                </div>
               </div>
 
               <div className="flex justify-between text-xl font-bold">
@@ -1856,7 +2270,7 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                   onClick={() => handleStatusChange('finalized')}
                   size="default"
                   className="w-full h-10"
-                  disabled={updateStatus.isPending}
+                  disabled={updateStatus.isPending || isSavingShippingCharged || Boolean(shippingChargedError)}
                 >
                   Muktamadkan Invois
                 </Button>
@@ -1867,7 +2281,7 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                   onClick={handleMarkAsPaid}
                   size="default"
                   className="w-full bg-green-600 hover:bg-green-700 h-10"
-                  disabled={markInvoiceAsPaid.isPending}
+                  disabled={markInvoiceAsPaid.isPending || isSavingShippingCharged || Boolean(shippingChargedError)}
                 >
                   {markInvoiceAsPaid.isPending ? 'Sedang Memproses...' : 'Tandai Dibayar'}
                 </Button>
@@ -1898,6 +2312,220 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                     </div>
                   )}
                 </>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card className="mt-6">
+            <CardHeader>
+              <CardTitle>Delivery</CardTitle>
+              <CardDescription>
+                Urus tracking penghantaran. Caj pos ini bukan revenue.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center justify-between rounded-lg border bg-slate-50 p-3">
+                <div>
+                  <p className="text-xs font-medium text-slate-600">Caj Pos Dikutip</p>
+                  <p className="text-lg font-semibold text-slate-900">
+                    {formatCurrency(shippingChargedAmount)}
+                  </p>
+                </div>
+                <span className={`inline-block rounded-full px-3 py-1 text-xs font-medium ${getShipmentStatusBadgeColor(shipmentStatus)}`}>
+                  {getShipmentStatusLabel(shipmentStatus)}
+                </span>
+              </div>
+
+              <div className="rounded-lg border p-3">
+                <label className="mb-1 block text-xs font-medium text-gray-600">Caj Pos Dikutip (RM)</label>
+                <Input
+                  type="text"
+                  inputMode="decimal"
+                  placeholder="0.00"
+                  value={shippingChargedInput}
+                  onChange={(event) => {
+                    setShippingChargedInput(event.target.value);
+                    if (shippingChargedError) {
+                      setShippingChargedError('');
+                    }
+                  }}
+                  onBlur={() => {
+                    validateShippingChargedInput({ commitDisplay: true });
+                  }}
+                  disabled={invoice.status === 'paid' || isSavingShippingCharged}
+                  className="h-10"
+                />
+                {shippingChargedError && (
+                  <p className="mt-1 text-xs text-red-600">{shippingChargedError}</p>
+                )}
+                <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-xs text-gray-500">
+                    Kos pos yang dibayar pelanggan. Biar kosong untuk auto 0.
+                  </p>
+                  {invoice.status !== 'paid' && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleSaveShippingCharged}
+                      disabled={isSavingShippingCharged}
+                    >
+                      {isSavingShippingCharged ? 'Menyimpan...' : 'Simpan Caj Pos'}
+                    </Button>
+                  )}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-2 rounded-lg border p-3">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-slate-600">Kos Courier</span>
+                  <span className="font-medium text-slate-900">{formatCurrency(shippingCostValue)}</span>
+                </div>
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-slate-500">Status Bayaran Courier</span>
+                  <span className={`inline-block rounded-full px-2.5 py-0.5 font-medium ${hasCourierPaid ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                    {hasCourierPaid ? 'Telah Dibayar' : 'Belum Dibayar'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-slate-500">Untung/Rugi Pos</span>
+                  {isShippingCostRecorded ? (
+                    <span className={`inline-block rounded-full px-2.5 py-0.5 font-medium ${shippingProfitValue >= 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
+                      {formatCurrency(shippingProfitValue)}
+                    </span>
+                  ) : (
+                    <span className="inline-block rounded-full bg-slate-100 px-2.5 py-0.5 font-medium text-slate-600">
+                      Pending kos courier
+                    </span>
+                  )}
+                </div>
+                {shipment?.courier_paid_at && (
+                  <p className="text-xs text-slate-500">
+                    Dibayar pada {format(new Date(shipment.courier_paid_at), 'dd MMM yyyy, HH:mm', { locale: ms })}
+                  </p>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 gap-3">
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-gray-600">Courier</label>
+                  <Input
+                    placeholder="Contoh: J&T, PosLaju"
+                    value={deliveryForm.courier}
+                    onChange={(event) => {
+                      setDeliveryForm((prev) => ({ ...prev, courier: event.target.value }));
+                      if (deliveryFieldErrors.courier) {
+                        setDeliveryFieldErrors((prev) => ({ ...prev, courier: '' }));
+                      }
+                    }}
+                    onBlur={() => {
+                      const validation = validateDeliveryTextFields(deliveryForm);
+                      setDeliveryFieldErrors(validation.errors);
+                      setDeliveryForm((prev) => ({ ...prev, courier: validation.values.courier }));
+                    }}
+                    disabled={deliveryActionsDisabled}
+                    className="h-10"
+                  />
+                  {deliveryFieldErrors.courier && (
+                    <p className="mt-1 text-xs text-red-600">{deliveryFieldErrors.courier}</p>
+                  )}
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-gray-600">Tracking No</label>
+                  <Input
+                    placeholder="Masukkan nombor tracking"
+                    value={deliveryForm.trackingNo}
+                    onChange={(event) => {
+                      setDeliveryForm((prev) => ({ ...prev, trackingNo: event.target.value }));
+                      if (deliveryFieldErrors.trackingNo) {
+                        setDeliveryFieldErrors((prev) => ({ ...prev, trackingNo: '' }));
+                      }
+                    }}
+                    onBlur={() => {
+                      const validation = validateDeliveryTextFields(deliveryForm);
+                      setDeliveryFieldErrors(validation.errors);
+                      setDeliveryForm((prev) => ({ ...prev, trackingNo: validation.values.trackingNo }));
+                    }}
+                    disabled={deliveryActionsDisabled}
+                    className="h-10"
+                  />
+                  {deliveryFieldErrors.trackingNo && (
+                    <p className="mt-1 text-xs text-red-600">{deliveryFieldErrors.trackingNo}</p>
+                  )}
+                </div>
+              </div>
+
+              {shipment?.shipped_at && (
+                <p className="text-xs text-gray-600">
+                  Shipped: {format(new Date(shipment.shipped_at), 'dd MMM yyyy, HH:mm', { locale: ms })}
+                </p>
+              )}
+              {shipment?.delivered_at && (
+                <p className="text-xs text-gray-600">
+                  Delivered: {format(new Date(shipment.delivered_at), 'dd MMM yyyy, HH:mm', { locale: ms })}
+                </p>
+              )}
+
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="outline"
+                  size="default"
+                  onClick={handleSaveTracking}
+                  disabled={deliveryActionsDisabled || isSavingDelivery || isShipmentLoading}
+                  className="h-10"
+                >
+                  Simpan Tracking
+                </Button>
+                <Button
+                  variant="outline"
+                  size="default"
+                  onClick={() => handleUpdateShipmentStatus('shipped')}
+                  disabled={deliveryActionsDisabled || isSavingDelivery || isShipmentLoading || shipmentStatus === 'shipped' || shipmentStatus === 'delivered'}
+                  className="h-10"
+                >
+                  Mark Shipped
+                </Button>
+                <Button
+                  variant="outline"
+                  size="default"
+                  onClick={() => handleUpdateShipmentStatus('delivered')}
+                  disabled={deliveryActionsDisabled || isSavingDelivery || isShipmentLoading || shipmentStatus === 'delivered'}
+                  className="h-10"
+                >
+                  Delivered
+                </Button>
+                {canShowCourierPaidAction && (
+                  <Button
+                    variant="outline"
+                    size="default"
+                    onClick={() => setShowCourierPaidModal(true)}
+                    disabled={!canMarkCourierPaid || isMarkingCourierPaid || isShipmentLoading}
+                    className="h-10"
+                  >
+                    {hasCourierPaid ? 'Courier Paid' : 'Mark Courier Paid'}
+                  </Button>
+                )}
+              </div>
+
+              {hasCourierPaid && (
+                <p className="text-xs text-emerald-700">
+                  Courier telah dibayar. Kos courier dikunci dan tidak boleh diubah.
+                </p>
+              )}
+              {canShowCourierPaidAction && !hasCourierPaid && !hasTrackingNumber && (
+                <p className="text-xs text-amber-700">
+                  Tracking boleh dimasukkan kemudian.
+                </p>
+              )}
+              {canShowCourierPaidAction && !hasCourierPaid && !courierPayAllowedByStatus && (
+                <p className="text-xs text-amber-700">
+                  Bayaran courier hanya untuk status Pending, Shipped atau Delivered.
+                </p>
+              )}
+
+              {deliveryActionsDisabled && (
+                <p className="text-xs text-gray-500">
+                  Delivery boleh dikemaskini selepas invois ditandai sebagai dibayar.
+                </p>
               )}
             </CardContent>
           </Card>
@@ -1998,6 +2626,126 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                 className="bg-amber-600 hover:bg-amber-700 h-10"
               >
                 {processRefund.isPending ? 'Sedang Memproses...' : 'Kembalikan Dana'}
+              </Button>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {/* Courier Paid Modal */}
+      {showCourierPaidModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <Card className="w-full max-w-md">
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
+              <div>
+                <CardTitle>Mark Courier Paid</CardTitle>
+                <CardDescription className="mt-2">
+                  Invois: <span className="font-semibold text-foreground">{invoice?.invoice_number}</span>
+                </CardDescription>
+                <CardDescription>
+                  Shipment: <span className="font-semibold text-foreground">{shipment?.id || invoice?.shipment_id || '-'}</span>
+                </CardDescription>
+              </div>
+              <button
+                onClick={() => setShowCourierPaidModal(false)}
+                className="text-gray-500 hover:text-gray-700"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Kos Courier (RM) *</label>
+                <Input
+                  type="text"
+                  inputMode="decimal"
+                  placeholder="0.00"
+                  value={courierPaidCost}
+                  onChange={(event) => {
+                    setCourierPaidCost(event.target.value);
+                    if (courierPaidCostError) {
+                      setCourierPaidCostError('');
+                    }
+                  }}
+                  onBlur={() => {
+                    validateCourierPaidCostInput({ commitDisplay: true });
+                  }}
+                  className="h-10"
+                />
+                {courierPaidCostError && (
+                  <p className="text-xs text-red-600">{courierPaidCostError}</p>
+                )}
+                <p className="text-xs text-gray-600">
+                  Nilai ini akan ditolak dari dompet Business dan direkod sebagai expense.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Tarikh Bayaran *</label>
+                <Input
+                  type="datetime-local"
+                  value={courierPaidDate}
+                  onChange={(event) => {
+                    setCourierPaidDate(event.target.value);
+                    if (courierPaidDateError) {
+                      setCourierPaidDateError('');
+                    }
+                  }}
+                  onBlur={() => {
+                    validateCourierPaidDateInput();
+                  }}
+                  className="h-10"
+                />
+                {courierPaidDateError && (
+                  <p className="text-xs text-red-600">{courierPaidDateError}</p>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Catatan (Pilihan)</label>
+                <textarea
+                  value={courierPaidNotes}
+                  onChange={(event) => {
+                    setCourierPaidNotes(event.target.value);
+                    if (courierPaidNotesError) {
+                      setCourierPaidNotesError('');
+                    }
+                  }}
+                  onBlur={() => {
+                    validateCourierPaidNotesInput({ normalize: true });
+                  }}
+                  maxLength={SHIPMENT_NOTES_MAX_LENGTH}
+                  rows={3}
+                  className="flex w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="Contoh: Bayar di kaunter J&T"
+                />
+                {courierPaidNotesError && (
+                  <p className="text-xs text-red-600">{courierPaidNotesError}</p>
+                )}
+              </div>
+            </CardContent>
+            <div className="flex justify-end gap-3 border-t p-4">
+              <Button
+                variant="outline"
+                onClick={() => setShowCourierPaidModal(false)}
+                disabled={isMarkingCourierPaid}
+                className="h-10"
+              >
+                Batal
+              </Button>
+              <Button
+                onClick={handleMarkCourierPaid}
+                disabled={
+                  isMarkingCourierPaid
+                  || Boolean(courierPaidCostError)
+                  || Boolean(courierPaidDateError)
+                  || Boolean(courierPaidNotesError)
+                  || courierPaidCost.trim() === ''
+                  || courierPaidDate.trim() === ''
+                }
+                className="h-10"
+              >
+                {isMarkingCourierPaid ? 'Sedang Memproses...' : 'Sahkan Bayaran'}
               </Button>
             </div>
           </Card>

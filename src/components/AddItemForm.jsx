@@ -121,6 +121,11 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
   const galleryInputRef = useRef(null);
   const libraryCameraInputRef = useRef(null);
   const cameraInputRef = useRef(null);
+  const initializeFromItemRef = useRef(initializeFromItem);
+
+  useEffect(() => {
+    initializeFromItemRef.current = initializeFromItem;
+  }, [initializeFromItem]);
 
   const isMobileDevice = useMemo(() => {
     if (typeof navigator === 'undefined') return false;
@@ -133,7 +138,7 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
   useLayoutEffect(() => {
     if (!item) {
       console.log('[AddItemForm] New item, initializing from null');
-      initializeFromItem(null);
+      initializeFromItemRef.current(null);
       lastInitializedItemIdRef.current = null;
       return;
     }
@@ -141,12 +146,12 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
     // Only initialize once per item ID
     if (lastInitializedItemIdRef.current !== item.id) {
       console.log('[AddItemForm] First time opening item:', item.id, '- initializing from server');
-      initializeFromItem(item);
+      initializeFromItemRef.current(item);
       lastInitializedItemIdRef.current = item.id;
     } else {
       console.log('[AddItemForm] Already initialized this item:', item.id);
     }
-  }, [item?.id, initializeFromItem]);
+  }, [item?.id]);
 
   useEffect(() => {
     setIsEditingReservations(false);

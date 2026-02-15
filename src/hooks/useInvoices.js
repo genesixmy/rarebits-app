@@ -1,6 +1,77 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/customSupabaseClient';
 
+const SHIPPING_VALUE_CAP = 9999;
+const COURIER_MAX_LENGTH = 50;
+const TRACKING_NO_MAX_LENGTH = 64;
+const TRACKING_NO_PATTERN = /^[A-Za-z0-9\- ]*$/;
+const SHIPMENT_NOTES_MAX_LENGTH = 500;
+
+const normalizeTextInput = (value) => {
+  if (typeof value !== 'string') return '';
+  return value.trim();
+};
+
+const normalizeCurrencyAmount = (value, { label = 'Nilai', allowEmptyAsZero = true } = {}) => {
+  const rawValue = value === null || value === undefined ? '' : String(value);
+  const cleaned = rawValue.replace(/,/g, '').replace(/\s+/g, '');
+
+  if (!cleaned) {
+    if (allowEmptyAsZero) {
+      return { ok: true, value: 0 };
+    }
+    return { ok: false, message: `${label} diperlukan.` };
+  }
+
+  const parsed = Number.parseFloat(cleaned);
+  if (!Number.isFinite(parsed)) {
+    return { ok: false, message: `${label} tidak sah.` };
+  }
+
+  const rounded = Math.round(parsed * 100) / 100;
+  if (rounded < 0) {
+    return { ok: false, message: `${label} mesti 0 atau lebih.` };
+  }
+
+  if (rounded > SHIPPING_VALUE_CAP) {
+    return { ok: false, message: 'Nombor terlalu besar - semak semula.' };
+  }
+
+  return { ok: true, value: rounded };
+};
+
+const validateShipmentTextFields = ({ courier, trackingNo }) => {
+  const normalizedCourier = normalizeTextInput(courier);
+  const normalizedTrackingNo = normalizeTextInput(trackingNo);
+
+  if (normalizedCourier.length > COURIER_MAX_LENGTH) {
+    return {
+      ok: false,
+      message: `Nama courier maksimum ${COURIER_MAX_LENGTH} aksara.`,
+    };
+  }
+
+  if (normalizedTrackingNo.length > TRACKING_NO_MAX_LENGTH) {
+    return {
+      ok: false,
+      message: `Tracking no maksimum ${TRACKING_NO_MAX_LENGTH} aksara.`,
+    };
+  }
+
+  if (normalizedTrackingNo && !TRACKING_NO_PATTERN.test(normalizedTrackingNo)) {
+    return {
+      ok: false,
+      message: 'Tracking no hanya boleh guna huruf, nombor, dash dan ruang.',
+    };
+  }
+
+  return {
+    ok: true,
+    courier: normalizedCourier,
+    trackingNo: normalizedTrackingNo,
+  };
+};
+
 /**
  * Hook to fetch all invoices for the current user
  */
@@ -235,7 +306,6 @@ export const useCreateInvoice = () => {
       if (invoiceError) throw invoiceError;
 
       // Add inventory items to invoice
-      let totalAmount = 0;
       await Promise.all(
         selectedItems.map(async (selectedItem) => {
           const itemId = selectedItem.id;
@@ -243,8 +313,6 @@ export const useCreateInvoice = () => {
           const unitPrice = selectedItem.unit_price || selectedItem.selling_price;
 
           console.log('[useCreateInvoice] Adding inventory item to invoice:', { itemId, itemQuantity, unitPrice });
-
-          totalAmount += unitPrice * itemQuantity;
 
           const { data: rpcResult, error: rpcError } = await supabase.rpc('add_item_to_invoice', {
             p_invoice_id: invoice.id,
@@ -282,7 +350,6 @@ export const useCreateInvoice = () => {
           const itemPrice = parseFloat(manualItem.selling_price) || 0;
           const itemCost = parseFloat(manualItem.cost_price) || 0;
           const itemQuantity = Math.max(1, parseInt(manualItem.quantity, 10) || 1);
-          totalAmount += itemPrice * itemQuantity;
 
           console.log('[useCreateInvoice] RPC parameters:', {
             p_invoice_id: invoice.id,
@@ -322,16 +389,15 @@ export const useCreateInvoice = () => {
         })
       );
 
-      // Update invoice with total
-      await supabase
+      const { data: refreshedInvoice, error: refreshError } = await supabase
         .from('invoices')
-        .update({
-          subtotal: totalAmount,
-          total_amount: totalAmount,
-        })
-        .eq('id', invoice.id);
+        .select('*')
+        .eq('id', invoice.id)
+        .single();
 
-      return { ...invoice, subtotal: totalAmount, total_amount: totalAmount };
+      if (refreshError) throw refreshError;
+
+      return refreshedInvoice || invoice;
     },
     onSuccess: async () => {
       // Invalidate all related queries
@@ -418,6 +484,27 @@ export const useRemoveItemFromInvoice = () => {
 
       if (error) throw error;
       if (!data[0]?.success) throw new Error(data[0]?.message || 'Failed to remove item');
+
+      const { data: invoiceExists, error: invoiceExistsError } = await supabase
+        .from('invoices')
+        .select('id')
+        .eq('id', invoiceId)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (invoiceExistsError) throw invoiceExistsError;
+
+      if (invoiceExists?.id) {
+        const { data: recalcData, error: recalcError } = await supabase.rpc('recalculate_invoice_totals', {
+          p_invoice_id: invoiceId,
+          p_user_id: userId,
+        });
+
+        if (recalcError) throw recalcError;
+        if (!recalcData?.[0]?.success) {
+          throw new Error(recalcData?.[0]?.message || 'Failed to recalculate invoice total');
+        }
+      }
 
       return data[0];
     },
@@ -1104,6 +1191,411 @@ export const useProcessRefund = () => {
   });
 };
 
+/**
+ * Mutation to update invoice shipping charged safely
+ */
+export const useUpdateInvoiceShippingCharged = () => {
+  const queryClient = useQueryClient();
+  const { data: authData } = useQuery({
+    queryKey: ['auth'],
+    queryFn: async () => {
+      const { data } = await supabase.auth.getSession();
+      return data;
+    },
+  });
+
+  const userId = authData?.session?.user?.id;
+
+  return useMutation({
+    mutationFn: async ({ invoiceId, shippingCharged }) => {
+      if (!userId) throw new Error('User not authenticated');
+      if (!invoiceId) throw new Error('Invoice ID is required');
+
+      const normalizedShipping = normalizeCurrencyAmount(shippingCharged, {
+        label: 'Caj pos',
+        allowEmptyAsZero: true,
+      });
+
+      if (!normalizedShipping.ok) {
+        throw new Error(normalizedShipping.message);
+      }
+
+      const { data, error } = await supabase.rpc('update_invoice_shipping_charged', {
+        p_invoice_id: invoiceId,
+        p_user_id: userId,
+        p_shipping_charged: normalizedShipping.value,
+      });
+
+      if (error) throw error;
+
+      const response = Array.isArray(data) ? data[0] : null;
+      if (!response?.success) {
+        throw new Error(response?.message || 'Gagal kemaskini caj pos');
+      }
+
+      return response;
+    },
+    onSuccess: (_, { invoiceId }) => {
+      queryClient.invalidateQueries({ queryKey: ['invoice', invoiceId] });
+      queryClient.invalidateQueries({ queryKey: ['invoices'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['sales'] });
+    },
+  });
+};
+
+/**
+ * Hook to fetch shipment details linked to an invoice
+ */
+export const useInvoiceShipment = (invoiceId) => {
+  const { data: authData } = useQuery({
+    queryKey: ['auth'],
+    queryFn: async () => {
+      const { data } = await supabase.auth.getSession();
+      return data;
+    },
+  });
+
+  const userId = authData?.session?.user?.id;
+
+  return useQuery({
+    queryKey: ['invoice-shipment', invoiceId, userId],
+    queryFn: async () => {
+      if (!invoiceId || !userId) return null;
+
+      const { data: invoiceData, error: invoiceError } = await supabase
+        .from('invoices')
+        .select('id, user_id, shipment_id')
+        .eq('id', invoiceId)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (invoiceError) throw invoiceError;
+      if (!invoiceData?.shipment_id) return null;
+
+      const { data: shipmentData, error: shipmentError } = await supabase
+        .from('shipments')
+        .select('id, user_id, courier, tracking_no, ship_status, shipped_at, delivered_at, shipping_cost, courier_paid, courier_paid_at, notes, created_at, updated_at')
+        .eq('id', invoiceData.shipment_id)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (shipmentError) throw shipmentError;
+      return shipmentData || null;
+    },
+    enabled: !!invoiceId && !!userId,
+    staleTime: 0,
+  });
+};
+
+/**
+ * Mutation to create/update shipment tracking info for an invoice
+ */
+export const useSaveInvoiceShipment = () => {
+  const queryClient = useQueryClient();
+  const { data: authData } = useQuery({
+    queryKey: ['auth'],
+    queryFn: async () => {
+      const { data } = await supabase.auth.getSession();
+      return data;
+    },
+  });
+
+  const userId = authData?.session?.user?.id;
+
+  return useMutation({
+    mutationFn: async ({ invoiceId, courier, trackingNo }) => {
+      if (!userId) throw new Error('User not authenticated');
+      if (!invoiceId) throw new Error('Invoice ID is required');
+
+      const shipmentTextValidation = validateShipmentTextFields({ courier, trackingNo });
+      if (!shipmentTextValidation.ok) {
+        throw new Error(shipmentTextValidation.message);
+      }
+
+      const cleanCourier = shipmentTextValidation.courier;
+      const cleanTrackingNo = shipmentTextValidation.trackingNo;
+
+      const { data: invoiceData, error: invoiceError } = await supabase
+        .from('invoices')
+        .select('id, user_id, shipment_id')
+        .eq('id', invoiceId)
+        .eq('user_id', userId)
+        .single();
+
+      if (invoiceError) throw invoiceError;
+
+      let shipmentId = invoiceData.shipment_id;
+
+      if (!shipmentId) {
+        const { data: insertedShipment, error: insertShipmentError } = await supabase
+          .from('shipments')
+          .insert({
+            user_id: userId,
+            courier: cleanCourier || null,
+            tracking_no: cleanTrackingNo || null,
+            ship_status: 'pending',
+            shipping_cost: 0,
+            courier_paid: false,
+          })
+          .select('id')
+          .single();
+
+        if (insertShipmentError) throw insertShipmentError;
+
+        shipmentId = insertedShipment.id;
+
+        const { error: updateInvoiceError } = await supabase
+          .from('invoices')
+          .update({ shipment_id: shipmentId })
+          .eq('id', invoiceId)
+          .eq('user_id', userId);
+
+        if (updateInvoiceError) throw updateInvoiceError;
+
+        const { error: upsertLinkError } = await supabase
+          .from('shipment_invoices')
+          .upsert(
+            { shipment_id: shipmentId, invoice_id: invoiceId },
+            { onConflict: 'shipment_id,invoice_id', ignoreDuplicates: true }
+          );
+
+        if (upsertLinkError) throw upsertLinkError;
+      }
+
+      const { data: shipmentData, error: updateShipmentError } = await supabase
+        .from('shipments')
+        .update({
+          courier: cleanCourier || null,
+          tracking_no: cleanTrackingNo || null,
+        })
+        .eq('id', shipmentId)
+        .eq('user_id', userId)
+        .select('id, user_id, courier, tracking_no, ship_status, shipped_at, delivered_at, shipping_cost, courier_paid, courier_paid_at, notes, created_at, updated_at')
+        .single();
+
+      if (updateShipmentError) throw updateShipmentError;
+      return shipmentData;
+    },
+    onSuccess: (_, { invoiceId }) => {
+      queryClient.invalidateQueries({ queryKey: ['invoice', invoiceId] });
+      queryClient.invalidateQueries({ queryKey: ['invoice-shipment', invoiceId] });
+      queryClient.invalidateQueries({ queryKey: ['invoices'] });
+    },
+  });
+};
+
+/**
+ * Mutation to update shipment status for an invoice
+ */
+export const useUpdateInvoiceShipmentStatus = () => {
+  const queryClient = useQueryClient();
+  const { data: authData } = useQuery({
+    queryKey: ['auth'],
+    queryFn: async () => {
+      const { data } = await supabase.auth.getSession();
+      return data;
+    },
+  });
+
+  const userId = authData?.session?.user?.id;
+
+  return useMutation({
+    mutationFn: async ({ invoiceId, shipStatus, courier, trackingNo }) => {
+      if (!userId) throw new Error('User not authenticated');
+      if (!invoiceId) throw new Error('Invoice ID is required');
+
+      const allowedStatuses = new Set(['not_required', 'pending', 'shipped', 'delivered', 'returned', 'cancelled']);
+      if (!allowedStatuses.has(shipStatus)) {
+        throw new Error('Status penghantaran tidak sah');
+      }
+
+      const shipmentTextValidation = validateShipmentTextFields({ courier, trackingNo });
+      if (!shipmentTextValidation.ok) {
+        throw new Error(shipmentTextValidation.message);
+      }
+
+      const cleanCourier = shipmentTextValidation.courier;
+      const cleanTrackingNo = shipmentTextValidation.trackingNo;
+
+      const { data: invoiceData, error: invoiceError } = await supabase
+        .from('invoices')
+        .select('id, user_id, shipment_id')
+        .eq('id', invoiceId)
+        .eq('user_id', userId)
+        .single();
+
+      if (invoiceError) throw invoiceError;
+
+      let shipmentId = invoiceData.shipment_id;
+
+      if (!shipmentId) {
+        const { data: insertedShipment, error: insertShipmentError } = await supabase
+          .from('shipments')
+          .insert({
+            user_id: userId,
+            ship_status: shipStatus,
+            courier: cleanCourier || null,
+            tracking_no: cleanTrackingNo || null,
+            shipped_at: shipStatus === 'shipped' ? new Date().toISOString() : null,
+            delivered_at: shipStatus === 'delivered' ? new Date().toISOString() : null,
+            shipping_cost: 0,
+            courier_paid: false,
+          })
+          .select('id')
+          .single();
+
+        if (insertShipmentError) throw insertShipmentError;
+        shipmentId = insertedShipment.id;
+
+        const { error: updateInvoiceError } = await supabase
+          .from('invoices')
+          .update({ shipment_id: shipmentId })
+          .eq('id', invoiceId)
+          .eq('user_id', userId);
+
+        if (updateInvoiceError) throw updateInvoiceError;
+      }
+
+      const nextValues = {
+        ship_status: shipStatus,
+      };
+
+      if (cleanCourier) nextValues.courier = cleanCourier;
+      if (cleanTrackingNo) nextValues.tracking_no = cleanTrackingNo;
+      if (shipStatus === 'shipped') nextValues.shipped_at = new Date().toISOString();
+      if (shipStatus === 'delivered') {
+        nextValues.delivered_at = new Date().toISOString();
+        nextValues.shipped_at = nextValues.shipped_at || new Date().toISOString();
+      }
+
+      const { data: shipmentData, error: updateShipmentError } = await supabase
+        .from('shipments')
+        .update(nextValues)
+        .eq('id', shipmentId)
+        .eq('user_id', userId)
+        .select('id, user_id, courier, tracking_no, ship_status, shipped_at, delivered_at, shipping_cost, courier_paid, courier_paid_at, notes, created_at, updated_at')
+        .single();
+
+      if (updateShipmentError) throw updateShipmentError;
+
+      const { error: upsertLinkError } = await supabase
+        .from('shipment_invoices')
+        .upsert(
+          { shipment_id: shipmentId, invoice_id: invoiceId },
+          { onConflict: 'shipment_id,invoice_id', ignoreDuplicates: true }
+        );
+
+      if (upsertLinkError) throw upsertLinkError;
+
+      return shipmentData;
+    },
+    onSuccess: (_, { invoiceId }) => {
+      queryClient.invalidateQueries({ queryKey: ['invoice', invoiceId] });
+      queryClient.invalidateQueries({ queryKey: ['invoice-shipment', invoiceId] });
+      queryClient.invalidateQueries({ queryKey: ['invoices'] });
+    },
+  });
+};
+
+/**
+ * Mutation to mark courier as paid and deduct wallet balance
+ */
+export const useMarkShipmentCourierPaid = () => {
+  const queryClient = useQueryClient();
+  const { data: authData } = useQuery({
+    queryKey: ['auth'],
+    queryFn: async () => {
+      const { data } = await supabase.auth.getSession();
+      return data;
+    },
+  });
+
+  const userId = authData?.session?.user?.id;
+
+  return useMutation({
+    mutationFn: async ({ invoiceId, shippingCost, walletId = null, paidAt = null, notes = '' }) => {
+      if (!userId) throw new Error('User not authenticated');
+      if (!invoiceId) throw new Error('Invoice ID is required');
+
+      const normalizedCost = normalizeCurrencyAmount(shippingCost, {
+        label: 'Kos courier',
+        allowEmptyAsZero: false,
+      });
+      if (!normalizedCost.ok) {
+        throw new Error(normalizedCost.message);
+      }
+
+      const normalizedNotes = normalizeTextInput(notes);
+      if (normalizedNotes.length > SHIPMENT_NOTES_MAX_LENGTH) {
+        throw new Error(`Catatan maksimum ${SHIPMENT_NOTES_MAX_LENGTH} aksara.`);
+      }
+
+      let paidAtIso = null;
+      if (paidAt !== null && paidAt !== undefined && String(paidAt).trim() !== '') {
+        const parsedPaidAt = new Date(paidAt);
+        if (Number.isNaN(parsedPaidAt.getTime())) {
+          throw new Error('Tarikh bayaran tidak sah.');
+        }
+        paidAtIso = parsedPaidAt.toISOString();
+      }
+
+      const { data, error } = await supabase.rpc('mark_shipment_courier_paid', {
+        p_invoice_id: invoiceId,
+        p_user_id: userId,
+        p_shipping_cost: normalizedCost.value,
+        p_wallet_id: walletId,
+        p_paid_at: paidAtIso,
+        p_notes: normalizedNotes || null,
+      });
+
+      if (error) {
+        throw error;
+      }
+
+      const response = Array.isArray(data) ? data[0] : null;
+      if (!response?.success) {
+        throw new Error(response?.message || 'Gagal rekod bayaran courier');
+      }
+
+      return response;
+    },
+    onSuccess: (_, { invoiceId }) => {
+      queryClient.invalidateQueries({ queryKey: ['invoice', invoiceId] });
+      queryClient.invalidateQueries({ queryKey: ['invoice-shipment', invoiceId] });
+      queryClient.invalidateQueries({ queryKey: ['invoices'] });
+      queryClient.invalidateQueries({ queryKey: ['wallets', userId] });
+      queryClient.invalidateQueries({ queryKey: ['transactions', userId, 'all'] });
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          query.queryKey[0] === 'transactions' && query.queryKey.includes(userId),
+      });
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          query.queryKey[0] === 'wallet-cashflow-trend' && query.queryKey[1] === userId,
+      });
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          query.queryKey[0] === 'wallet-cashflow-breakdown' && query.queryKey[1] === userId,
+      });
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          query.queryKey[0] === 'wallet-monthly-summary' && query.queryKey[1] === userId,
+      });
+      queryClient.invalidateQueries({
+        predicate: (query) =>
+          query.queryKey[0] === 'wallet-monthly-transactions-export' && query.queryKey[1] === userId,
+      });
+      queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[0] === 'dashboard-expenses' && query.queryKey[1] === userId
+      });
+      queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[0] === 'business-wallets' && query.queryKey[1] === userId
+      });
+    },
+  });
+};
+
 export default {
   useInvoices,
   useInvoiceDetail,
@@ -1117,5 +1609,10 @@ export default {
   useMarkInvoiceAsPaid,
   useReverseInvoicePayment,
   useProcessRefund,
+  useUpdateInvoiceShippingCharged,
+  useInvoiceShipment,
+  useSaveInvoiceShipment,
+  useUpdateInvoiceShipmentStatus,
+  useMarkShipmentCourierPaid,
   createAutoInvoiceForSoldItem,
 };

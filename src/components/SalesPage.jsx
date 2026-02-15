@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardFooter } from '@/componen
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
-import { Calendar, ChevronLeft, ChevronRight, CheckCircle, XCircle, Download, FileText, Loader2 } from 'lucide-react';
+import { Calendar, ChevronLeft, ChevronRight, CheckCircle, XCircle, Download, FileText, Loader2, Wallet, Truck, TrendingUp } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/components/ui/use-toast';
 import { useQuery } from '@tanstack/react-query';
@@ -55,7 +55,7 @@ const SalesPage = ({ items }) => {
           is_manual,
           item_name,
           item:items(id, name, category, cost_price),
-          invoice:invoices(id, invoice_date, status, user_id)
+          invoice:invoices(id, invoice_date, status, user_id, shipping_charged, shipment_id)
         `)
         .order('created_at', { ascending: false });
 
@@ -66,8 +66,39 @@ const SalesPage = ({ items }) => {
 
       // Filter by user_id after fetching (client-side filtering)
       const filteredData = (data || []).filter(invItem => invItem.invoice?.user_id === userId);
-      
-      return filteredData;
+
+      const shipmentIds = [...new Set(
+        filteredData
+          .map((row) => row?.invoice?.shipment_id)
+          .filter(Boolean)
+      )];
+
+      const shipmentById = new Map();
+      if (shipmentIds.length > 0) {
+        const { data: shipmentRows, error: shipmentError } = await supabase
+          .from('shipments')
+          .select('id, user_id, shipping_cost, courier_paid')
+          .eq('user_id', userId)
+          .in('id', shipmentIds);
+
+        if (shipmentError) {
+          console.error('[SalesPage] Error fetching shipments:', shipmentError);
+        } else {
+          (shipmentRows || []).forEach((shipment) => {
+            shipmentById.set(shipment.id, shipment);
+          });
+        }
+      }
+
+      return filteredData.map((row) => ({
+        ...row,
+        invoice: {
+          ...row.invoice,
+          shipment: row?.invoice?.shipment_id
+            ? (shipmentById.get(row.invoice.shipment_id) || null)
+            : null,
+        },
+      }));
     },
     enabled: !!userId,
   });
@@ -108,6 +139,9 @@ const SalesPage = ({ items }) => {
         date_sold: invItem.invoice.invoice_date,
         invoice_id: invItem.invoice_id,
         status: invItem.invoice.status,
+        invoice_shipping_charged: Math.max(parseFloat(invItem.invoice?.shipping_charged) || 0, 0),
+        invoice_shipping_cost: Math.max(parseFloat(invItem.invoice?.shipment?.shipping_cost) || 0, 0),
+        invoice_shipping_cost_recorded: Boolean(invItem.invoice?.shipment?.courier_paid),
       }));
   }, [invoiceItems]);
 
@@ -125,6 +159,52 @@ const SalesPage = ({ items }) => {
     }
     return filtered.sort((a, b) => new Date(b.date_sold) - new Date(a.date_sold));
   }, [soldItems, dateRange]);
+
+  const salesSummary = useMemo(() => {
+    const shippingByInvoice = new Map();
+    let revenueItem = 0;
+    let itemProfit = 0;
+
+    filteredSoldItems.forEach((item) => {
+      const quantitySold = item.quantity_sold || item.invoice_quantity || 1;
+      const costPrice = parseFloat(item.cost_price) || 0;
+      const totalCost = costPrice * quantitySold;
+      const totalRevenue = item.actual_sold_amount
+        ? parseFloat(item.actual_sold_amount)
+        : (parseFloat(item.selling_price) || 0) * quantitySold;
+
+      revenueItem += totalRevenue;
+      itemProfit += totalRevenue - totalCost;
+
+      if (item.invoice_id && !shippingByInvoice.has(item.invoice_id)) {
+        shippingByInvoice.set(item.invoice_id, {
+          charged: Math.max(parseFloat(item.invoice_shipping_charged) || 0, 0),
+          cost: Math.max(parseFloat(item.invoice_shipping_cost) || 0, 0),
+          costRecorded: Boolean(item.invoice_shipping_cost_recorded),
+        });
+      }
+    });
+
+    const shippingCollected = Array.from(shippingByInvoice.values()).reduce((sum, value) => sum + value.charged, 0);
+    const shippingCost = Array.from(shippingByInvoice.values()).reduce(
+      (sum, value) => sum + (value.costRecorded ? value.cost : 0),
+      0
+    );
+    const shippingProfit = shippingCollected - shippingCost;
+    const shippingPending = Array.from(shippingByInvoice.values()).filter(
+      (value) => value.charged > 0 && !value.costRecorded
+    ).length;
+
+    return {
+      revenueItem,
+      shippingCollected,
+      shippingCost,
+      shippingProfit,
+      netProfit: itemProfit + shippingProfit,
+      shippingPending,
+      itemProfit,
+    };
+  }, [filteredSoldItems]);
 
   const totalPages = Math.ceil(filteredSoldItems.length / itemsPerPage);
   const indexOfLastItem = currentPage * itemsPerPage;
@@ -207,6 +287,80 @@ const SalesPage = ({ items }) => {
         </CardContent>
       </Card>
 
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+        <Card>
+          <CardContent className="pt-5">
+            <div className="flex items-center gap-3">
+              <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-emerald-100">
+                <Wallet className="h-4 w-4 text-emerald-600" />
+              </span>
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">Revenue Item</p>
+                <p className="text-lg font-semibold">RM{salesSummary.revenueItem.toFixed(2)}</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-5">
+            <div className="flex items-center gap-3">
+              <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-sky-100">
+                <Truck className="h-4 w-4 text-sky-600" />
+              </span>
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">Caj Pos Dikutip</p>
+                <p className="text-lg font-semibold">RM{salesSummary.shippingCollected.toFixed(2)}</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-5">
+            <div className="flex items-center gap-3">
+              <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-amber-100">
+                <Truck className="h-4 w-4 text-amber-600" />
+              </span>
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">Kos Pos</p>
+                <p className="text-lg font-semibold">RM{salesSummary.shippingCost.toFixed(2)}</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-5">
+            <div className="flex items-center gap-3">
+              <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-amber-100">
+                <Truck className="h-4 w-4 text-amber-600" />
+              </span>
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">Untung Pos</p>
+                <p className="text-lg font-semibold">RM{salesSummary.shippingProfit.toFixed(2)}</p>
+                {salesSummary.shippingPending > 0 && (
+                  <p className="text-[11px] text-muted-foreground">{salesSummary.shippingPending} belum final</p>
+                )}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-5">
+            <div className="flex items-center gap-3">
+              <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-violet-100">
+                <TrendingUp className="h-4 w-4 text-violet-600" />
+              </span>
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">Untung Bersih</p>
+                <p className="text-lg font-semibold">RM{salesSummary.netProfit.toFixed(2)}</p>
+                <p className="text-[11px] text-muted-foreground">
+                  Item RM{salesSummary.itemProfit.toFixed(2)} | Pos RM{salesSummary.shippingProfit.toFixed(2)}
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
       <Card>
         <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <CardTitle>Hasil Jualan</CardTitle>
@@ -236,7 +390,8 @@ const SalesPage = ({ items }) => {
                       <th className="p-4 font-medium">Tarikh</th>
                       <th className="p-4 font-medium">Status</th>
                       <th className="p-4 font-medium">Invois</th>
-                      <th className="p-4 font-medium text-right">Harga Jualan</th>
+                      <th className="p-4 font-medium text-right">Item Total</th>
+                      <th className="p-4 font-medium text-right">Pos (Caj/Kos)</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -249,6 +404,10 @@ const SalesPage = ({ items }) => {
                       const totalRevenue = item.actual_sold_amount ? parseFloat(item.actual_sold_amount) : (parseFloat(item.selling_price) || 0) * quantitySold;
                       const profit = totalRevenue - totalCost;
                       const isLoss = profit < 0;
+                      const shippingCharged = Math.max(parseFloat(item.invoice_shipping_charged) || 0, 0);
+                      const shippingCost = item.invoice_shipping_cost_recorded
+                        ? Math.max(parseFloat(item.invoice_shipping_cost) || 0, 0)
+                        : 0;
                       return (
                         <tr key={item.id} className="border-t relative group overflow-hidden">
                            <td className="p-4 font-semibold text-foreground flex items-center gap-3">
@@ -280,6 +439,10 @@ const SalesPage = ({ items }) => {
                              )}
                            </td>
                            <td className="p-4 text-right font-semibold text-foreground">RM{totalRevenue.toFixed(2)}</td>
+                           <td className="p-4 text-right text-xs text-muted-foreground">
+                             <div>Caj RM{shippingCharged.toFixed(2)}</div>
+                             <div>Kos RM{shippingCost.toFixed(2)}</div>
+                           </td>
                         </tr>
                       );
                     })}

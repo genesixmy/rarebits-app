@@ -83,13 +83,7 @@ const buildLocalTrend = (transactions, selectedWalletId, days) => {
       return;
     }
 
-    if (classification === TRANSACTION_CLASSIFICATIONS.ADJUSTMENT) {
-      if (getTransactionDirection(tx) >= 0) {
-        row.inflow += amount;
-      } else {
-        row.outflow += amount;
-      }
-    }
+    // Keep manual adjustments out of cashflow charts to avoid distorting business flow.
   });
 
   return Array.from(map.values());
@@ -132,10 +126,7 @@ const buildLocalBreakdown = (transactions, selectedWalletId, days) => {
       return;
     }
 
-    if (classification === TRANSACTION_CLASSIFICATIONS.ADJUSTMENT) {
-      const bucket = getTransactionDirection(tx) >= 0 ? inflowMap : outflowMap;
-      bucket.set('other', (bucket.get('other') || 0) + amount);
-    }
+    // Keep manual adjustments out of cashflow charts to avoid distorting business flow.
   });
 
   return {
@@ -312,8 +303,11 @@ const WalletAnalytics = ({ wallets = [], transactions = [] }) => {
     [transactions, summaryWalletId, monthValue]
   );
 
-  const useAnalyticsFallback = trendQuery.isError || breakdownQuery.isError;
-  const useSummaryFallback = monthlySummaryQuery.isError || monthlyTransactionsQuery.isError;
+  // Prefer local transaction dataset from WalletPage for immediate UI consistency after mutations.
+  // RPC remains as fallback when local dataset is empty.
+  const hasLocalTransactions = Array.isArray(transactions) && transactions.length > 0;
+  const useAnalyticsFallback = hasLocalTransactions || trendQuery.isError || breakdownQuery.isError;
+  const useSummaryFallback = hasLocalTransactions || monthlySummaryQuery.isError || monthlyTransactionsQuery.isError;
 
   const trendRows = useMemo(() => {
     const baseRows = useAnalyticsFallback ? fallbackTrend : (trendQuery.data || []);
@@ -379,8 +373,8 @@ const WalletAnalytics = ({ wallets = [], transactions = [] }) => {
     [fallbackMonthlyTransactions, monthlyTransactionsQuery.data, useSummaryFallback]
   );
 
-  const isAnalyticsLoading = trendQuery.isLoading || breakdownQuery.isLoading;
-  const isSummaryLoading = monthlySummaryQuery.isLoading || monthlyTransactionsQuery.isLoading;
+  const isAnalyticsLoading = !useAnalyticsFallback && (trendQuery.isLoading || breakdownQuery.isLoading);
+  const isSummaryLoading = !useSummaryFallback && (monthlySummaryQuery.isLoading || monthlyTransactionsQuery.isLoading);
   const hasTrendData = trendRows.some((row) => row.Masuk > 0 || row.Keluar > 0);
 
   const handleExportMonthlyCsv = () => {

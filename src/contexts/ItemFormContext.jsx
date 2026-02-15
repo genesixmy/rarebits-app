@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 
 const ItemFormContext = createContext();
 const LEGACY_STORAGE_KEY_PREFIX = 'rarebit_item_form_draft';
@@ -63,9 +63,16 @@ const getDefaultFormData = (categories = []) => ({
 
 export const ItemFormProvider = ({ children, itemId, categories = [], wallets = [] }) => {
   const [formData, setFormData] = useState(() => getDefaultFormData(categories));
+  const lastItemIdRef = useRef(itemId ?? null);
 
   useEffect(() => {
-    if (!itemId) {
+    const normalizedItemId = itemId ?? null;
+    const hasItemContextChanged = lastItemIdRef.current !== normalizedItemId;
+    if (!hasItemContextChanged) return;
+
+    lastItemIdRef.current = normalizedItemId;
+
+    if (!normalizedItemId) {
       setFormData(getDefaultFormData(categories));
     }
   }, [itemId, categories]);

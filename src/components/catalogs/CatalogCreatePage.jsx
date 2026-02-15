@@ -309,7 +309,7 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
 
       const { data: catalog, error: catalogError } = await supabase
         .from('catalogs')
-        .select('id, title, description, cover_image_url, selection_type, selected_categories, visibility, access_code, expires_at, is_active')
+        .select('id, title, description, cover_image_url, selection_type, selected_categories, include_all_items, allowed_category_ids, manual_item_ids, only_available, visibility, access_code, expires_at, is_active')
         .eq('id', catalogId)
         .eq('user_id', userId)
         .maybeSingle();
@@ -317,17 +317,7 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
       if (catalogError) throw catalogError;
       if (!catalog) return null;
 
-      const { data: mappings, error: mappingError } = await supabase
-        .from('catalog_items')
-        .select('item_id')
-        .eq('catalog_id', catalogId);
-
-      if (mappingError) throw mappingError;
-
-      return {
-        ...catalog,
-        item_ids: (mappings || []).map((entry) => entry.item_id).filter(Boolean),
-      };
+      return catalog;
     },
     enabled: isEditMode && !!userId && !!catalogId,
     staleTime: 30 * 1000,
@@ -338,15 +328,45 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
     if (!isEditMode || !editCatalogData || didHydrateEditState) return;
 
     const normalizedSelectionTypeRaw = (editCatalogData.selection_type || 'manual').toLowerCase();
-    const normalizedSelectionType = normalizedSelectionTypeRaw === 'category'
+    const legacySelectionType = normalizedSelectionTypeRaw === 'category'
       ? 'categories'
       : normalizedSelectionTypeRaw;
-    const itemIds = Array.isArray(editCatalogData.item_ids) ? editCatalogData.item_ids : [];
-    const categoryRules = Array.isArray(editCatalogData.selected_categories)
+    const includeAllItems = editCatalogData.include_all_items === true;
+    const allowedCategoryIds = Array.isArray(editCatalogData.allowed_category_ids)
+      ? editCatalogData.allowed_category_ids.filter(Boolean)
+      : [];
+    const itemIds = Array.isArray(editCatalogData.manual_item_ids)
+      ? editCatalogData.manual_item_ids.filter(Boolean)
+      : [];
+
+    const categoryIdToName = new Map(
+      (Array.isArray(categories) ? categories : [])
+        .filter((category) => category?.id && typeof category?.name === 'string')
+        .map((category) => [category.id, category.name.trim()])
+    );
+
+    const categoryRulesFromIds = allowedCategoryIds
+      .map((categoryId) => categoryIdToName.get(categoryId))
+      .filter((name) => typeof name === 'string' && name.trim());
+
+    const fallbackCategoryRules = Array.isArray(editCatalogData.selected_categories)
       ? editCatalogData.selected_categories.filter((name) => typeof name === 'string' && name.trim())
       : [];
 
-    if (normalizedSelectionType === 'categories' && categoryRules.length === 0 && itemIds.length > 0 && items.length === 0) {
+    const categoryRules = categoryRulesFromIds.length > 0
+      ? categoryRulesFromIds
+      : fallbackCategoryRules;
+
+    const normalizedSelectionType = includeAllItems
+      ? 'all'
+      : (allowedCategoryIds.length > 0 ? 'categories' : legacySelectionType);
+
+    if (
+      normalizedSelectionType === 'categories'
+      && allowedCategoryIds.length > 0
+      && categoryRules.length === 0
+      && categories.length === 0
+    ) {
       return;
     }
 
@@ -381,7 +401,7 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
     }
 
     setDidHydrateEditState(true);
-  }, [didHydrateEditState, editCatalogData, isEditMode, items]);
+  }, [categories, didHydrateEditState, editCatalogData, isEditMode, items]);
 
   useEffect(() => {
     setDidHydrateEditState(false);
@@ -402,10 +422,25 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
             .map((name) => (typeof name === 'string' ? name.trim() : ''))
             .filter(Boolean)
         : [];
+      const selectedCategoryIds = normalizedSelectionType === 'categories'
+        ? categories
+            .filter((category) => normalizedSelectedCategories.includes(category?.name))
+            .map((category) => category.id)
+            .filter(Boolean)
+        : [];
+      const normalizedManualItemIds = normalizedSelectionType === 'manual'
+        ? Array.from(new Set(selectedItemIds.filter(Boolean)))
+        : [];
+      const includeAllItems = normalizedSelectionType === 'all';
 
       if (!userId) throw new Error('Sesi pengguna tidak sah');
       if (!normalizedTitle) throw new Error('Tajuk katalog diperlukan');
-      if (selectedItemIds.length === 0) throw new Error('Pilih sekurang-kurangnya satu item');
+      if (normalizedSelectionType === 'manual' && normalizedManualItemIds.length === 0) {
+        throw new Error('Pilih sekurang-kurangnya satu item');
+      }
+      if (normalizedSelectionType === 'categories' && selectedCategoryIds.length === 0) {
+        throw new Error('Pilih sekurang-kurangnya satu kategori yang sah');
+      }
       if (normalizedVisibility === 'unlisted' && normalizedAccessCode.length < 6) {
         throw new Error('Access code unlisted mesti sekurang-kurangnya 6 aksara.');
       }
@@ -421,6 +456,11 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
           description: normalizedDescription || null,
           selection_type: normalizedSelectionType,
           selected_categories: normalizedSelectedCategories,
+          include_all_items: includeAllItems,
+          allowed_category_ids: selectedCategoryIds,
+          allowed_tag_ids: [],
+          manual_item_ids: normalizedManualItemIds,
+          only_available: true,
           visibility: normalizedVisibility,
           access_code: normalizedAccessCode,
           expires_at: normalizedExpiresAt || null,
@@ -461,30 +501,9 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
         catalogData.cover_image_url = uploadedCoverUrl;
       }
 
-      const mappings = selectedItemIds.map((itemId) => ({
-        catalog_id: catalogData.id,
-        item_id: itemId,
-      }));
-
-      const { error: mapError } = await supabase
-        .from('catalog_items')
-        .insert(mappings);
-
-      if (mapError) {
-        if (uploadedCoverUrl) {
-          try {
-            await removeCatalogCoverFromStorage(uploadedCoverUrl);
-          } catch (cleanupError) {
-            console.error('[CatalogCreatePage] Failed to cleanup uploaded cover:', cleanupError);
-          }
-        }
-        await supabase.from('catalogs').delete().eq('id', catalogData.id);
-        throw new Error(`Katalog dicipta tetapi item gagal ditambah: ${mapError.message}`);
-      }
-
       return {
         ...catalogData,
-        item_count: mappings.length,
+        item_count: selectedItemIds.length,
       };
     },
     onSuccess: (catalog) => {
@@ -526,7 +545,12 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
       const normalizedExpiresAt = hasExpiry ? expiresAt : null;
 
       if (!normalizedTitle) throw new Error('Tajuk katalog diperlukan');
-      if (selectedItemIds.length === 0) throw new Error('Pilih sekurang-kurangnya satu item');
+      if (normalizedSelectionType === 'manual' && selectedItemIds.length === 0) {
+        throw new Error('Pilih sekurang-kurangnya satu item');
+      }
+      if (normalizedSelectionType === 'categories' && normalizedSelectedCategories.length === 0) {
+        throw new Error('Pilih sekurang-kurangnya satu kategori');
+      }
 
       const originalCoverUrl = editCatalogData?.cover_image_url || '';
       let nextCoverUrl = coverImageUrl || null;

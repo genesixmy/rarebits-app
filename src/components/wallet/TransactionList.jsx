@@ -39,6 +39,9 @@ const TransactionList = ({ transactions, wallets, onEdit, onDelete }) => {
               const isRefund = tx.type === 'refund';
               const isLegacyInvoicePayment = tx.type === 'pembayaran_invois';
               const isLegacyManualSale = tx.type === 'item_manual';
+              const shipmentReference = tx.reference_type === 'shipment' && tx.reference_id
+                ? `Shipment ${String(tx.reference_id).slice(0, 8)}`
+                : '';
 
               const amountPrefix = direction < 0 ? '-' : '+';
               const amountClass = direction < 0 ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400';
@@ -61,6 +64,9 @@ const TransactionList = ({ transactions, wallets, onEdit, onDelete }) => {
                 title = (tx.description && tx.description.startsWith('Pembalikan'))
                   ? tx.description
                   : (tx.category || tx.description || 'Perbelanjaan');
+                if (shipmentReference) {
+                  title = `${title} (${shipmentReference})`;
+                }
               } else if (isTransferOut) {
                 icon = <ArrowRight className="w-5 h-5 text-orange-600 dark:text-orange-400" />;
                 colorClass = 'bg-orange-100 dark:bg-orange-900/50';
@@ -158,4 +164,3 @@ const TransactionList = ({ transactions, wallets, onEdit, onDelete }) => {
 };
 
 export default TransactionList;
-

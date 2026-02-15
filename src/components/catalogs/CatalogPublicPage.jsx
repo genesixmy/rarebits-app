@@ -419,7 +419,7 @@ const CatalogPublicPage = () => {
         expiresAt: catalogHeader.expires_at || null,
       };
     },
-    staleTime: 60 * 1000,
+    staleTime: 30 * 1000,
     refetchOnWindowFocus: false,
   });
 

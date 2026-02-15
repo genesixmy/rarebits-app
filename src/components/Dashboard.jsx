@@ -5,15 +5,21 @@ import { useQuery } from '@tanstack/react-query';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import {
+  Tooltip as UiTooltip,
+  TooltipContent as UiTooltipContent,
+  TooltipProvider as UiTooltipProvider,
+  TooltipTrigger as UiTooltipTrigger,
+} from '@/components/ui/tooltip';
 import { Loader2,
   Package, 
   TrendingUp, 
   TrendingDown,
   BarChart3,
-  Calendar,
   Wallet,
   CheckCircle,
-  XCircle
+  XCircle,
+  Info
 } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend, BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts';
@@ -22,7 +28,8 @@ import { useTheme } from '@/contexts/ThemeProvider';
 import { supabase } from '@/lib/customSupabaseClient';
 import { resolveTransactionClassification, TRANSACTION_CLASSIFICATIONS } from '@/components/wallet/transactionClassification';
 
-const StatCard = ({ title, value, icon, subtext, delay, isHighlighted = false, tone = 'sky' }) => {
+const StatCard = ({ title, value, icon, subtext, delay, isHighlighted = false, tone = 'sky', size = 'default', helperText = '' }) => {
+  const [isHelperOpen, setIsHelperOpen] = useState(false);
   const toneMap = {
     sky: {
       iconWrap: 'bg-sky-100',
@@ -68,6 +75,7 @@ const StatCard = ({ title, value, icon, subtext, delay, isHighlighted = false, t
     },
   };
   const toneStyle = toneMap[tone] || toneMap.sky;
+  const isHero = size === 'hero';
 
   return (
     <motion.div
@@ -80,7 +88,10 @@ const StatCard = ({ title, value, icon, subtext, delay, isHighlighted = false, t
           "overflow-hidden rounded-3xl border transition-all duration-300",
           isHighlighted
             ? "border-transparent bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white shadow-[0_20px_45px_-22px_rgba(124,58,237,0.8)]"
-            : "border-slate-200/80 bg-card shadow-sm hover:-translate-y-0.5 hover:shadow-lg"
+            : cn(
+                "border-slate-200/80 bg-card shadow-sm hover:-translate-y-0.5 hover:shadow-lg",
+                isHero && "border-slate-300/80 shadow-md"
+              )
         )}
       >
         <CardHeader className="pb-3">
@@ -88,20 +99,49 @@ const StatCard = ({ title, value, icon, subtext, delay, isHighlighted = false, t
             <div className="flex items-center gap-3">
               <span
                 className={cn(
-                  "inline-flex h-10 w-10 items-center justify-center rounded-full",
+                  "inline-flex items-center justify-center rounded-full",
+                  isHero ? "h-11 w-11" : "h-10 w-10",
                   isHighlighted ? "bg-white/95 text-sky-500" : toneStyle.iconWrap
                 )}
               >
-                {React.cloneElement(icon, { className: cn('h-4 w-4', isHighlighted ? 'text-sky-500' : toneStyle.icon) })}
+                {React.cloneElement(icon, { className: cn(isHero ? 'h-5 w-5' : 'h-4 w-4', isHighlighted ? 'text-sky-500' : toneStyle.icon) })}
               </span>
-              <CardTitle className={cn("text-base md:text-base font-semibold", isHighlighted ? 'text-white' : 'text-foreground')}>
-                {title}
+              <CardTitle className={cn(isHero ? "text-base md:text-lg" : "text-base md:text-base", "font-semibold", isHighlighted ? 'text-white' : 'text-foreground')}>
+                <span className="inline-flex items-center gap-2">
+                  <span>{title}</span>
+                  {helperText ? (
+                    <UiTooltip open={isHelperOpen} onOpenChange={setIsHelperOpen}>
+                      <UiTooltipTrigger asChild>
+                        <button
+                          type="button"
+                          className={cn(
+                            "inline-flex h-6 w-6 items-center justify-center rounded-full transition-colors",
+                            isHighlighted
+                              ? "bg-white/20 text-white hover:bg-white/30"
+                              : "bg-slate-100 text-slate-500 hover:bg-slate-200"
+                          )}
+                          onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            setIsHelperOpen((prev) => !prev);
+                          }}
+                          aria-label={helperText}
+                        >
+                          <Info className="h-5 w-5" />
+                        </button>
+                      </UiTooltipTrigger>
+                      <UiTooltipContent side="top" className="max-w-[240px] text-xs leading-relaxed">
+                        {helperText}
+                      </UiTooltipContent>
+                    </UiTooltip>
+                  ) : null}
+                </span>
               </CardTitle>
             </div>
           </div>
         </CardHeader>
         <CardContent className="pt-0">
-          <div className={cn("text-xl md:text-2xl font-bold leading-none tracking-tight", isHighlighted ? 'text-white' : 'text-foreground')}>
+          <div className={cn(isHero ? "text-2xl md:text-3xl" : "text-xl md:text-2xl", "font-bold leading-none tracking-tight", isHighlighted ? 'text-white' : 'text-foreground')}>
             {value}
           </div>
           <div className="mt-3 flex items-center gap-2">
@@ -178,7 +218,7 @@ const Dashboard = ({ items, categories }) => {
           is_manual,
           item_name,
           items(id, name, category, cost_price, user_id),
-          invoices(id, invoice_date, status, platform, user_id, created_at, updated_at)
+          invoices(id, invoice_date, status, platform, user_id, created_at, updated_at, shipping_charged, shipment_id)
         `);
 
       if (error) {
@@ -187,11 +227,44 @@ const Dashboard = ({ items, categories }) => {
       }
 
       // Filter to only current user's invoices with paid status
-      return (data || []).filter(invItem => 
+      const paidRows = (data || []).filter(invItem => 
         invItem.invoices && 
         invItem.invoices.user_id === userId &&
         invItem.invoices.status === 'paid'
       );
+
+      const shipmentIds = [...new Set(
+        paidRows
+          .map((row) => row?.invoices?.shipment_id)
+          .filter(Boolean)
+      )];
+
+      const shipmentById = new Map();
+      if (shipmentIds.length > 0) {
+        const { data: shipmentRows, error: shipmentError } = await supabase
+          .from('shipments')
+          .select('id, user_id, shipping_cost, courier_paid')
+          .eq('user_id', userId)
+          .in('id', shipmentIds);
+
+        if (shipmentError) {
+          console.error('[Dashboard] Error fetching shipments:', shipmentError);
+        } else {
+          (shipmentRows || []).forEach((shipment) => {
+            shipmentById.set(shipment.id, shipment);
+          });
+        }
+      }
+
+      return paidRows.map((row) => ({
+        ...row,
+        invoices: {
+          ...row.invoices,
+          shipment: row?.invoices?.shipment_id
+            ? (shipmentById.get(row.invoices.shipment_id) || null)
+            : null,
+        },
+      }));
     },
     enabled: !!userId
   });
@@ -247,7 +320,7 @@ const Dashboard = ({ items, categories }) => {
   });
 
   // Fetch Business expenses only
-  const { data: businessExpenses = 0 } = useQuery({
+  const { data: businessExpenses = { total: 0, nonShipping: 0, shipping: 0 } } = useQuery({
     queryKey: ['dashboard-expenses', userId, businessWalletIds.length, dateRange.startDate, dateRange.endDate],
     queryFn: async () => {
       console.log('[Dashboard] Expenses query executing:', { userId, walletCount: businessWalletIds.length, startDate: dateRange.startDate, endDate: dateRange.endDate });
@@ -261,7 +334,7 @@ const Dashboard = ({ items, categories }) => {
       
       const { data, error } = await supabase
         .from('transactions')
-        .select('amount, type, transaction_type, category, invoice_id')
+        .select('amount, type, transaction_type, category, invoice_id, reference_type')
         .eq('user_id', userId)
         .in('wallet_id', businessWalletIds)
         .gte('transaction_date', dateRange.startDate)
@@ -269,18 +342,25 @@ const Dashboard = ({ items, categories }) => {
       
       if (error) {
         console.error('[Dashboard] Error fetching expenses:', error);
-        return 0;
+        return { total: 0, nonShipping: 0, shipping: 0 };
       }
       
-      const total = (data || []).reduce((sum, tx) => {
+      const totals = (data || []).reduce((acc, tx) => {
         const classification = resolveTransactionClassification(tx);
         if (classification !== TRANSACTION_CLASSIFICATIONS.EXPENSE) {
-          return sum;
+          return acc;
         }
-        return sum + Math.abs(parseFloat(tx.amount) || 0);
-      }, 0);
-      console.log('[Dashboard] Expenses fetched:', { count: data?.length || 0, total, data });
-      return total;
+        const amountAbs = Math.abs(parseFloat(tx.amount) || 0);
+        acc.total += amountAbs;
+        if (tx.reference_type === 'shipment') {
+          acc.shipping += amountAbs;
+        } else {
+          acc.nonShipping += amountAbs;
+        }
+        return acc;
+      }, { total: 0, nonShipping: 0, shipping: 0 });
+      console.log('[Dashboard] Expenses fetched:', { count: data?.length || 0, totals, data });
+      return totals;
     },
     enabled: !!userId && businessWalletIds.length > 0 && !!dateRange.startDate && !!dateRange.endDate
   });
@@ -367,26 +447,61 @@ const Dashboard = ({ items, categories }) => {
     return sum + cost;
   }, 0);
 
+  const shippingByInvoice = filteredSales.reduce((acc, sale) => {
+    const invoice = sale?.invoices;
+    if (!invoice?.id || acc.has(invoice.id)) return acc;
+
+    const shippingCharged = Math.max(parseFloat(invoice.shipping_charged) || 0, 0);
+    const shipment = invoice.shipment || null;
+    const shippingCost = Math.max(parseFloat(shipment?.shipping_cost) || 0, 0);
+    const isCourierPaid = Boolean(shipment?.courier_paid);
+    const shippingCostPaid = isCourierPaid ? shippingCost : 0;
+
+    acc.set(invoice.id, {
+      shippingCharged,
+      shippingCostPaid,
+      isCourierPaid,
+    });
+
+    return acc;
+  }, new Map());
+
+  const totalShippingCharged = Array.from(shippingByInvoice.values()).reduce((sum, value) => sum + value.shippingCharged, 0);
+  const totalShippingCost = Array.from(shippingByInvoice.values()).reduce((sum, value) => sum + value.shippingCostPaid, 0);
+  const totalShippingProfit = totalShippingCharged - totalShippingCost;
+  const shippingPendingCount = Array.from(shippingByInvoice.values()).filter(
+    (value) => value.shippingCharged > 0 && !value.isCourierPaid
+  ).length;
+
+  const totalItemRevenue = filteredSales.reduce((sum, sale) => sum + (parseFloat(sale.line_total) || 0), 0);
+  const totalItemProfit = filteredSales.reduce((sum, sale) => {
+    const revenue = parseFloat(sale.line_total) || 0;
+    const costPrice = getEffectiveCostPrice(sale);
+    const cost = costPrice * (sale.quantity || 1);
+    return sum + (revenue - cost);
+  }, 0);
+
   const filteredStats = {
-    totalRevenue: filteredSales.reduce((sum, sale) => {
-      return sum + (parseFloat(sale.line_total) || 0);
-    }, 0),
+    totalRevenue: totalItemRevenue,
     totalCost: totalCost,
-    totalExpenses: parseFloat(businessExpenses) || 0,
+    totalExpenses: parseFloat(businessExpenses.total) || 0,
+    totalShippingCharged: totalShippingCharged,
+    totalShippingCost: totalShippingCost,
+    totalShippingProfit: totalShippingProfit,
+    shippingPendingCount: shippingPendingCount,
     totalRefunds: parseFloat(totalRefunds) || 0,
-    totalProfit: filteredSales.reduce((sum, sale) => {
-      const revenue = parseFloat(sale.line_total) || 0;
-      const costPrice = getEffectiveCostPrice(sale);
-      const cost = costPrice * (sale.quantity || 1);
-      return sum + (revenue - cost);
-    }, 0) - (parseFloat(businessExpenses) || 0) - (parseFloat(totalRefunds) || 0),
+    totalItemProfit: totalItemProfit,
+    totalProfit: totalItemProfit + totalShippingProfit,
     soldItemsCount: filteredSales.length,
     totalQuantitySold: filteredSales.reduce((sum, sale) => {
       return sum + (sale.quantity || 0);
     }, 0)
   };
 
-  const profitMargin = filteredStats.totalRevenue > 0 ? ((filteredStats.totalProfit / filteredStats.totalRevenue) * 100).toFixed(1) : 0;
+  const netProfitPercentage = filteredStats.totalRevenue > 0
+    ? (filteredStats.totalProfit / filteredStats.totalRevenue) * 100
+    : 0;
+  const netProfitPercentText = `${netProfitPercentage >= 0 ? 'Untung' : 'Rugi'} ${Math.abs(netProfitPercentage).toFixed(1)}%`;
 
   const globalStats = {
     totalItems: items.length,
@@ -439,7 +554,8 @@ const Dashboard = ({ items, categories }) => {
   const tooltipTextColor = isDark ? '#f3f4f6' : '#111827';
 
   return (
-    <div className="space-y-6">
+    <UiTooltipProvider delayDuration={120}>
+      <div className="space-y-5">
       <h1 className="page-title">Papan Pemuka</h1>
       
       <Card>
@@ -480,67 +596,77 @@ const Dashboard = ({ items, categories }) => {
         </CardContent>
       </Card>
       
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <StatCard
-          title="Jumlah Item"
-          value={globalStats.totalItems}
-          icon={<Package />}
-          subtext={`${globalStats.availableItems} tersedia`}
-          delay={0.2}
-          tone="sky"
-        />
-        <StatCard
-          title="Kuantiti Terjual"
-          value={filteredStats.totalQuantitySold}
-          icon={<CheckCircle />}
-          subtext={`Daripada ${filteredStats.soldItemsCount} item`}
-          delay={0.3}
-          tone="amber"
-        />
-        <StatCard
-          title="Jumlah Hasil"
-          value={`RM ${filteredStats.totalRevenue.toFixed(2)}`}
-          icon={<Wallet />}
-          subtext={`Daripada ${filteredStats.soldItemsCount} jualan`}
-          delay={0.4}
-          tone="emerald"
-        />
-        <StatCard
-          title="Jumlah Perbelanjaan"
-          value={`RM ${filteredStats.totalExpenses.toFixed(2)}`}
-          icon={<TrendingDown />}
-          subtext="Perbelanjaan perniagaan"
-          delay={0.45}
-          tone="fuchsia"
-        />
-      </div>
+      <section className="space-y-2">
+        <h2 className="px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Performance</h2>
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+          <StatCard
+            title="Jualan Barang"
+            value={`RM ${filteredStats.totalRevenue.toFixed(2)}`}
+            icon={<Wallet />}
+            subtext={`Daripada ${filteredStats.soldItemsCount} jualan`}
+            delay={0.2}
+            tone="emerald"
+            size="hero"
+          />
+          <StatCard
+            title="Untung Sebenar"
+            value={`RM ${filteredStats.totalProfit.toFixed(2)}`}
+            icon={<TrendingUp />}
+            subtext={netProfitPercentText}
+            delay={0.25}
+            isHighlighted={true}
+            tone="lime"
+            size="hero"
+            helperText="Untung selepas semua kos termasuk penghantaran."
+          />
+          <StatCard
+            title="Baki Duit Semasa"
+            value={`RM ${parseFloat(businessWalletBalance?.balance || 0).toFixed(2)}`}
+            icon={<Wallet />}
+            subtext={businessWalletBalance?.name ? `${businessWalletBalance.name} (live)` : 'Belum ada wallet Business'}
+            delay={0.3}
+            tone="indigo"
+            size="hero"
+          />
+        </div>
+      </section>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        <StatCard
-          title="Jumlah Pemulangan"
-          value={`RM ${filteredStats.totalRefunds.toFixed(2)}`}
-          icon={<TrendingDown />}
-          subtext="Dana yang dikembalikan"
-          delay={0.47}
-          tone="rose"
-        />
-        <StatCard
-          title="Baki Business"
-          value={`RM ${parseFloat(businessWalletBalance?.balance || 0).toFixed(2)}`}
-          icon={<Wallet />}
-          subtext={businessWalletBalance?.name ? `${businessWalletBalance.name} (live)` : 'Belum ada wallet Business'}
-          delay={0.49}
-          tone="indigo"
-        />
-        <StatCard
-          title="Keuntungan Bersih"
-          value={`RM ${filteredStats.totalProfit.toFixed(2)}`}
-          icon={<TrendingUp />}
-          subtext={`${profitMargin}% margin`}
-          delay={0.5}
-          isHighlighted={true}
-          tone="lime"
-        />
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <section className="space-y-2 lg:col-span-2">
+          <h2 className="px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Operations</h2>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <StatCard
+              title="Kuantiti Terjual"
+              value={filteredStats.totalQuantitySold}
+              icon={<CheckCircle />}
+              subtext={`Daripada ${filteredStats.soldItemsCount} item`}
+              delay={0.35}
+              tone="amber"
+            />
+            <StatCard
+              title="Jumlah Item"
+              value={globalStats.totalItems}
+              icon={<Package />}
+              subtext={`${globalStats.availableItems} tersedia`}
+              delay={0.4}
+              tone="sky"
+            />
+          </div>
+        </section>
+
+        <section className="space-y-2">
+          <h2 className="px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Cash</h2>
+          <div className="grid grid-cols-1 gap-4">
+            <StatCard
+              title="Kos Operasi"
+              value={`RM ${filteredStats.totalExpenses.toFixed(2)}`}
+              icon={<TrendingDown />}
+              subtext="Perbelanjaan perniagaan"
+              delay={0.45}
+              tone="fuchsia"
+            />
+          </div>
+        </section>
       </div>
 
       <Card>
@@ -668,7 +794,8 @@ const Dashboard = ({ items, categories }) => {
           </Card>
         </motion.div>
       </div>
-    </div>
+      </div>
+    </UiTooltipProvider>
   );
 };
 
