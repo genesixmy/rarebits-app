@@ -1,23 +1,32 @@
-import React, { useState, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
+﻿import React, { useMemo, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { useInvoices } from '@/hooks/useInvoices';
 import { supabase } from '@/lib/customSupabaseClient';
 import { formatCurrency } from '@/lib/utils';
+import { isDeliveryRequiredForInvoice } from '@/lib/shipping';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ChevronRight, Plus, Search, ChevronDown, AlertCircle } from 'lucide-react';
 import { format } from 'date-fns';
 import { ms } from 'date-fns/locale';
 
+const ALLOWED_STATUS_FILTERS = new Set(['draft', 'finalized', 'paid', 'cancelled']);
+const EMPTY_SHIPMENT_STATUS_MAP = new Map();
+
+const normalizeStatusFilter = (value) => (ALLOWED_STATUS_FILTERS.has(value) ? value : '');
+const normalizeShippingStateFilter = (value) => (value === 'pending' ? 'pending' : '');
+
 const InvoiceListPage = () => {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [searchTerm, setSearchTerm] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
   const [sortBy, setSortBy] = useState('date-desc');
   const [dateRange, setDateRange] = useState({ start: '', end: '' });
   const [showSortDropdown, setShowSortDropdown] = useState(false);
   const [showStatusDropdown, setShowStatusDropdown] = useState(false);
+  const statusFilter = normalizeStatusFilter(searchParams.get('status'));
+  const shippingStateFilter = normalizeShippingStateFilter(searchParams.get('shipping_state'));
 
   // Get current user
   const { data: authData } = useQuery({
@@ -27,12 +36,58 @@ const InvoiceListPage = () => {
       return data;
     },
   });
+  const userId = authData?.session?.user?.id ?? null;
 
   // Fetch all invoices
   const { data: invoices = [], isLoading, error } = useInvoices({
     clientId: '',
     status: statusFilter || undefined,
   });
+
+  const shipmentIds = useMemo(
+    () => [...new Set(invoices.map((invoice) => invoice?.shipment_id).filter(Boolean))],
+    [invoices]
+  );
+
+  const { data: shipmentStatusById = EMPTY_SHIPMENT_STATUS_MAP, isLoading: isLoadingShipmentStatuses } = useQuery({
+    queryKey: ['invoice-list-shipment-statuses', userId, shipmentIds],
+    queryFn: async () => {
+      if (!userId || shipmentIds.length === 0) return new Map();
+
+      const { data, error: shipmentError } = await supabase
+        .from('shipments')
+        .select('id, ship_status')
+        .eq('user_id', userId)
+        .in('id', shipmentIds);
+
+      if (shipmentError) throw shipmentError;
+
+      return new Map((data || []).map((shipment) => [shipment.id, shipment.ship_status]));
+    },
+    enabled: !!userId && shippingStateFilter === 'pending' && shipmentIds.length > 0,
+    staleTime: 30 * 1000,
+  });
+
+  const updateUrlFilters = ({ nextStatus, nextShippingState }) => {
+    const normalizedStatus = normalizeStatusFilter(nextStatus);
+    const normalizedShippingState =
+      normalizedStatus === 'paid' ? normalizeShippingStateFilter(nextShippingState) : '';
+    const nextParams = new URLSearchParams(searchParams);
+
+    if (normalizedStatus) {
+      nextParams.set('status', normalizedStatus);
+    } else {
+      nextParams.delete('status');
+    }
+
+    if (normalizedShippingState) {
+      nextParams.set('shipping_state', normalizedShippingState);
+    } else {
+      nextParams.delete('shipping_state');
+    }
+
+    setSearchParams(nextParams, { replace: true });
+  };
 
   // Filter and sort invoices
   const filteredInvoices = useMemo(() => {
@@ -48,7 +103,18 @@ const InvoiceListPage = () => {
         (!dateRange.start || invoiceDate >= new Date(dateRange.start)) &&
         (!dateRange.end || invoiceDate <= new Date(dateRange.end));
 
-      return matchesSearch && matchesStatus && matchesDateRange;
+      const matchesShippingState =
+        shippingStateFilter !== 'pending'
+          ? true
+          : (() => {
+              if (invoice.status !== 'paid') return false;
+              if (!isDeliveryRequiredForInvoice(invoice)) return false;
+              if (!invoice.shipment_id) return true;
+              const shipStatus = shipmentStatusById.get(invoice.shipment_id);
+              return !shipStatus || shipStatus === 'pending';
+            })();
+
+      return matchesSearch && matchesStatus && matchesDateRange && matchesShippingState;
     });
 
     // Sort
@@ -72,7 +138,7 @@ const InvoiceListPage = () => {
     });
 
     return filtered;
-  }, [invoices, searchTerm, statusFilter, sortBy, dateRange]);
+  }, [invoices, searchTerm, statusFilter, sortBy, dateRange, shippingStateFilter, shipmentStatusById]);
 
   const handleCreateInvoice = () => {
     navigate('/invoices/create');
@@ -92,7 +158,10 @@ const InvoiceListPage = () => {
     return statusColors[status] || 'bg-gray-100 text-gray-800';
   };
 
-  if (isLoading) {
+  if (
+    isLoading ||
+    (shippingStateFilter === 'pending' && shipmentIds.length > 0 && isLoadingShipmentStatuses)
+  ) {
     return (
       <div className="p-6">
         <div className="text-center">Sedang memuatkan invois...</div>
@@ -160,7 +229,10 @@ const InvoiceListPage = () => {
                   <button
                     key={option.value}
                     onClick={() => {
-                      setStatusFilter(option.value);
+                      updateUrlFilters({
+                        nextStatus: option.value,
+                        nextShippingState: option.value === 'paid' ? shippingStateFilter : '',
+                      });
                       setShowStatusDropdown(false);
                     }}
                     className={`block w-full px-4 py-2 text-left text-sm hover:bg-gray-100 first:rounded-t-lg last:rounded-b-lg ${
@@ -247,6 +319,22 @@ const InvoiceListPage = () => {
             Kosongkan Tarikh
           </Button>
         </div>
+
+        {shippingStateFilter === 'pending' && (
+          <div className="flex flex-col gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-xs text-amber-800">
+              Penapis aktif: invois dibayar yang masih menunggu penghantaran.
+            </p>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 px-2 text-amber-800 hover:bg-amber-100 hover:text-amber-900"
+              onClick={() => updateUrlFilters({ nextStatus: statusFilter, nextShippingState: '' })}
+            >
+              Buang Penapis Penghantaran
+            </Button>
+          </div>
+        )}
       </div>
 
       {/* Results Info */}
@@ -288,14 +376,17 @@ const InvoiceListPage = () => {
                 onClick={() => handleViewInvoice(invoice.id)}
               >
                 {/* Invoice Number & Client */}
-                <div className="col-span-4 md:col-span-3">
-                  <p className="font-medium text-sm">
+                <div className="col-span-4 min-w-0 md:col-span-3">
+                  <p className="font-medium text-sm break-words">
                     {invoice.refunds && invoice.refunds.length > 0 && (
-                      <span className="text-red-600 dark:text-red-400 mr-1.5">●</span>
+                      <span className="text-red-600 dark:text-red-400 mr-1.5">â—</span>
                     )}
                     {invoice.invoice_number}
                   </p>
-                  <p className="text-xs text-gray-600">{invoice.client?.name || '-'}</p>
+                  <p className="text-xs text-gray-600 break-words">{invoice.client?.name || '-'}</p>
+                  <p className="text-[11px] leading-tight text-gray-500 break-all md:hidden">
+                    {invoice.client?.email || '-'}
+                  </p>
                 </div>
 
                 {/* Date */}

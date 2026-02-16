@@ -1,5 +1,10 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/customSupabaseClient';
+import {
+  COURIER_PAYMENT_MODES,
+  isDeliveryRequiredForInvoice,
+  resolveCourierPaymentModeForInvoice,
+} from '@/lib/shipping';
 
 const SHIPPING_VALUE_CAP = 9999;
 const COURIER_MAX_LENGTH = 50;
@@ -277,7 +282,19 @@ export const useCreateInvoice = () => {
   const userId = authData?.session?.user?.id;
 
   return useMutation({
-    mutationFn: async ({ clientId, selectedItems = [], notes = '', manualItems = [], platform = 'Manual' }) => {
+    mutationFn: async ({
+      clientId,
+      selectedItems = [],
+      notes = '',
+      manualItems = [],
+      platform = 'Manual',
+      salesChannelId = null,
+      channelFeeAmount = 0,
+      shippingMethod = 'walk_in',
+      courierPaymentMode = 'seller',
+      shippingCharged = 0,
+      shippingRequired = false,
+    }) => {
       if (!userId) throw new Error('User not authenticated');
 
       // Generate invoice number
@@ -287,6 +304,18 @@ export const useCreateInvoice = () => {
       );
 
       if (numberError) throw numberError;
+
+      const normalizedChannelFeeAmount = (() => {
+        const parsed = Number(channelFeeAmount);
+        if (!Number.isFinite(parsed)) return 0;
+        return Math.max(parsed, 0);
+      })();
+
+      const normalizedShippingCharged = (() => {
+        const parsed = Number(shippingCharged);
+        if (!Number.isFinite(parsed)) return 0;
+        return Math.max(parsed, 0);
+      })();
 
       // Create invoice with platform
       const { data: invoice, error: invoiceError } = await supabase
@@ -298,6 +327,12 @@ export const useCreateInvoice = () => {
           invoice_date: new Date().toISOString().split('T')[0],
           notes,
           platform,
+          sales_channel_id: salesChannelId || null,
+          channel_fee_amount: normalizedChannelFeeAmount,
+          shipping_method: shippingMethod || 'walk_in',
+          courier_payment_mode: courierPaymentMode === 'platform' ? 'platform' : 'seller',
+          shipping_charged: normalizedShippingCharged,
+          shipping_required: Boolean(shippingRequired),
           status: 'draft',
         })
         .select()
@@ -309,8 +344,13 @@ export const useCreateInvoice = () => {
       await Promise.all(
         selectedItems.map(async (selectedItem) => {
           const itemId = selectedItem.id;
-          const itemQuantity = selectedItem.quantity || 1;
-          const unitPrice = selectedItem.unit_price || selectedItem.selling_price;
+          const itemQuantity = Math.max(1, parseInt(selectedItem.quantity, 10) || 1);
+          const unitPrice = (() => {
+            const rawValue = selectedItem.unit_price ?? selectedItem.selling_price ?? 0;
+            const parsed = Number.parseFloat(rawValue);
+            if (!Number.isFinite(parsed)) return 0;
+            return Math.max(parsed, 0);
+          })();
 
           console.log('[useCreateInvoice] Adding inventory item to invoice:', { itemId, itemQuantity, unitPrice });
 
@@ -388,6 +428,26 @@ export const useCreateInvoice = () => {
           };
         })
       );
+
+      // Re-apply selected sales channel after invoice items are inserted.
+      // Some legacy flows update invoice subtotal after insert, so we enforce
+      // channel snapshot once more on the final draft state.
+      const { error: reapplySalesChannelError } = await supabase
+        .from('invoices')
+        .update({
+          sales_channel_id: salesChannelId || null,
+          channel_fee_amount: normalizedChannelFeeAmount,
+          shipping_method: shippingMethod || 'walk_in',
+          courier_payment_mode: courierPaymentMode === 'platform' ? 'platform' : 'seller',
+          shipping_charged: normalizedShippingCharged,
+          shipping_required: Boolean(shippingRequired),
+        })
+        .eq('id', invoice.id)
+        .eq('user_id', userId);
+
+      if (reapplySalesChannelError) {
+        throw reapplySalesChannelError;
+      }
 
       const { data: refreshedInvoice, error: refreshError } = await supabase
         .from('invoices')
@@ -735,7 +795,87 @@ export const useDeleteInvoice = () => {
 
       console.log('[useDeleteInvoice] Starting deletion for invoice:', invoiceId);
 
-      // Use RPC function for atomic deletion with proper cleanup
+      const { data: invoiceMeta, error: invoiceMetaError } = await supabase
+        .from('invoices')
+        .select('id, status')
+        .eq('id', invoiceId)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (invoiceMetaError) {
+        console.error('[useDeleteInvoice] Failed to fetch invoice metadata:', invoiceMetaError);
+        throw invoiceMetaError;
+      }
+
+      if (!invoiceMeta?.id) {
+        throw new Error('Invois tidak ditemui');
+      }
+
+      // Draft invoices do not deduct stock from inventory.
+      // Delete via direct table operations to avoid legacy RPC stock restoration.
+      if (invoiceMeta.status === 'draft') {
+        const { data: invoiceItemsRows, error: invoiceItemsFetchError } = await supabase
+          .from('invoice_items')
+          .select('id')
+          .eq('invoice_id', invoiceId);
+
+        if (invoiceItemsFetchError) {
+          throw invoiceItemsFetchError;
+        }
+
+        const deletedItemsCount = invoiceItemsRows?.length || 0;
+
+        const { error: deleteInvoiceItemsError } = await supabase
+          .from('invoice_items')
+          .delete()
+          .eq('invoice_id', invoiceId);
+
+        if (deleteInvoiceItemsError) {
+          throw deleteInvoiceItemsError;
+        }
+
+        // Clear legacy linkage only. Do not change quantity for draft deletion.
+        const { error: clearItemLinksError } = await supabase
+          .from('items')
+          .update({ invoice_id: null })
+          .eq('user_id', userId)
+          .eq('invoice_id', invoiceId);
+
+        if (clearItemLinksError) {
+          throw clearItemLinksError;
+        }
+
+        // Safety cleanup for any orphan refund rows (usually none on draft).
+        const { error: deleteRefundsError } = await supabase
+          .from('refunds')
+          .delete()
+          .eq('invoice_id', invoiceId);
+
+        if (deleteRefundsError) {
+          throw deleteRefundsError;
+        }
+
+        const { error: deleteInvoiceError } = await supabase
+          .from('invoices')
+          .delete()
+          .eq('id', invoiceId)
+          .eq('user_id', userId);
+
+        if (deleteInvoiceError) {
+          throw deleteInvoiceError;
+        }
+
+        const localResponse = {
+          success: true,
+          message: `Invois dihapus. ${deletedItemsCount} item dihapus dari invois, 0 item kuantiti dikembalikan.`,
+          invoice_id: invoiceId,
+        };
+
+        console.log('[useDeleteInvoice] Draft invoice deleted via direct flow:', localResponse);
+        return localResponse;
+      }
+
+      // Non-draft invoices keep RPC path (wallet/stock reversal logic server-side).
       const { data, error } = await supabase.rpc('delete_invoice', {
         p_invoice_id: invoiceId,
         p_user_id: userId,
@@ -1318,7 +1458,7 @@ export const useSaveInvoiceShipment = () => {
 
       const { data: invoiceData, error: invoiceError } = await supabase
         .from('invoices')
-        .select('id, user_id, shipment_id')
+        .select('id, user_id, shipment_id, shipping_method, shipping_charged, courier_payment_mode')
         .eq('id', invoiceId)
         .eq('user_id', userId)
         .single();
@@ -1326,6 +1466,12 @@ export const useSaveInvoiceShipment = () => {
       if (invoiceError) throw invoiceError;
 
       let shipmentId = invoiceData.shipment_id;
+      const deliveryRequired = isDeliveryRequiredForInvoice(invoiceData);
+      const isPlatformMode = resolveCourierPaymentModeForInvoice(invoiceData) === COURIER_PAYMENT_MODES.PLATFORM;
+
+      if (!deliveryRequired && !shipmentId) {
+        throw new Error('Penghantaran tidak diperlukan untuk invois ini.');
+      }
 
       if (!shipmentId) {
         const { data: insertedShipment, error: insertShipmentError } = await supabase
@@ -1336,7 +1482,8 @@ export const useSaveInvoiceShipment = () => {
             tracking_no: cleanTrackingNo || null,
             ship_status: 'pending',
             shipping_cost: 0,
-            courier_paid: false,
+            courier_paid: isPlatformMode,
+            courier_paid_at: isPlatformMode ? new Date().toISOString() : null,
           })
           .select('id')
           .single();
@@ -1363,12 +1510,19 @@ export const useSaveInvoiceShipment = () => {
         if (upsertLinkError) throw upsertLinkError;
       }
 
+      const shipmentUpdatePayload = {
+        courier: cleanCourier || null,
+        tracking_no: cleanTrackingNo || null,
+      };
+      if (isPlatformMode) {
+        shipmentUpdatePayload.shipping_cost = 0;
+        shipmentUpdatePayload.courier_paid = true;
+        shipmentUpdatePayload.courier_paid_at = new Date().toISOString();
+      }
+
       const { data: shipmentData, error: updateShipmentError } = await supabase
         .from('shipments')
-        .update({
-          courier: cleanCourier || null,
-          tracking_no: cleanTrackingNo || null,
-        })
+        .update(shipmentUpdatePayload)
         .eq('id', shipmentId)
         .eq('user_id', userId)
         .select('id, user_id, courier, tracking_no, ship_status, shipped_at, delivered_at, shipping_cost, courier_paid, courier_paid_at, notes, created_at, updated_at')
@@ -1381,6 +1535,10 @@ export const useSaveInvoiceShipment = () => {
       queryClient.invalidateQueries({ queryKey: ['invoice', invoiceId] });
       queryClient.invalidateQueries({ queryKey: ['invoice-shipment', invoiceId] });
       queryClient.invalidateQueries({ queryKey: ['invoices'] });
+      queryClient.invalidateQueries({ queryKey: ['invoice-items', userId] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-sales', userId] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-pending-shipping', userId] });
+      queryClient.invalidateQueries({ queryKey: ['sales'] });
     },
   });
 };
@@ -1420,7 +1578,7 @@ export const useUpdateInvoiceShipmentStatus = () => {
 
       const { data: invoiceData, error: invoiceError } = await supabase
         .from('invoices')
-        .select('id, user_id, shipment_id')
+        .select('id, user_id, shipment_id, shipping_method, shipping_charged, courier_payment_mode')
         .eq('id', invoiceId)
         .eq('user_id', userId)
         .single();
@@ -1428,6 +1586,12 @@ export const useUpdateInvoiceShipmentStatus = () => {
       if (invoiceError) throw invoiceError;
 
       let shipmentId = invoiceData.shipment_id;
+      const deliveryRequired = isDeliveryRequiredForInvoice(invoiceData);
+      const isPlatformMode = resolveCourierPaymentModeForInvoice(invoiceData) === COURIER_PAYMENT_MODES.PLATFORM;
+
+      if (!deliveryRequired && !shipmentId) {
+        throw new Error('Penghantaran tidak diperlukan untuk invois ini.');
+      }
 
       if (!shipmentId) {
         const { data: insertedShipment, error: insertShipmentError } = await supabase
@@ -1440,7 +1604,8 @@ export const useUpdateInvoiceShipmentStatus = () => {
             shipped_at: shipStatus === 'shipped' ? new Date().toISOString() : null,
             delivered_at: shipStatus === 'delivered' ? new Date().toISOString() : null,
             shipping_cost: 0,
-            courier_paid: false,
+            courier_paid: isPlatformMode,
+            courier_paid_at: isPlatformMode ? new Date().toISOString() : null,
           })
           .select('id')
           .single();
@@ -1468,6 +1633,11 @@ export const useUpdateInvoiceShipmentStatus = () => {
         nextValues.delivered_at = new Date().toISOString();
         nextValues.shipped_at = nextValues.shipped_at || new Date().toISOString();
       }
+      if (isPlatformMode) {
+        nextValues.shipping_cost = 0;
+        nextValues.courier_paid = true;
+        nextValues.courier_paid_at = new Date().toISOString();
+      }
 
       const { data: shipmentData, error: updateShipmentError } = await supabase
         .from('shipments')
@@ -1494,6 +1664,10 @@ export const useUpdateInvoiceShipmentStatus = () => {
       queryClient.invalidateQueries({ queryKey: ['invoice', invoiceId] });
       queryClient.invalidateQueries({ queryKey: ['invoice-shipment', invoiceId] });
       queryClient.invalidateQueries({ queryKey: ['invoices'] });
+      queryClient.invalidateQueries({ queryKey: ['invoice-items', userId] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-sales', userId] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-pending-shipping', userId] });
+      queryClient.invalidateQueries({ queryKey: ['sales'] });
     },
   });
 };
@@ -1517,6 +1691,21 @@ export const useMarkShipmentCourierPaid = () => {
     mutationFn: async ({ invoiceId, shippingCost, walletId = null, paidAt = null, notes = '' }) => {
       if (!userId) throw new Error('User not authenticated');
       if (!invoiceId) throw new Error('Invoice ID is required');
+
+      const { data: invoiceMeta, error: invoiceMetaError } = await supabase
+        .from('invoices')
+        .select('id, user_id, courier_payment_mode')
+        .eq('id', invoiceId)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (invoiceMetaError) throw invoiceMetaError;
+      if (!invoiceMeta?.id) throw new Error('Invois tidak ditemui');
+
+      const isPlatformMode = resolveCourierPaymentModeForInvoice(invoiceMeta) === COURIER_PAYMENT_MODES.PLATFORM;
+      if (isPlatformMode) {
+        throw new Error('Mode platform: bayaran courier tidak direkodkan di wallet.');
+      }
 
       const normalizedCost = normalizeCurrencyAmount(shippingCost, {
         label: 'Kos courier',
@@ -1564,6 +1753,10 @@ export const useMarkShipmentCourierPaid = () => {
       queryClient.invalidateQueries({ queryKey: ['invoice', invoiceId] });
       queryClient.invalidateQueries({ queryKey: ['invoice-shipment', invoiceId] });
       queryClient.invalidateQueries({ queryKey: ['invoices'] });
+      queryClient.invalidateQueries({ queryKey: ['invoice-items', userId] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-sales', userId] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-pending-shipping', userId] });
+      queryClient.invalidateQueries({ queryKey: ['sales'] });
       queryClient.invalidateQueries({ queryKey: ['wallets', userId] });
       queryClient.invalidateQueries({ queryKey: ['transactions', userId, 'all'] });
       queryClient.invalidateQueries({

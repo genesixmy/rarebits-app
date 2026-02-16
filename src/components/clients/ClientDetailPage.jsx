@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useParams, Link } from 'react-router-dom';
 import { supabase } from '@/lib/customSupabaseClient';
-import { Loader2, ArrowLeft, Mail, Phone, MapPin, Edit, Download, CheckCircle, XCircle, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Loader2, ArrowLeft, Mail, Phone, MapPin, Edit, Download, ChevronLeft, ChevronRight } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
@@ -10,7 +10,7 @@ import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend, BarChart, Ba
 import { useTheme } from '@/contexts/ThemeProvider';
 import { useToast } from '@/components/ui/use-toast';
 import ClientFormModal from './ClientFormModal';
-import { cn } from '@/lib/utils';
+import { COURIER_PAYMENT_MODES, resolveCourierPaymentModeForInvoice } from '@/lib/shipping';
 
 const fetchClientDetails = async (clientId) => {
   const { data: client, error: clientError } = await supabase
@@ -32,17 +32,67 @@ const fetchClientDetails = async (clientId) => {
       cost_price,
       line_total,
       item:items(id, name, category, cost_price),
-      invoice:invoices(id, invoice_date, status, platform, client_id, user_id)
+      invoice:invoices(
+        id,
+        invoice_number,
+        invoice_date,
+        status,
+        platform,
+        client_id,
+        user_id,
+        channel_fee_amount,
+        shipping_charged,
+        courier_payment_mode
+      )
     `)
     .order('created_at', { ascending: false });
 
   if (invoiceItemsError) throw invoiceItemsError;
 
-  const items = (invoiceItems || [])
-    .filter(invItem =>
+  const paidItems = (invoiceItems || [])
+    .filter((invItem) =>
       invItem.invoice?.client_id === clientId &&
-      invItem.invoice?.status === 'paid'
-    )
+      invItem.invoice?.status === 'paid' &&
+      invItem.invoice?.user_id === client.user_id
+    );
+
+  const invoiceSummaryById = paidItems.reduce((acc, invItem) => {
+    const invoice = invItem.invoice;
+    const invoiceId = invoice?.id;
+    if (!invoiceId) return acc;
+
+    const quantity = parseInt(invItem.quantity, 10) || 1;
+    const unitPrice = parseFloat(invItem.unit_price) || 0;
+    const lineTotal = parseFloat(invItem.line_total);
+    const totalRevenue = Number.isFinite(lineTotal) ? lineTotal : unitPrice * quantity;
+
+    if (!acc.has(invoiceId)) {
+      const shippingCharged = Math.max(parseFloat(invoice?.shipping_charged) || 0, 0);
+      const paymentMode = resolveCourierPaymentModeForInvoice(invoice);
+      const shippingCollected = paymentMode === COURIER_PAYMENT_MODES.SELLER && shippingCharged > 0
+        ? shippingCharged
+        : 0;
+
+      acc.set(invoiceId, {
+        invoice_id: invoiceId,
+        invoice_number: invoice?.invoice_number || invoiceId,
+        invoice_date: invoice?.invoice_date,
+        items_amount: 0,
+        shipping_collected: shippingCollected,
+      });
+    }
+
+    const current = acc.get(invoiceId);
+    current.items_amount += totalRevenue;
+
+    return acc;
+  }, new Map());
+
+  const revenueByInvoice = new Map(
+    Array.from(invoiceSummaryById.entries()).map(([invoiceId, summary]) => [invoiceId, summary.items_amount])
+  );
+
+  const items = paidItems
     .map(invItem => {
       const quantity = parseInt(invItem.quantity, 10) || 1;
       const unitPrice = parseFloat(invItem.unit_price) || 0;
@@ -63,7 +113,13 @@ const fetchClientDetails = async (clientId) => {
       const totalCost = unitCost * quantity;
       const name = isManual ? (invItem.item_name || 'Item Manual') : (invItem.item?.name || 'Item');
       const category = isManual ? 'Manual' : (invItem.item?.category || 'Lain-lain');
-      const profitAmount = totalRevenue - totalCost;
+      const invoiceId = invItem.invoice?.id;
+      const invoiceRevenue = invoiceId ? (revenueByInvoice.get(invoiceId) || 0) : 0;
+      const invoiceChannelFee = Math.max(parseFloat(invItem.invoice?.channel_fee_amount) || 0, 0);
+      const channelFeeShare = invoiceRevenue > 0
+        ? (totalRevenue / invoiceRevenue) * invoiceChannelFee
+        : 0;
+      const profitAmount = totalRevenue - totalCost - channelFeeShare;
 
       return {
         id: invItem.id,
@@ -78,7 +134,14 @@ const fetchClientDetails = async (clientId) => {
     })
     .sort((a, b) => new Date(b.date_sold || 0) - new Date(a.date_sold || 0));
 
-  return { ...client, items };
+  const purchases = Array.from(invoiceSummaryById.values())
+    .map((summary) => ({
+      ...summary,
+      total_paid: summary.items_amount + summary.shipping_collected,
+    }))
+    .sort((a, b) => new Date(b.invoice_date || 0) - new Date(a.invoice_date || 0));
+
+  return { ...client, items, purchases };
 };
 
 const fetchCategories = async (userId) => {
@@ -120,10 +183,20 @@ const ClientDetailPage = () => {
   });
 
   const stats = useMemo(() => {
-    if (!client?.items) return { totalSpend: 0, totalPurchases: 0, platformBreakdown: [], categoryBreakdown: [] };
+    if (!client?.items) {
+      return {
+        totalPaidToSeller: 0,
+        totalItemsAmount: 0,
+        shippingCollected: 0,
+        platformBreakdown: [],
+        categoryBreakdown: [],
+      };
+    }
 
-    const totalSpend = client.items.reduce((sum, item) => sum + (parseFloat(item.selling_price) || 0), 0);
-    const totalPurchases = client.items.length;
+    const purchases = client.purchases || [];
+    const totalItemsAmount = purchases.reduce((sum, purchase) => sum + (parseFloat(purchase.items_amount) || 0), 0);
+    const shippingCollected = purchases.reduce((sum, purchase) => sum + (parseFloat(purchase.shipping_collected) || 0), 0);
+    const totalPaidToSeller = totalItemsAmount + shippingCollected;
 
     const platformBreakdown = client.items.reduce((acc, item) => {
       (item.sold_platforms || []).forEach(platform => {
@@ -154,13 +227,19 @@ const ClientDetailPage = () => {
       return acc;
     }, []);
 
-    return { totalSpend, totalPurchases, platformBreakdown, categoryBreakdown };
+    return {
+      totalPaidToSeller,
+      totalItemsAmount,
+      shippingCollected,
+      platformBreakdown,
+      categoryBreakdown,
+    };
   }, [client, categories]);
 
-  const totalPages = Math.ceil((client?.items?.length || 0) / itemsPerPage);
+  const totalPages = Math.ceil((client?.purchases?.length || 0) / itemsPerPage);
   const indexOfLastItem = currentPage * itemsPerPage;
   const indexOfFirstItem = indexOfLastItem - itemsPerPage;
-  const currentPurchaseHistory = client?.items?.slice(indexOfFirstItem, indexOfLastItem) || [];
+  const currentPurchaseHistory = client?.purchases?.slice(indexOfFirstItem, indexOfLastItem) || [];
 
   const handlePageChange = (newPage) => {
     if (newPage >= 1 && newPage <= totalPages) {
@@ -266,12 +345,22 @@ const ClientDetailPage = () => {
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <Card>
-            <CardHeader><CardTitle>Jumlah Belanja</CardTitle></CardHeader>
-            <CardContent><p className="text-3xl font-bold text-primary">RM{stats.totalSpend.toFixed(2)}</p></CardContent>
+            <CardHeader><CardTitle>Jumlah Dibayar</CardTitle></CardHeader>
+            <CardContent>
+              <p className="text-3xl font-bold text-primary">RM{stats.totalPaidToSeller.toFixed(2)}</p>
+              {stats.shippingCollected > 0 && (
+                <p className="mt-2 text-sm text-muted-foreground">
+                  Termasuk caj pos: RM{stats.shippingCollected.toFixed(2)}
+                </p>
+              )}
+            </CardContent>
           </Card>
           <Card>
-            <CardHeader><CardTitle>Jumlah Pembelian</CardTitle></CardHeader>
-            <CardContent><p className="text-3xl font-bold text-primary">{stats.totalPurchases} item</p></CardContent>
+            <CardHeader><CardTitle>Jumlah Barang</CardTitle></CardHeader>
+            <CardContent>
+              <p className="text-3xl font-bold text-primary">RM{stats.totalItemsAmount.toFixed(2)}</p>
+              <p className="mt-2 text-sm text-muted-foreground">Tidak termasuk caj pos.</p>
+            </CardContent>
           </Card>
         </div>
 
@@ -328,41 +417,37 @@ const ClientDetailPage = () => {
               <table className="w-full">
                 <thead>
                   <tr className="text-left text-sm text-muted-foreground">
-                    <th className="p-4 font-medium">Item</th>
+                    <th className="p-4 font-medium">Invois</th>
                     <th className="p-4 font-medium">Tarikh</th>
-                    <th className="p-4 font-medium">Status</th>
-                    <th className="p-4 font-medium text-right">Harga Jualan</th>
+                    <th className="p-4 font-medium text-right">Jumlah Barang</th>
                   </tr>
                 </thead>
                 <tbody>
                   {currentPurchaseHistory.length > 0 ? (
-                    currentPurchaseHistory.map(item => {
-                      const profit = Number.isFinite(item.profit_amount)
-                        ? item.profit_amount
-                        : ((parseFloat(item.selling_price) || 0) - (parseFloat(item.cost_price) || 0));
-                      const isLoss = profit < 0;
-                      return (
-                        <tr key={item.id} className="border-t relative group overflow-hidden">
-                          <td className="p-4 font-semibold text-foreground flex items-center gap-3">
-                             <div className="absolute left-0 top-0 h-full w-1 bg-primary scale-y-0 group-hover:scale-y-100 transition-transform origin-center duration-300" />
-                             <div className="transition-transform duration-300 group-hover:translate-x-2">
-                               {item.name}
+                    currentPurchaseHistory.map((purchase) => (
+                      <tr key={purchase.invoice_id} className="border-t relative group overflow-hidden">
+                        <td className="p-4 font-semibold text-foreground flex items-center gap-3">
+                           <div className="absolute left-0 top-0 h-full w-1 bg-primary scale-y-0 group-hover:scale-y-100 transition-transform origin-center duration-300" />
+                           <div className="transition-transform duration-300 group-hover:translate-x-2">
+                             {purchase.invoice_number || purchase.invoice_id}
+                           </div>
+                         </td>
+                         <td className="p-4 text-muted-foreground">
+                           {purchase.invoice_date ? new Date(purchase.invoice_date).toLocaleDateString() : '-'}
+                         </td>
+                         <td className="p-4 text-right font-semibold text-foreground">
+                           RM{(parseFloat(purchase.items_amount) || 0).toFixed(2)}
+                           {(parseFloat(purchase.shipping_collected) || 0) > 0 && (
+                             <div className="mt-2 inline-flex rounded-full bg-secondary px-3 py-1 text-xs font-medium text-secondary-foreground">
+                               Caj Pos RM{(parseFloat(purchase.shipping_collected) || 0).toFixed(2)}
                              </div>
-                           </td>
-                           <td className="p-4 text-muted-foreground">{new Date(item.date_sold).toLocaleDateString()}</td>
-                           <td className="p-4">
-                             <div className={cn("inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium", isLoss ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700")}>
-                               {isLoss ? <XCircle className="w-3 h-3" /> : <CheckCircle className="w-3 h-3" />}
-                               RM {Math.abs(profit).toFixed(2)}
-                             </div>
-                           </td>
-                           <td className="p-4 text-right font-semibold text-foreground">RM{parseFloat(item.selling_price).toFixed(2)}</td>
+                           )}
+                         </td>
                         </tr>
-                      );
-                    })
+                    ))
                   ) : (
                     <tr>
-                      <td colSpan="4" className="text-muted-foreground text-center py-8">Tiada rekod pembelian.</td>
+                      <td colSpan="3" className="text-muted-foreground text-center py-8">Tiada rekod pembelian.</td>
                     </tr>
                   )}
                 </tbody>

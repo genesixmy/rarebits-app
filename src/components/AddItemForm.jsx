@@ -1,12 +1,13 @@
 
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
 import { motion } from 'framer-motion';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { Checkbox } from '@/components/ui/checkbox';
-import { X, Save, Loader2, Image as ImageIcon, Trash2, Plus, Edit, User, MessageSquare, Star, GripVertical, ArrowUp, ArrowDown, Package2, BadgeDollarSign, ClipboardList } from 'lucide-react';
+import { X, Save, Loader2, Image as ImageIcon, Trash2, Plus, Edit, User, MessageSquare, Star, GripVertical, ArrowUp, ArrowDown, Package2, BadgeDollarSign, ClipboardList, Copy, Download, FileText, ExternalLink } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
 import { useAuth } from '@/contexts/SupabaseAuthContext.jsx';
 import { supabase } from '@/lib/customSupabaseClient';
@@ -93,9 +94,23 @@ const isDraftFresh = (updatedAtMs) => {
   return Date.now() - updatedAtMs <= DRAFT_MAX_AGE_MS;
 };
 
+const normalizeTagName = (value) => (typeof value === 'string' ? value.trim() : '');
+
+const buildSafeFileSlug = (value, fallback = 'rarebits-item') => {
+  const normalized = (value || '')
+    .toString()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60);
+
+  return normalized || fallback;
+};
+
 const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onClientAdded, isSaving }) => {
   const { toast } = useToast();
   const { user } = useAuth();
+  const queryClient = useQueryClient();
   const { formData, updateFormField, updateFormData, initializeFromItem, handleStatusChange, clearDraft } = useItemForm();
   const [uploading, setUploading] = useState(false);
   const [showClientModal, setShowClientModal] = useState(false);
@@ -113,6 +128,14 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
   const [librarySearchTerm, setLibrarySearchTerm] = useState('');
   const [selectedLibraryUrls, setSelectedLibraryUrls] = useState([]);
   const [hasSubmitAttempted, setHasSubmitAttempted] = useState(false);
+  const [tagSearch, setTagSearch] = useState('');
+  const [selectedTagIds, setSelectedTagIds] = useState([]);
+  const [isCreatingTag, setIsCreatingTag] = useState(false);
+  const [showListingNoteModal, setShowListingNoteModal] = useState(false);
+  const [showDownloadImagesModal, setShowDownloadImagesModal] = useState(false);
+  const [selectedDownloadImageIds, setSelectedDownloadImageIds] = useState([]);
+  const [isDownloadingImages, setIsDownloadingImages] = useState(false);
+  const [downloadImagesWarning, setDownloadImagesWarning] = useState('');
   const [draftPrompt, setDraftPrompt] = useState(null);
   const [lastDraftSavedAt, setLastDraftSavedAt] = useState(null);
   const lastInitializedItemIdRef = useRef(null);
@@ -121,7 +144,75 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
   const galleryInputRef = useRef(null);
   const libraryCameraInputRef = useRef(null);
   const cameraInputRef = useRef(null);
+  const hydratedTagItemIdRef = useRef(null);
   const initializeFromItemRef = useRef(initializeFromItem);
+
+  const { data: userTags = [], isLoading: isTagsLoading } = useQuery({
+    queryKey: ['user-tags', user?.id],
+    queryFn: async () => {
+      if (!user?.id) return [];
+
+      const { data: rpcTags, error: rpcError } = await supabase.rpc('get_user_tags');
+      if (!rpcError) {
+        return Array.isArray(rpcTags) ? rpcTags : [];
+      }
+
+      const isMissingRpc = rpcError.code === 'PGRST202' || rpcError.code === '42883';
+      if (!isMissingRpc) throw rpcError;
+
+      const { data: fallbackTags, error: fallbackError } = await supabase
+        .from('tags')
+        .select('id, name, color, created_at, updated_at')
+        .eq('user_id', user.id)
+        .order('name', { ascending: true });
+
+      if (fallbackError) throw fallbackError;
+      return fallbackTags || [];
+    },
+    enabled: !!user?.id,
+    staleTime: Infinity,
+    gcTime: Infinity,
+    refetchOnWindowFocus: false,
+  });
+
+  const { data: currentItemTagIds = [], isLoading: isItemTagsLoading } = useQuery({
+    queryKey: ['item-tags', user?.id, item?.id],
+    queryFn: async () => {
+      if (!user?.id || !item?.id) return [];
+      const { data, error } = await supabase
+        .from('item_tags')
+        .select('tag_id')
+        .eq('item_id', item.id);
+
+      if (error) throw error;
+
+      return (data || []).map((row) => row.tag_id).filter(Boolean);
+    },
+    enabled: !!user?.id && !!item?.id,
+    staleTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: false,
+  });
+
+  useEffect(() => {
+    if (!item?.id) {
+      hydratedTagItemIdRef.current = null;
+      setSelectedTagIds([]);
+      return;
+    }
+
+    if (hydratedTagItemIdRef.current !== item.id) {
+      setSelectedTagIds([]);
+    }
+  }, [item?.id]);
+
+  useEffect(() => {
+    if (!item?.id || isItemTagsLoading) return;
+    if (hydratedTagItemIdRef.current === item.id) return;
+
+    const nextSelectedTagIds = Array.from(new Set((currentItemTagIds || []).filter(Boolean)));
+    setSelectedTagIds(nextSelectedTagIds);
+    hydratedTagItemIdRef.current = item.id;
+  }, [item?.id, isItemTagsLoading, currentItemTagIds]);
 
   useEffect(() => {
     initializeFromItemRef.current = initializeFromItem;
@@ -130,6 +221,15 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
   const isMobileDevice = useMemo(() => {
     if (typeof navigator === 'undefined') return false;
     return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+  }, []);
+
+  const isIosSafari = useMemo(() => {
+    if (typeof navigator === 'undefined') return false;
+    const ua = navigator.userAgent || '';
+    const isIos = /iPad|iPhone|iPod/.test(ua)
+      || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    if (!isIos) return false;
+    return /Safari/i.test(ua) && !/CriOS|FxiOS|EdgiOS|OPiOS|DuckDuckGo|YaBrowser/i.test(ua);
   }, []);
 
   // Initialize form when item prop changes (opening edit modal)
@@ -414,6 +514,143 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
     );
   };
 
+  const normalizedUserTags = useMemo(() => {
+    if (!Array.isArray(userTags)) return [];
+    return userTags
+      .filter((tag) => tag?.id && normalizeTagName(tag?.name))
+      .map((tag) => ({
+        ...tag,
+        name: normalizeTagName(tag.name),
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+  }, [userTags]);
+
+  const normalizedTagSearch = normalizeTagName(tagSearch);
+  const normalizedTagSearchLower = normalizedTagSearch.toLowerCase();
+  const selectedTagIdSet = useMemo(() => new Set(selectedTagIds), [selectedTagIds]);
+
+  const filteredTagOptions = useMemo(() => {
+    if (!normalizedTagSearchLower) return normalizedUserTags;
+    return normalizedUserTags.filter((tag) => tag.name.toLowerCase().includes(normalizedTagSearchLower));
+  }, [normalizedUserTags, normalizedTagSearchLower]);
+
+  const selectedTagPills = useMemo(() => {
+    if (selectedTagIds.length === 0) return [];
+    const tagLookup = new Map(normalizedUserTags.map((tag) => [tag.id, tag]));
+    return selectedTagIds
+      .map((tagId) => tagLookup.get(tagId))
+      .filter(Boolean);
+  }, [selectedTagIds, normalizedUserTags]);
+
+  const hasExactTagMatch = useMemo(() => {
+    if (!normalizedTagSearchLower) return false;
+    return normalizedUserTags.some((tag) => tag.name.toLowerCase() === normalizedTagSearchLower);
+  }, [normalizedUserTags, normalizedTagSearchLower]);
+
+  const shouldShowCreateTagAction = Boolean(normalizedTagSearch) && !hasExactTagMatch;
+
+  const toggleTagSelection = useCallback((tagId, forcedState) => {
+    if (!tagId) return;
+    setSelectedTagIds((prev) => {
+      const hasTag = prev.includes(tagId);
+      const shouldSelect = typeof forcedState === 'boolean' ? forcedState : !hasTag;
+
+      if (shouldSelect && !hasTag) {
+        return [...prev, tagId];
+      }
+
+      if (!shouldSelect && hasTag) {
+        return prev.filter((id) => id !== tagId);
+      }
+
+      return prev;
+    });
+  }, []);
+
+  const handleCreateTagFromSearch = useCallback(async () => {
+    const newTagName = normalizeTagName(tagSearch);
+    if (!newTagName || !user?.id || isCreatingTag) return;
+
+    const existingTag = normalizedUserTags.find(
+      (tag) => tag.name.toLowerCase() === newTagName.toLowerCase()
+    );
+    if (existingTag?.id) {
+      toggleTagSelection(existingTag.id, true);
+      setTagSearch('');
+      return;
+    }
+
+    setIsCreatingTag(true);
+    try {
+      const { data: createdTag, error: createTagError } = await supabase
+        .from('tags')
+        .insert({
+          user_id: user.id,
+          name: newTagName,
+        })
+        .select('id, name, color, created_at, updated_at')
+        .single();
+
+      if (createTagError) {
+        if (createTagError.code === '23505') {
+          const { data: duplicateMatch, error: duplicateError } = await supabase
+            .from('tags')
+            .select('id, name, color, created_at, updated_at')
+            .eq('user_id', user.id)
+            .ilike('name', newTagName)
+            .limit(1);
+
+          if (duplicateError) throw duplicateError;
+
+          const existingDuplicateTag = duplicateMatch?.[0];
+          if (existingDuplicateTag?.id) {
+            queryClient.setQueryData(['user-tags', user.id], (prev = []) => {
+              const alreadyExists = prev.some((tag) => tag.id === existingDuplicateTag.id);
+              if (alreadyExists) return prev;
+              return [...prev, existingDuplicateTag]
+                .sort((a, b) => normalizeTagName(a.name).localeCompare(normalizeTagName(b.name), undefined, { sensitivity: 'base' }));
+            });
+            toggleTagSelection(existingDuplicateTag.id, true);
+            setTagSearch('');
+            return;
+          }
+        }
+
+        throw createTagError;
+      }
+
+      queryClient.setQueryData(['user-tags', user.id], (prev = []) => {
+        const alreadyExists = prev.some((tag) => tag.id === createdTag.id);
+        if (alreadyExists) return prev;
+        return [...prev, createdTag]
+          .sort((a, b) => normalizeTagName(a.name).localeCompare(normalizeTagName(b.name), undefined, { sensitivity: 'base' }));
+      });
+
+      toggleTagSelection(createdTag.id, true);
+      setTagSearch('');
+      toast({
+        title: 'Tag ditambah',
+        description: `"${createdTag.name}" berjaya ditambah.`,
+      });
+    } catch (error) {
+      toast({
+        title: 'Gagal tambah tag',
+        description: error.message || 'Tidak dapat mencipta tag baharu.',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsCreatingTag(false);
+    }
+  }, [
+    tagSearch,
+    user?.id,
+    isCreatingTag,
+    normalizedUserTags,
+    queryClient,
+    toggleTagSelection,
+    toast,
+  ]);
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setHasSubmitAttempted(true);
@@ -457,14 +694,25 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
         }
     }
 
+    if (item?.id && hydratedTagItemIdRef.current !== item.id) {
+      toast({
+        title: 'Tag masih dimuatkan',
+        description: 'Sila cuba simpan semula selepas tag item selesai dimuatkan.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
     const mediaForSubmit = normalizeMediaEntries(mediaItems).slice(0, MAX_MEDIA_IMAGES);
     const submitCover = mediaForSubmit.find((media) => media.isCover) || mediaForSubmit[0] || null;
+    const normalizedSelectedTagIds = Array.from(new Set(selectedTagIds.filter(Boolean)));
 
     try {
       await onSave({
         ...formData,
         media: mediaForSubmit,
         image_url: submitCover?.url || '',
+        tag_ids: normalizedSelectedTagIds,
       });
       clearCurrentDraft();
       clearDraft();
@@ -1050,6 +1298,304 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
   const summaryReserved = isEditingReservations ? draftTotalReserved : totalReservedQuantity;
   const summaryBuyerCount = isEditingReservations ? draftBuyerCount : buyerCount;
   const summaryAvailable = Math.max(totalQuantity - summaryReserved, 0);
+  const summarySku = (formData.sku || '').trim();
+  const summaryRackLocation = (formData.rackLocation || '').trim() || '-';
+  const listingTitle = (formData.name || '').trim();
+  const parsedSellingPrice = Number.parseFloat(formData.sellingPrice);
+  const hasSellingPrice = Number.isFinite(parsedSellingPrice) && parsedSellingPrice >= 0;
+  const listingPrice = hasSellingPrice ? `RM${parsedSellingPrice.toFixed(2)}` : '';
+  const listingDescription = (formData.description || '').trim();
+  const listingCategory = (formData.category || '').trim();
+  const listingSku = (formData.sku || '').trim();
+  const listingRackLocation = (formData.rackLocation || '').trim();
+  const listingTags = selectedTagPills
+    .map((tag) => normalizeTagName(tag?.name))
+    .filter(Boolean)
+    .join(', ');
+  const listingInfoLines = useMemo(() => {
+    const lines = [];
+    if (listingCategory) lines.push({ label: 'Kategori', value: listingCategory, exportLabel: 'CATEGORY' });
+    if (listingTags) lines.push({ label: 'Tags', value: listingTags, exportLabel: 'TAGS' });
+    if (Number.isFinite(summaryAvailable)) lines.push({ label: 'Stok', value: String(summaryAvailable), exportLabel: 'STOCK' });
+    if (listingRackLocation) lines.push({ label: 'Rak', value: listingRackLocation, exportLabel: 'RACK' });
+    if (listingSku) lines.push({ label: 'SKU', value: listingSku, exportLabel: 'SKU' });
+    return lines;
+  }, [listingCategory, listingTags, summaryAvailable, listingRackLocation, listingSku]);
+  const listingInfoText = useMemo(
+    () => listingInfoLines.map((line) => `${line.exportLabel}:\n${line.value}`).join('\n\n'),
+    [listingInfoLines]
+  );
+  const listingNoteText = useMemo(() => {
+    const blocks = [];
+    if (listingTitle) blocks.push(`TITLE:\n${listingTitle}`);
+    if (listingPrice) blocks.push(`PRICE:\n${listingPrice}`);
+    if (listingDescription) blocks.push(`DESCRIPTION:\n${listingDescription}`);
+    if (listingInfoLines.length > 0) {
+      listingInfoLines.forEach((line) => {
+        blocks.push(`${line.exportLabel}:\n${line.value}`);
+      });
+    }
+    return blocks.join('\n\n');
+  }, [listingTitle, listingPrice, listingDescription, listingInfoLines]);
+  const itemPhotoBaseSlug = useMemo(
+    () => buildSafeFileSlug(summarySku || listingTitle || 'item-photo', 'item-photo'),
+    [summarySku, listingTitle]
+  );
+  const hasMultipleMediaImages = mediaItems.length > 1;
+  const selectedDownloadMediaItems = useMemo(
+    () => mediaItems.filter((media) => selectedDownloadImageIds.includes(media.id)),
+    [mediaItems, selectedDownloadImageIds]
+  );
+
+  useEffect(() => {
+    if (!showDownloadImagesModal) return;
+
+    setDownloadImagesWarning('');
+    if (hasMultipleMediaImages) {
+      setSelectedDownloadImageIds(mediaItems.map((media) => media.id));
+      return;
+    }
+
+    setSelectedDownloadImageIds(mediaItems[0]?.id ? [mediaItems[0].id] : []);
+  }, [showDownloadImagesModal, hasMultipleMediaImages, mediaItems]);
+
+  const copyTextToClipboard = useCallback(async (text) => {
+    const safeText = typeof text === 'string' ? text : '';
+    if (!safeText.trim()) return false;
+
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(safeText);
+        return true;
+      }
+    } catch (error) {
+      console.warn('[AddItemForm] Clipboard API failed, fallback to execCommand:', error);
+    }
+
+    try {
+      const textarea = document.createElement('textarea');
+      textarea.value = safeText;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      textarea.style.pointerEvents = 'none';
+      textarea.style.left = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      textarea.setSelectionRange(0, textarea.value.length);
+      const success = document.execCommand('copy');
+      document.body.removeChild(textarea);
+      return success;
+    } catch (error) {
+      console.error('[AddItemForm] Clipboard fallback failed:', error);
+      return false;
+    }
+  }, []);
+
+  const handleCopyListingSection = useCallback(async (content, successTitle = 'Listing disalin') => {
+    const copied = await copyTextToClipboard(content);
+    if (copied) {
+      toast({ title: successTitle });
+      return;
+    }
+    toast({
+      title: 'Gagal salin listing',
+      description: 'Sila salin manual menggunakan long-press.',
+      variant: 'destructive',
+    });
+  }, [copyTextToClipboard, toast]);
+
+  const handleDownloadListingTxt = useCallback(() => {
+    if (!listingNoteText.trim()) {
+      toast({
+        title: 'Tiada kandungan listing',
+        description: 'Isi sekurang-kurangnya satu maklumat untuk muat turun.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    const safeSlug = buildSafeFileSlug(listingSku || listingTitle || 'listing-note', 'listing-note');
+
+    const blob = new Blob([listingNoteText], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `rarebits-${safeSlug}.txt`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+
+    toast({ title: 'Fail listing dimuat turun' });
+  }, [listingNoteText, listingSku, listingTitle, toast]);
+
+  const triggerImageDownload = useCallback((url, filename) => {
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.rel = 'noopener noreferrer';
+    anchor.style.display = 'none';
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+  }, []);
+
+  const getItemPhotoFilename = useCallback((mediaId) => {
+    const mediaIndex = mediaItems.findIndex((media) => media.id === mediaId);
+    const safeIndex = mediaIndex >= 0 ? mediaIndex + 1 : 1;
+    const paddedIndex = String(safeIndex).padStart(2, '0');
+    return `${itemPhotoBaseSlug}-${paddedIndex}.jpg`;
+  }, [itemPhotoBaseSlug, mediaItems]);
+
+  const delayImageDownload = useCallback((ms) => (
+    new Promise((resolve) => {
+      setTimeout(resolve, ms);
+    })
+  ), []);
+
+  const downloadSingleImageWithFallback = useCallback(async (media, options = {}) => {
+    const suppressSuccessToast = options?.suppressSuccessToast === true;
+    if (!media?.url) return false;
+
+    const fileName = getItemPhotoFilename(media.id);
+
+    try {
+      const normalizedUrl = new URL(media.url, window.location.href);
+      const isSameOrigin = normalizedUrl.origin === window.location.origin;
+
+      if (isSameOrigin) {
+        triggerImageDownload(normalizedUrl.href, fileName);
+      } else {
+        try {
+          const response = await fetch(normalizedUrl.href, { mode: 'cors', credentials: 'omit' });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          const blob = await response.blob();
+          const blobUrl = URL.createObjectURL(blob);
+          triggerImageDownload(blobUrl, fileName);
+          setTimeout(() => {
+            URL.revokeObjectURL(blobUrl);
+          }, 1500);
+        } catch (fetchError) {
+          console.warn('[AddItemForm] download fallback to direct URL:', fetchError);
+          triggerImageDownload(normalizedUrl.href, fileName);
+        }
+      }
+
+      if (!suppressSuccessToast) {
+        toast({ title: 'Gambar dimuat turun' });
+      }
+      return true;
+    } catch (error) {
+      console.error('[AddItemForm] Gagal muat turun gambar:', error);
+      toast({
+        title: 'Gagal muat turun gambar',
+        description: 'Cuba semula atau gunakan butang Open.',
+        variant: 'destructive',
+      });
+      return false;
+    }
+  }, [getItemPhotoFilename, toast, triggerImageDownload]);
+
+  const handleDownloadSingleImage = useCallback(async (media) => {
+    setDownloadImagesWarning('');
+    setIsDownloadingImages(true);
+    const didDownload = await downloadSingleImageWithFallback(media);
+    setIsDownloadingImages(false);
+
+    if (!didDownload) {
+      setDownloadImagesWarning(
+        'Browser mungkin menyekat muat turun. Gunakan butang Open untuk simpan manual jika perlu.'
+      );
+    }
+  }, [downloadSingleImageWithFallback]);
+
+  const handleOpenImageForManualSave = useCallback((media) => {
+    if (!media?.url) return;
+    window.open(media.url, '_blank', 'noopener,noreferrer');
+  }, []);
+
+  const handleToggleDownloadImageSelection = useCallback((mediaId, checked) => {
+    setSelectedDownloadImageIds((prev) => {
+      if (checked) {
+        if (prev.includes(mediaId)) return prev;
+        return [...prev, mediaId];
+      }
+      return prev.filter((id) => id !== mediaId);
+    });
+  }, []);
+
+  const handleSelectAllDownloadImages = useCallback(() => {
+    setSelectedDownloadImageIds(mediaItems.map((media) => media.id));
+  }, [mediaItems]);
+
+  const handleClearDownloadImages = useCallback(() => {
+    setSelectedDownloadImageIds([]);
+  }, []);
+
+  const handleDownloadSelectedImages = useCallback(async () => {
+    const targetMedia = hasMultipleMediaImages
+      ? selectedDownloadMediaItems
+      : (mediaItems[0] ? [mediaItems[0]] : []);
+
+    if (targetMedia.length === 0) {
+      toast({
+        title: 'Tiada gambar dipilih',
+        description: 'Pilih sekurang-kurangnya satu gambar untuk dimuat turun.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    setDownloadImagesWarning('');
+    setIsDownloadingImages(true);
+
+    let failedCount = 0;
+    for (let index = 0; index < targetMedia.length; index += 1) {
+      const didDownload = await downloadSingleImageWithFallback(targetMedia[index], { suppressSuccessToast: true });
+      if (!didDownload) failedCount += 1;
+      if (index < targetMedia.length - 1) {
+        await delayImageDownload(280);
+      }
+    }
+
+    setIsDownloadingImages(false);
+
+    if (failedCount === 0) {
+      toast({
+        title: targetMedia.length > 1 ? `${targetMedia.length} gambar dimuat turun` : 'Gambar dimuat turun',
+      });
+    } else {
+      toast({
+        title: 'Sebahagian gambar gagal dimuat turun',
+        description: `${failedCount} fail tidak berjaya dimuat turun.`,
+        variant: 'destructive',
+      });
+    }
+
+    if (failedCount > 0 || (isIosSafari && targetMedia.length > 1)) {
+      setDownloadImagesWarning(
+        'Browser menyekat muat turun banyak fail. Sila benarkan multiple downloads atau muat turun satu per satu.'
+      );
+    }
+  }, [
+    delayImageDownload,
+    downloadSingleImageWithFallback,
+    hasMultipleMediaImages,
+    isIosSafari,
+    mediaItems,
+    selectedDownloadMediaItems,
+    toast,
+  ]);
+
+  const closeDownloadImagesModal = useCallback(() => {
+    if (isDownloadingImages) return;
+    setShowDownloadImagesModal(false);
+    setDownloadImagesWarning('');
+  }, [isDownloadingImages]);
   const hasSummaryReservations = summaryReserved > 0;
   const nameError = hasSubmitAttempted && !formData.name?.trim();
   const categoryError = hasSubmitAttempted && !formData.category;
@@ -1264,7 +1810,7 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
                         <CardDescription>Lihat status item semasa sebelum teruskan suntingan.</CardDescription>
                       </CardHeader>
                       <CardContent>
-                        <div className="grid grid-cols-2 lg:grid-cols-5 gap-2 sm:gap-3">
+                        <div className="grid grid-cols-2 lg:grid-cols-6 gap-2 sm:gap-3">
                           <div className="rounded-lg border border-violet-200/80 bg-violet-50/70 px-3 py-2 text-violet-900 dark:border-violet-500/30 dark:bg-violet-500/10 dark:text-violet-200">
                             <div className="text-[10px] font-semibold tracking-wide text-violet-700/80 dark:text-violet-200/80">STATUS</div>
                             <div className="text-base font-semibold">{summaryStatusLabel}</div>
@@ -1281,11 +1827,20 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
                             <div className="text-[10px] font-semibold tracking-wide text-emerald-700/80 dark:text-emerald-200/80">AVAILABLE</div>
                             <div className="text-base font-semibold">{summaryAvailable} unit</div>
                           </div>
+                          <div className="rounded-lg border border-indigo-200/80 bg-indigo-50/70 px-3 py-2 text-indigo-900 dark:border-indigo-500/30 dark:bg-indigo-500/10 dark:text-indigo-200">
+                            <div className="text-[10px] font-semibold tracking-wide text-indigo-700/80 dark:text-indigo-200/80">LOKASI</div>
+                            <div className="text-base font-semibold truncate" title={summaryRackLocation}>{summaryRackLocation}</div>
+                          </div>
                           <div className="rounded-lg border border-sky-200/80 bg-sky-50/70 px-3 py-2 text-sky-900 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-200">
                             <div className="text-[10px] font-semibold tracking-wide text-sky-700/80 dark:text-sky-200/80">GAMBAR</div>
                             <div className="text-base font-semibold">{mediaItems.length}/{MAX_MEDIA_IMAGES}</div>
                           </div>
                         </div>
+                        {summarySku ? (
+                          <p className="mt-3 text-xs text-muted-foreground">
+                            SKU: <span className="font-medium text-foreground">{summarySku}</span>
+                          </p>
+                        ) : null}
                       </CardContent>
                     </Card>
                     <Card className="border-border/80 bg-background shadow-sm">
@@ -1335,6 +1890,117 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
                               <option value="reserved">Reserved</option>
                               <option value="terjual" disabled hidden={!isSold}>Terjual (Auto)</option>
                             </Select>
+                          </div>
+                          <div>
+                            <label className="block text-sm font-medium text-foreground/85 mb-2">SKU (Optional)</label>
+                            <Input
+                              value={formData.sku || ''}
+                              onChange={(e) => updateFormField('sku', e.target.value)}
+                              placeholder="Contoh: RB-00045 / GEATS-01"
+                              className="h-10 border-border/80 focus-visible:ring-primary/40"
+                            />
+                            <p className="mt-1 text-xs text-muted-foreground">Kod dalaman untuk cari item dengan cepat.</p>
+                          </div>
+                          <div className="md:col-span-2">
+                            <label className="block text-sm font-medium text-foreground/85 mb-2">Deskripsi (Optional)</label>
+                            <textarea
+                              value={formData.description || ''}
+                              onChange={(e) => updateFormField('description', e.target.value)}
+                              placeholder="Tulis condition, set lengkap, defect, remark, dll."
+                              className="min-h-[96px] w-full rounded-lg border border-border/80 bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                            />
+                            <p className="mt-1 text-xs text-muted-foreground">Digunakan untuk Listing Note dan rujukan.</p>
+                          </div>
+                          <div className="md:col-span-2">
+                            <label className="block text-sm font-medium text-foreground/85 mb-2">Tags</label>
+                            <div className="space-y-2">
+                              <Input
+                                value={tagSearch}
+                                onChange={(event) => setTagSearch(event.target.value)}
+                                placeholder="Cari tag atau cipta tag baru"
+                                className="h-10 border-border/80 focus-visible:ring-primary/40"
+                              />
+
+                              {selectedTagPills.length > 0 ? (
+                                <div className="flex flex-wrap gap-2">
+                                  {selectedTagPills.map((tag) => (
+                                    <button
+                                      key={tag.id}
+                                      type="button"
+                                      onClick={() => toggleTagSelection(tag.id, false)}
+                                      className="inline-flex items-center gap-1 rounded-full border border-primary/25 bg-primary/5 px-2.5 py-1 text-xs font-medium text-foreground transition hover:bg-primary/10"
+                                    >
+                                      <span
+                                        className="h-2 w-2 rounded-full"
+                                        style={{ backgroundColor: tag.color || '#94a3b8' }}
+                                      />
+                                      <span>{tag.name}</span>
+                                      <X className="h-3 w-3" />
+                                    </button>
+                                  ))}
+                                </div>
+                              ) : (
+                                <p className="text-xs text-muted-foreground">Belum ada tag dipilih.</p>
+                              )}
+
+                              <div className="max-h-40 overflow-y-auto rounded-lg border border-border/80 bg-muted/10 p-2">
+                                {isTagsLoading ? (
+                                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    Memuatkan tag...
+                                  </div>
+                                ) : filteredTagOptions.length === 0 ? (
+                                  <p className="text-xs text-muted-foreground">Tiada tag ditemui.</p>
+                                ) : (
+                                  <div className="space-y-1">
+                                    {filteredTagOptions.map((tag) => {
+                                      const isSelected = selectedTagIdSet.has(tag.id);
+                                      return (
+                                        <label
+                                          key={tag.id}
+                                          className={`flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm transition ${
+                                            isSelected ? 'bg-primary/10' : 'hover:bg-muted/50'
+                                          }`}
+                                        >
+                                          <Checkbox
+                                            checked={isSelected}
+                                            onCheckedChange={(checked) => toggleTagSelection(tag.id, Boolean(checked))}
+                                          />
+                                          <span
+                                            className="h-2.5 w-2.5 rounded-full"
+                                            style={{ backgroundColor: tag.color || '#94a3b8' }}
+                                          />
+                                          <span>{tag.name}</span>
+                                        </label>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                              </div>
+
+                              {shouldShowCreateTagAction ? (
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={handleCreateTagFromSearch}
+                                  disabled={isCreatingTag}
+                                  className="w-full sm:w-fit"
+                                >
+                                  {isCreatingTag ? (
+                                    <>
+                                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                      Menambah Tag...
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Plus className="mr-2 h-4 w-4" />
+                                      + Tambah "{normalizedTagSearch}"
+                                    </>
+                                  )}
+                                </Button>
+                              ) : null}
+                            </div>
                           </div>
                    <div>
                     <label className="block text-sm font-medium text-foreground/85 mb-2">Tarikh Beli *</label>
@@ -1708,6 +2374,17 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
                               />
                             </div>
                           </div>
+                          <div className="md:col-span-3">
+                            <label className="block text-sm font-medium text-muted-foreground mb-2">Lokasi Simpanan</label>
+                            <Input
+                              type="text"
+                              value={formData.rackLocation || ''}
+                              onChange={(e) => updateFormField('rackLocation', e.target.value)}
+                              placeholder="Contoh: Rack A3 / Kotak 2 / Stor Belakang"
+                              className="h-10 border-border/80 focus-visible:ring-primary/40"
+                            />
+                            <p className="mt-1 text-xs text-muted-foreground">Nyatakan lokasi fizikal barang untuk mudah dicari.</p>
+                          </div>
                           </div>
                         </div>
                         <div>
@@ -1949,6 +2626,25 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
                   <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
                     <Button
                       type="button"
+                      variant="outline"
+                      onClick={() => setShowDownloadImagesModal(true)}
+                      className="w-full sm:w-auto"
+                      disabled={mediaItems.length === 0}
+                    >
+                      <Download className="w-4 h-4 mr-2" />
+                      Download Gambar
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => setShowListingNoteModal(true)}
+                      className="w-full sm:w-auto"
+                    >
+                      <FileText className="w-4 h-4 mr-2" />
+                      Listing Note
+                    </Button>
+                    <Button
+                      type="button"
                       variant="secondary"
                       onClick={handleCancel}
                       className="w-full sm:w-auto"
@@ -1971,6 +2667,335 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
           </Card>
         </motion.div>
       </motion.div>
+      {showListingNoteModal && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[65] flex items-end sm:items-center justify-center p-0 sm:p-4"
+          onClick={() => setShowListingNoteModal(false)}
+        >
+          <motion.div
+            initial={{ y: 24, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: 24, opacity: 0 }}
+            className="w-full sm:max-w-2xl h-[100dvh] sm:h-auto sm:max-h-[90vh]"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <Card className="h-full sm:h-auto sm:max-h-[90vh] overflow-hidden flex flex-col rounded-none sm:rounded-xl">
+              <CardHeader className="space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <CardTitle className="gradient-text">Listing Note</CardTitle>
+                    <CardDescription>Salin teks listing dengan sekali tekan untuk platform jualan.</CardDescription>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setShowListingNoteModal(false)}
+                  >
+                    <X className="h-5 w-5" />
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent className="flex-1 min-h-0 overflow-y-auto space-y-3 pb-24 sm:pb-4">
+                {!listingNoteText.trim() ? (
+                  <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                    Isi sekurang-kurangnya tajuk, harga, atau deskripsi untuk jana Listing Note.
+                  </div>
+                ) : (
+                  <>
+                    {listingTitle ? (
+                      <div className="rounded-lg border bg-background p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <h3 className="text-sm font-semibold text-foreground">Tajuk</h3>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleCopyListingSection(listingTitle, 'Tajuk disalin')}
+                            className="gap-1.5"
+                          >
+                            <Copy className="h-3.5 w-3.5" />
+                            Copy
+                          </Button>
+                        </div>
+                        <p className="mt-2 whitespace-pre-wrap break-words text-sm select-text">{listingTitle}</p>
+                      </div>
+                    ) : null}
+
+                    {listingPrice ? (
+                      <div className="rounded-lg border bg-background p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <h3 className="text-sm font-semibold text-foreground">Harga</h3>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleCopyListingSection(listingPrice, 'Harga disalin')}
+                            className="gap-1.5"
+                          >
+                            <Copy className="h-3.5 w-3.5" />
+                            Copy
+                          </Button>
+                        </div>
+                        <p className="mt-2 whitespace-pre-wrap break-words text-sm select-text">{listingPrice}</p>
+                      </div>
+                    ) : null}
+
+                    {listingDescription ? (
+                      <div className="rounded-lg border bg-background p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <h3 className="text-sm font-semibold text-foreground">Deskripsi</h3>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleCopyListingSection(listingDescription, 'Deskripsi disalin')}
+                            className="gap-1.5"
+                          >
+                            <Copy className="h-3.5 w-3.5" />
+                            Copy
+                          </Button>
+                        </div>
+                        <pre className="mt-2 whitespace-pre-wrap break-words text-sm select-text font-sans">{listingDescription}</pre>
+                      </div>
+                    ) : null}
+
+                    {listingInfoLines.length > 0 ? (
+                      <div className="rounded-lg border bg-background p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <h3 className="text-sm font-semibold text-foreground">Info Tambahan</h3>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleCopyListingSection(listingInfoText, 'Info tambahan disalin')}
+                            className="gap-1.5"
+                          >
+                            <Copy className="h-3.5 w-3.5" />
+                            Copy
+                          </Button>
+                        </div>
+                        <div className="mt-2 space-y-2 text-sm">
+                          {listingInfoLines.map((line) => (
+                            <div key={line.label} className="flex items-start justify-between gap-4">
+                              <span className="text-muted-foreground">{line.label}</span>
+                              <span className="text-right font-medium text-foreground break-words">{line.value}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                  </>
+                )}
+              </CardContent>
+              <div
+                className="sticky bottom-0 z-20 shrink-0 border-t bg-card/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-card/85"
+                style={{ paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 0.75rem)' }}
+              >
+                <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+                  <Button
+                    type="button"
+                    className="w-full sm:w-auto gap-2"
+                    onClick={() => handleCopyListingSection(listingNoteText, 'Listing disalin')}
+                    disabled={!listingNoteText.trim()}
+                  >
+                    <Copy className="h-4 w-4" />
+                    Copy Semua
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full sm:w-auto gap-2"
+                    onClick={handleDownloadListingTxt}
+                    disabled={!listingNoteText.trim()}
+                  >
+                    <Download className="h-4 w-4" />
+                    Download .txt
+                  </Button>
+                </div>
+              </div>
+            </Card>
+          </motion.div>
+        </motion.div>
+      )}
+      {showDownloadImagesModal && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[66] flex items-end sm:items-center justify-center p-0 sm:p-4"
+          onClick={closeDownloadImagesModal}
+        >
+          <motion.div
+            initial={{ y: 24, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: 24, opacity: 0 }}
+            className="w-full sm:max-w-4xl h-[100dvh] sm:h-auto sm:max-h-[90vh]"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <Card className="h-full sm:h-auto sm:max-h-[90vh] overflow-hidden flex flex-col rounded-none sm:rounded-xl">
+              <CardHeader className="space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <CardTitle className="gradient-text">Gambar Item</CardTitle>
+                    <CardDescription>Muat turun gambar item satu per satu atau secara pilihan.</CardDescription>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={closeDownloadImagesModal}
+                    disabled={isDownloadingImages}
+                  >
+                    <X className="h-5 w-5" />
+                  </Button>
+                </div>
+                {isIosSafari ? (
+                  <p className="rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">
+                    Jika download tidak berfungsi, tekan Open dan Save Image.
+                  </p>
+                ) : null}
+              </CardHeader>
+
+              <CardContent className="flex-1 min-h-0 overflow-y-auto space-y-3 pb-24 sm:pb-4">
+                {mediaItems.length === 0 ? (
+                  <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                    Tiada gambar untuk dimuat turun.
+                  </div>
+                ) : (
+                  <>
+                    {hasMultipleMediaImages ? (
+                      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-background p-3">
+                        <div className="text-sm text-muted-foreground">
+                          {selectedDownloadMediaItems.length}/{mediaItems.length} dipilih
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={handleSelectAllDownloadImages}
+                            disabled={isDownloadingImages}
+                          >
+                            Select All
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={handleClearDownloadImages}
+                            disabled={isDownloadingImages}
+                          >
+                            Clear
+                          </Button>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                      {mediaItems.map((media) => {
+                        const isSelected = selectedDownloadImageIds.includes(media.id);
+                        return (
+                          <div key={media.id} className="overflow-hidden rounded-lg border bg-background">
+                            <div className="relative h-32 w-full bg-muted/20">
+                              <img
+                                src={media.url}
+                                alt="Item media"
+                                className="h-full w-full object-cover"
+                                loading="lazy"
+                              />
+                              {hasMultipleMediaImages ? (
+                                <label className="absolute left-2 top-2 inline-flex items-center gap-1 rounded-full bg-black/70 px-2 py-1 text-[11px] font-semibold text-white">
+                                  <input
+                                    type="checkbox"
+                                    checked={isSelected}
+                                    onChange={(event) => handleToggleDownloadImageSelection(media.id, event.target.checked)}
+                                    disabled={isDownloadingImages}
+                                  />
+                                  Pilih
+                                </label>
+                              ) : null}
+                            </div>
+                            <div className={`grid gap-2 p-2 ${hasMultipleMediaImages || isIosSafari ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="gap-1 text-xs"
+                                onClick={() => handleDownloadSingleImage(media)}
+                                disabled={isDownloadingImages}
+                              >
+                                <Download className="h-3.5 w-3.5" />
+                                Download
+                              </Button>
+                              {(hasMultipleMediaImages || isIosSafari) ? (
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  className="gap-1 text-xs"
+                                  onClick={() => handleOpenImageForManualSave(media)}
+                                  disabled={isDownloadingImages}
+                                >
+                                  <ExternalLink className="h-3.5 w-3.5" />
+                                  Open
+                                </Button>
+                              ) : null}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {downloadImagesWarning ? (
+                      <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                        {downloadImagesWarning}
+                      </p>
+                    ) : null}
+                  </>
+                )}
+              </CardContent>
+
+              <div
+                className="sticky bottom-0 z-20 shrink-0 border-t bg-card/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-card/85"
+                style={{ paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 0.75rem)' }}
+              >
+                <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+                  <Button
+                    type="button"
+                    onClick={handleDownloadSelectedImages}
+                    disabled={
+                      isDownloadingImages
+                      || mediaItems.length === 0
+                      || (hasMultipleMediaImages && selectedDownloadMediaItems.length === 0)
+                    }
+                    className="w-full sm:w-auto gap-2"
+                  >
+                    {isDownloadingImages ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Download className="h-4 w-4" />
+                    )}
+                    {hasMultipleMediaImages ? 'Download Dipilih' : 'Download Gambar'}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={closeDownloadImagesModal}
+                    disabled={isDownloadingImages}
+                    className="w-full sm:w-auto"
+                  >
+                    Tutup
+                  </Button>
+                </div>
+              </div>
+            </Card>
+          </motion.div>
+        </motion.div>
+      )}
       {showLibraryModal && (
         <motion.div
           initial={{ opacity: 0 }}

@@ -16,6 +16,15 @@ import {
 } from '@/hooks/useInvoices';
 import { useInvoiceSettings } from '@/hooks/useInvoiceSettings';
 import { formatCurrency } from '@/lib/utils';
+import {
+  COURIER_PAYMENT_MODES,
+  getCourierPaymentModeLabel,
+  getShippingMethodLabel,
+  isDeliveryRequiredForInvoice,
+  resolveCourierPaymentModeForInvoice,
+  resolveShippingMethodForInvoice,
+  SHIPPING_METHODS,
+} from '@/lib/shipping';
 import { supabase } from '@/lib/customSupabaseClient';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -296,6 +305,7 @@ const InvoiceDetailsPage = () => {
     courier: '',
     trackingNo: '',
   });
+  const [showOptionalDeliveryCard, setShowOptionalDeliveryCard] = useState(false);
   const [deliveryForm, setDeliveryForm] = useState({
     courier: '',
     trackingNo: '',
@@ -336,6 +346,10 @@ const InvoiceDetailsPage = () => {
       trackingNo: shipment?.tracking_no || '',
     });
   }, [shipment?.courier, shipment?.tracking_no]);
+
+  useEffect(() => {
+    setShowOptionalDeliveryCard(false);
+  }, [invoiceId]);
 
   useEffect(() => {
     if (shipment?.shipping_cost && Number(shipment.shipping_cost) > 0) {
@@ -462,20 +476,28 @@ const InvoiceDetailsPage = () => {
   };
 
   const persistShippingCharged = async ({ silentSuccess = false } = {}) => {
+    const currentCourierPaymentMode = resolveCourierPaymentModeForInvoice(invoice);
+    const isPlatformMode = currentCourierPaymentMode === COURIER_PAYMENT_MODES.PLATFORM;
     const validated = validateShippingChargedInput({ commitDisplay: true });
     if (!validated.ok) {
       return false;
     }
 
+    const nextShippingValue = isPlatformMode ? 0 : validated.value;
+    if (isPlatformMode) {
+      setShippingChargedInput('0.00');
+      setShippingChargedError('');
+    }
+
     const currentShipping = Math.max(parseFloat(invoice?.shipping_charged) || 0, 0);
-    if (Math.abs(currentShipping - validated.value) <= 0.0001) {
+    if (Math.abs(currentShipping - nextShippingValue) <= 0.0001) {
       return true;
     }
 
     try {
       await updateInvoiceShippingCharged.mutateAsync({
         invoiceId,
-        shippingCharged: validated.value,
+        shippingCharged: nextShippingValue,
       });
 
       if (!silentSuccess) {
@@ -1747,6 +1769,11 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
 
   const handleSaveTracking = async () => {
     try {
+      if (!deliveryRequired) {
+        toast.error('Penghantaran tidak diperlukan untuk invois ini.');
+        return;
+      }
+
       const deliveryValidation = validateDeliveryInput({ commitNormalized: true });
       if (!deliveryValidation.ok) {
         const message = deliveryValidation.errors.courier || deliveryValidation.errors.trackingNo;
@@ -1768,6 +1795,11 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
 
   const handleUpdateShipmentStatus = async (shipStatus) => {
     try {
+      if (!deliveryRequired) {
+        toast.error('Penghantaran tidak diperlukan untuk invois ini.');
+        return;
+      }
+
       const deliveryValidation = validateDeliveryInput({ commitNormalized: true });
       if (!deliveryValidation.ok) {
         const message = deliveryValidation.errors.courier || deliveryValidation.errors.trackingNo;
@@ -1796,6 +1828,17 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
 
   const handleMarkCourierPaid = async () => {
     try {
+      const currentCourierPaymentMode = resolveCourierPaymentModeForInvoice(invoice);
+      if (currentCourierPaymentMode === COURIER_PAYMENT_MODES.PLATFORM) {
+        toast.error('Mode platform: bayaran courier tidak direkodkan di wallet.');
+        return;
+      }
+
+      if (!deliveryRequired) {
+        toast.error('Penghantaran tidak diperlukan untuk invois ini.');
+        return;
+      }
+
       const shippingCostValidation = validateCourierPaidCostInput({ commitDisplay: true });
       if (!shippingCostValidation.ok) {
         toast.error(shippingCostValidation.message || 'Kos courier tidak sah');
@@ -1947,27 +1990,37 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
     );
   }
 
-  const shippingChargedAmount = Math.max(parseFloat(invoice.shipping_charged) || 0, 0);
-  const shippingMethod = String(invoice.shipping_method || '').trim().toLowerCase();
-  const deliveryNotRequired = shippingChargedAmount === 0
-    && (invoice.shipping_required === false || ['pickup', 'meetup', 'selfpickup'].includes(shippingMethod));
-  const shipmentStatus = deliveryNotRequired ? 'not_required' : (shipment?.ship_status || 'pending');
+  const resolvedCourierPaymentMode = resolveCourierPaymentModeForInvoice(invoice);
+  const courierPaymentModeLabel = getCourierPaymentModeLabel(resolvedCourierPaymentMode);
+  const isPlatformCourierMode = resolvedCourierPaymentMode === COURIER_PAYMENT_MODES.PLATFORM;
+  const shippingChargedAmount = isPlatformCourierMode
+    ? 0
+    : Math.max(parseFloat(invoice.shipping_charged) || 0, 0);
+  const resolvedShippingMethod = resolveShippingMethodForInvoice(invoice);
+  const shippingMethodLabel = getShippingMethodLabel(resolvedShippingMethod);
+  const deliveryRequired = isDeliveryRequiredForInvoice(invoice);
+  const shipmentStatus = deliveryRequired ? (shipment?.ship_status || 'pending') : 'not_required';
   const deliveryActionsDisabled = invoice.status !== 'paid';
   const isSavingDelivery = saveInvoiceShipment.isPending || updateInvoiceShipmentStatus.isPending;
   const isSavingShippingCharged = updateInvoiceShippingCharged.isPending;
-  const hasCourierPaid = Boolean(shipment?.courier_paid);
+  const hasCourierPaid = isPlatformCourierMode ? true : Boolean(shipment?.courier_paid);
   const hasShipmentRecord = Boolean(shipment?.id || invoice?.shipment_id);
-  const canShowCourierPaidAction = !deliveryNotRequired && invoice.status === 'paid' && hasShipmentRecord;
+  const canShowCourierPaidAction = deliveryRequired && invoice.status === 'paid' && hasShipmentRecord && !isPlatformCourierMode;
+  const shouldShowDeliveryCard = deliveryRequired || showOptionalDeliveryCard;
   const courierPayAllowedByStatus = ['pending', 'shipped', 'delivered'].includes(shipmentStatus);
   const canMarkCourierPaid = canShowCourierPaidAction && courierPayAllowedByStatus && !hasCourierPaid;
   const isMarkingCourierPaid = markShipmentCourierPaid.isPending;
-  const shippingCostValue = Math.max(parseFloat(shipment?.shipping_cost) || 0, 0);
-  const isShippingCostRecorded = Boolean(shipment && (shipment.courier_paid || shippingCostValue > 0));
+  const shippingCostValue = isPlatformCourierMode ? 0 : Math.max(parseFloat(shipment?.shipping_cost) || 0, 0);
+  const isShippingCostRecorded = isPlatformCourierMode
+    ? true
+    : Boolean(shipment && (shipment.courier_paid || shippingCostValue > 0));
   const shippingProfitValue = shippingChargedAmount - shippingCostValue;
+  const channelFeeAmount = Math.max(parseFloat(invoice.channel_fee_amount) || 0, 0);
+  const netAfterChannelFee = (parseFloat(invoice.total_amount) || 0) - channelFeeAmount;
   const hasTrackingNumber = normalizeWhitespaceText(shipment?.tracking_no || deliveryForm.trackingNo || '').length > 0;
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="space-y-6 overflow-x-hidden p-4 sm:p-6">
       {/* Header */}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-4">
@@ -1981,6 +2034,17 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
           <div>
             <h1 className="text-3xl font-bold">{invoice.invoice_number}</h1>
             <p className="mt-2 text-gray-600">Lihat dan urus butiran invois</p>
+            <div className="mt-2">
+              <span
+                className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                  resolvedShippingMethod === SHIPPING_METHODS.COURIER
+                    ? 'bg-indigo-100 text-indigo-700'
+                    : 'bg-slate-100 text-slate-700'
+                }`}
+              >
+                {shippingMethodLabel}
+              </span>
+            </div>
           </div>
         </div>
 
@@ -2116,21 +2180,21 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
               <CardTitle>Maklumat Pembeli</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>
                   <p className="text-sm font-medium text-gray-600">Nama</p>
-                  <p className="text-lg font-semibold">{invoice.client?.name}</p>
+                  <p className="break-words text-base font-semibold sm:text-lg">{invoice.client?.name}</p>
                 </div>
                 <div>
                   <p className="text-sm font-medium text-gray-600">Email</p>
-                  <p className="text-lg">{invoice.client?.email || '-'}</p>
+                  <p className="break-all text-base sm:text-lg">{invoice.client?.email || '-'}</p>
                 </div>
               </div>
 
               {invoice.client?.client_phones?.[0] && (
                 <div>
                   <p className="text-sm font-medium text-gray-600">Telefon</p>
-                  <p className="text-lg">
+                  <p className="break-all text-base sm:text-lg">
                     {invoice.client.client_phones.map((p) => p.phone_number).join(', ')}
                   </p>
                 </div>
@@ -2139,7 +2203,7 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
               {invoice.client?.client_addresses?.[0] && (
                 <div>
                   <p className="text-sm font-medium text-gray-600">Alamat</p>
-                  <p className="text-lg">
+                  <p className="break-words text-base leading-relaxed sm:text-lg">
                     {invoice.client.client_addresses
                       .map((a) => a.address)
                       .join(' | ')}
@@ -2240,9 +2304,21 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
               {/* Totals */}
               <div className="space-y-3 border-t border-b py-4">
                 <div className="flex justify-between text-sm">
+                  <span>Platform Jualan:</span>
+                  <span className="font-medium">
+                    {invoice.platform || 'Manual'}
+                  </span>
+                </div>
+                <div className="flex justify-between text-sm">
                   <span>Subtotal:</span>
                   <span className="font-medium">
                     {formatCurrency(invoice.subtotal)}
+                  </span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span>Caj Platform (tolak untung):</span>
+                  <span className="font-medium">
+                    - {formatCurrency(channelFeeAmount)}
                   </span>
                 </div>
                 <div className="flex justify-between text-sm">
@@ -2251,17 +2327,23 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                     {formatCurrency(invoice.tax_amount)}
                   </span>
                 </div>
-                <div className="flex justify-between text-sm">
-                  <span>Caj Pos Dikutip:</span>
-                  <span className="font-medium">
-                    {formatCurrency(invoice.shipping_charged || 0)}
-                  </span>
-                </div>
+                {!isPlatformCourierMode && (
+                  <div className="flex justify-between text-sm">
+                    <span>Caj Pos Dikutip:</span>
+                    <span className="font-medium">
+                      {formatCurrency(invoice.shipping_charged || 0)}
+                    </span>
+                  </div>
+                )}
               </div>
 
               <div className="flex justify-between text-xl font-bold">
                 <span>Jumlah:</span>
                 <span>{formatCurrency(invoice.total_amount)}</span>
+              </div>
+              <div className="flex justify-between text-sm text-muted-foreground">
+                <span>Bersih Selepas Caj Platform:</span>
+                <span className="font-medium">{formatCurrency(netAfterChannelFee)}</span>
               </div>
 
               {/* Action Buttons */}
@@ -2316,6 +2398,30 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
             </CardContent>
           </Card>
 
+          {!shouldShowDeliveryCard && (
+            <Card className="mt-6">
+              <CardHeader>
+                <CardTitle>Delivery</CardTitle>
+                <CardDescription>
+                  Penghantaran tidak diperlukan (Walk-in/Pickup).
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                  Invois ini tidak memerlukan penghantaran.
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowOptionalDeliveryCard(true)}
+                >
+                  Lihat Butiran Delivery
+                </Button>
+              </CardContent>
+            </Card>
+          )}
+
+          {shouldShowDeliveryCard && (
           <Card className="mt-6">
             <CardHeader>
               <CardTitle>Delivery</CardTitle>
@@ -2336,44 +2442,56 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                 </span>
               </div>
 
-              <div className="rounded-lg border p-3">
-                <label className="mb-1 block text-xs font-medium text-gray-600">Caj Pos Dikutip (RM)</label>
-                <Input
-                  type="text"
-                  inputMode="decimal"
-                  placeholder="0.00"
-                  value={shippingChargedInput}
-                  onChange={(event) => {
-                    setShippingChargedInput(event.target.value);
-                    if (shippingChargedError) {
-                      setShippingChargedError('');
-                    }
-                  }}
-                  onBlur={() => {
-                    validateShippingChargedInput({ commitDisplay: true });
-                  }}
-                  disabled={invoice.status === 'paid' || isSavingShippingCharged}
-                  className="h-10"
-                />
-                {shippingChargedError && (
-                  <p className="mt-1 text-xs text-red-600">{shippingChargedError}</p>
-                )}
-                <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-xs text-gray-500">
-                    Kos pos yang dibayar pelanggan. Biar kosong untuk auto 0.
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <p className="text-xs font-medium text-slate-600">Bayaran Penghantaran</p>
+                <p className="mt-1 text-sm font-medium text-slate-900">{courierPaymentModeLabel}</p>
+                {isPlatformCourierMode ? (
+                  <p className="mt-1 text-xs text-blue-700">
+                    Platform urus bayaran courier. Tiada caj pos/rekod expense wallet.
                   </p>
-                  {invoice.status !== 'paid' && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleSaveShippingCharged}
-                      disabled={isSavingShippingCharged}
-                    >
-                      {isSavingShippingCharged ? 'Menyimpan...' : 'Simpan Caj Pos'}
-                    </Button>
-                  )}
-                </div>
+                ) : null}
               </div>
+
+              {!isPlatformCourierMode && (
+                <div className="rounded-lg border p-3">
+                  <label className="mb-1 block text-xs font-medium text-gray-600">Caj Pos Dikutip (RM)</label>
+                  <Input
+                    type="text"
+                    inputMode="decimal"
+                    placeholder="0.00"
+                    value={shippingChargedInput}
+                    onChange={(event) => {
+                      setShippingChargedInput(event.target.value);
+                      if (shippingChargedError) {
+                        setShippingChargedError('');
+                      }
+                    }}
+                    onBlur={() => {
+                      validateShippingChargedInput({ commitDisplay: true });
+                    }}
+                    disabled={invoice.status === 'paid' || isSavingShippingCharged}
+                    className="h-10"
+                  />
+                  {shippingChargedError && (
+                    <p className="mt-1 text-xs text-red-600">{shippingChargedError}</p>
+                  )}
+                  <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs text-gray-500">
+                      Kos pos yang dibayar pelanggan. Biar kosong untuk auto 0.
+                    </p>
+                    {invoice.status !== 'paid' && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleSaveShippingCharged}
+                        disabled={isSavingShippingCharged}
+                      >
+                        {isSavingShippingCharged ? 'Menyimpan...' : 'Simpan Caj Pos'}
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              )}
 
               <div className="grid grid-cols-1 gap-2 rounded-lg border p-3">
                 <div className="flex items-center justify-between text-sm">
@@ -2508,7 +2626,14 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
 
               {hasCourierPaid && (
                 <p className="text-xs text-emerald-700">
-                  Courier telah dibayar. Kos courier dikunci dan tidak boleh diubah.
+                  {isPlatformCourierMode
+                    ? 'Mode platform: bayaran courier diurus platform.'
+                    : 'Courier telah dibayar. Kos courier dikunci dan tidak boleh diubah.'}
+                </p>
+              )}
+              {isPlatformCourierMode && (
+                <p className="text-xs text-blue-700">
+                  Mark Courier Paid dinyahaktifkan kerana platform yang urus bayaran penghantaran.
                 </p>
               )}
               {canShowCourierPaidAction && !hasCourierPaid && !hasTrackingNumber && (
@@ -2529,6 +2654,7 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
               )}
             </CardContent>
           </Card>
+          )}
         </div>
       </div>
 

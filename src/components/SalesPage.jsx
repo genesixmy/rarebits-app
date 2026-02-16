@@ -10,11 +10,27 @@ import { cn } from '@/lib/utils';
 import { useToast } from '@/components/ui/use-toast';
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/customSupabaseClient';
+import { COURIER_PAYMENT_MODES, resolveCourierPaymentModeForInvoice } from '@/lib/shipping';
 
 const getInitialDateRange = () => {
+  const today = new Date();
+  const firstDayOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+
+  const formatDate = (date) => {
+    const d = new Date(date);
+    let month = '' + (d.getMonth() + 1);
+    let day = '' + d.getDate();
+    const year = d.getFullYear();
+
+    if (month.length < 2) month = `0${month}`;
+    if (day.length < 2) day = `0${day}`;
+
+    return [year, month, day].join('-');
+  };
+
   return {
-    startDate: '',
-    endDate: ''
+    startDate: formatDate(firstDayOfMonth),
+    endDate: formatDate(today),
   };
 };
 
@@ -55,7 +71,7 @@ const SalesPage = ({ items }) => {
           is_manual,
           item_name,
           item:items(id, name, category, cost_price),
-          invoice:invoices(id, invoice_date, status, user_id, shipping_charged, shipment_id)
+          invoice:invoices(id, invoice_date, status, user_id, shipping_charged, shipment_id, channel_fee_amount, courier_payment_mode)
         `)
         .order('created_at', { ascending: false });
 
@@ -142,6 +158,8 @@ const SalesPage = ({ items }) => {
         invoice_shipping_charged: Math.max(parseFloat(invItem.invoice?.shipping_charged) || 0, 0),
         invoice_shipping_cost: Math.max(parseFloat(invItem.invoice?.shipment?.shipping_cost) || 0, 0),
         invoice_shipping_cost_recorded: Boolean(invItem.invoice?.shipment?.courier_paid),
+        invoice_channel_fee: Math.max(parseFloat(invItem.invoice?.channel_fee_amount) || 0, 0),
+        invoice_courier_payment_mode: resolveCourierPaymentModeForInvoice(invItem.invoice),
       }));
   }, [invoiceItems]);
 
@@ -160,8 +178,20 @@ const SalesPage = ({ items }) => {
     return filtered.sort((a, b) => new Date(b.date_sold) - new Date(a.date_sold));
   }, [soldItems, dateRange]);
 
+  const revenueByInvoice = useMemo(() => {
+    return filteredSoldItems.reduce((acc, item) => {
+      if (!item.invoice_id) return acc;
+      const revenue = item.actual_sold_amount
+        ? parseFloat(item.actual_sold_amount)
+        : (parseFloat(item.selling_price) || 0) * (item.quantity_sold || item.invoice_quantity || 1);
+      acc.set(item.invoice_id, (acc.get(item.invoice_id) || 0) + (Number.isFinite(revenue) ? revenue : 0));
+      return acc;
+    }, new Map());
+  }, [filteredSoldItems]);
+
   const salesSummary = useMemo(() => {
     const shippingByInvoice = new Map();
+    const channelFeeByInvoice = new Map();
     let revenueItem = 0;
     let itemProfit = 0;
 
@@ -177,11 +207,16 @@ const SalesPage = ({ items }) => {
       itemProfit += totalRevenue - totalCost;
 
       if (item.invoice_id && !shippingByInvoice.has(item.invoice_id)) {
+        const isPlatformMode = item.invoice_courier_payment_mode === COURIER_PAYMENT_MODES.PLATFORM;
         shippingByInvoice.set(item.invoice_id, {
-          charged: Math.max(parseFloat(item.invoice_shipping_charged) || 0, 0),
-          cost: Math.max(parseFloat(item.invoice_shipping_cost) || 0, 0),
-          costRecorded: Boolean(item.invoice_shipping_cost_recorded),
+          charged: isPlatformMode ? 0 : Math.max(parseFloat(item.invoice_shipping_charged) || 0, 0),
+          cost: isPlatformMode ? 0 : Math.max(parseFloat(item.invoice_shipping_cost) || 0, 0),
+          costRecorded: isPlatformMode ? true : Boolean(item.invoice_shipping_cost_recorded),
         });
+      }
+
+      if (item.invoice_id && !channelFeeByInvoice.has(item.invoice_id)) {
+        channelFeeByInvoice.set(item.invoice_id, Math.max(parseFloat(item.invoice_channel_fee) || 0, 0));
       }
     });
 
@@ -194,13 +229,15 @@ const SalesPage = ({ items }) => {
     const shippingPending = Array.from(shippingByInvoice.values()).filter(
       (value) => value.charged > 0 && !value.costRecorded
     ).length;
+    const totalChannelFees = Array.from(channelFeeByInvoice.values()).reduce((sum, fee) => sum + fee, 0);
 
     return {
       revenueItem,
       shippingCollected,
       shippingCost,
       shippingProfit,
-      netProfit: itemProfit + shippingProfit,
+      totalChannelFees,
+      netProfit: itemProfit - totalChannelFees + shippingProfit,
       shippingPending,
       itemProfit,
     };
@@ -353,7 +390,7 @@ const SalesPage = ({ items }) => {
                 <p className="text-xs font-medium text-muted-foreground">Untung Bersih</p>
                 <p className="text-lg font-semibold">RM{salesSummary.netProfit.toFixed(2)}</p>
                 <p className="text-[11px] text-muted-foreground">
-                  Item RM{salesSummary.itemProfit.toFixed(2)} | Pos RM{salesSummary.shippingProfit.toFixed(2)}
+                  Item RM{salesSummary.itemProfit.toFixed(2)} | Fee RM{salesSummary.totalChannelFees.toFixed(2)} | Pos RM{salesSummary.shippingProfit.toFixed(2)}
                 </p>
               </div>
             </div>
@@ -402,12 +439,27 @@ const SalesPage = ({ items }) => {
                       // If actual_sold_amount exists, it's already the total for all units
                       // If not, multiply selling_price by quantity
                       const totalRevenue = item.actual_sold_amount ? parseFloat(item.actual_sold_amount) : (parseFloat(item.selling_price) || 0) * quantitySold;
-                      const profit = totalRevenue - totalCost;
-                      const isLoss = profit < 0;
+                      const invoiceRevenue = item.invoice_id ? (revenueByInvoice.get(item.invoice_id) || 0) : 0;
+                      const invoiceChannelFee = Math.max(parseFloat(item.invoice_channel_fee) || 0, 0);
+                      const channelFeeShare = invoiceRevenue > 0
+                        ? (totalRevenue / invoiceRevenue) * invoiceChannelFee
+                        : 0;
                       const shippingCharged = Math.max(parseFloat(item.invoice_shipping_charged) || 0, 0);
-                      const shippingCost = item.invoice_shipping_cost_recorded
+                      const isPlatformMode = item.invoice_courier_payment_mode === COURIER_PAYMENT_MODES.PLATFORM;
+                      const shippingCostPaid = item.invoice_shipping_cost_recorded
                         ? Math.max(parseFloat(item.invoice_shipping_cost) || 0, 0)
                         : 0;
+                      const effectiveShippingCharged = isPlatformMode ? 0 : shippingCharged;
+                      const effectiveShippingCostPaid = isPlatformMode ? 0 : shippingCostPaid;
+                      const shippingChargedShare = invoiceRevenue > 0
+                        ? (totalRevenue / invoiceRevenue) * effectiveShippingCharged
+                        : 0;
+                      const shippingCostShare = invoiceRevenue > 0
+                        ? (totalRevenue / invoiceRevenue) * effectiveShippingCostPaid
+                        : 0;
+                      const shippingProfitShare = shippingChargedShare - shippingCostShare;
+                      const profit = totalRevenue - totalCost - channelFeeShare + shippingProfitShare;
+                      const isLoss = profit < 0;
                       return (
                         <tr key={item.id} className="border-t relative group overflow-hidden">
                            <td className="p-4 font-semibold text-foreground flex items-center gap-3">
@@ -440,8 +492,8 @@ const SalesPage = ({ items }) => {
                            </td>
                            <td className="p-4 text-right font-semibold text-foreground">RM{totalRevenue.toFixed(2)}</td>
                            <td className="p-4 text-right text-xs text-muted-foreground">
-                             <div>Caj RM{shippingCharged.toFixed(2)}</div>
-                             <div>Kos RM{shippingCost.toFixed(2)}</div>
+                             <div>Caj RM{effectiveShippingCharged.toFixed(2)}</div>
+                             <div>Kos RM{effectiveShippingCostPaid.toFixed(2)}</div>
                            </td>
                         </tr>
                       );

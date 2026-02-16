@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/customSupabaseClient';
@@ -12,10 +12,25 @@ import { formatCurrency } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { Select } from '@/components/ui/select';
 import { Trash2, Plus, X, ChevronLeft, ChevronDown, ChevronUp, Star } from 'lucide-react';
 import { format } from 'date-fns';
 import { ms } from 'date-fns/locale';
 import toast from 'react-hot-toast';
+import {
+  SALES_CHANNEL_FEE_TYPES,
+  calculateSalesChannelFee,
+  formatSalesChannelFeeLabel,
+  normalizeSalesChannelFeeType,
+} from '@/lib/salesChannels';
+import {
+  COURIER_PAYMENT_MODES,
+  isDeliveryRequired,
+  normalizeCourierPaymentMode,
+  resolveCourierPaymentModeForInvoice,
+  resolveShippingMethodForInvoice,
+  SHIPPING_METHODS,
+} from '@/lib/shipping';
 
 const getReservedQuantityFromItem = (item) => {
   const reservations = Array.isArray(item?.inventory_reservations) ? item.inventory_reservations : [];
@@ -65,6 +80,24 @@ const getClientAwareAvailability = (item, clientId) => {
 
   const reservedByOthers = Math.max(reservedTotal - reservedForClient, 0);
   return Math.max(totalQuantity - reservedByOthers, 0);
+};
+
+const parseNonNegativeNumber = (value, fallback = 0) => {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(parsed, 0);
+};
+
+const roundCurrencyAmount = (value) => Math.round(parseNonNegativeNumber(value, 0) * 100) / 100;
+const SHIPPING_CHARGED_CAP = 9999;
+
+const getLineQuantity = (item) => Math.max(parseInt(item?.quantity, 10) || 1, 1);
+
+const getLineUnitPrice = (item) => {
+  if (item?.unit_price === null || item?.unit_price === undefined || item?.unit_price === '') {
+    return parseNonNegativeNumber(item?.selling_price, 0);
+  }
+  return parseNonNegativeNumber(item.unit_price, 0);
 };
 
 const LOW_STOCK_THRESHOLD = 2;
@@ -123,7 +156,11 @@ const InvoiceFormPage = () => {
   const { invoiceId } = useParams();
   const [selectedClientId, setSelectedClientId] = useState('');
   const [notes, setNotes] = useState('');
-  const [platform, setPlatform] = useState('Manual');
+  const [selectedSalesChannelId, setSelectedSalesChannelId] = useState('');
+  const [shippingMethod, setShippingMethod] = useState(SHIPPING_METHODS.WALK_IN);
+  const [courierPaymentMode, setCourierPaymentMode] = useState(COURIER_PAYMENT_MODES.SELLER);
+  const [shippingChargedInput, setShippingChargedInput] = useState('0.00');
+  const [shippingChargedError, setShippingChargedError] = useState('');
   const [selectedItems, setSelectedItems] = useState([]);
   const [manualItems, setManualItems] = useState([]);
   const [showItemSelector, setShowItemSelector] = useState(false);
@@ -136,6 +173,8 @@ const InvoiceFormPage = () => {
   const [initialItemLoaded, setInitialItemLoaded] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [expandedItemIds, setExpandedItemIds] = useState([]);
+  const [quickAddSkippedCount, setQuickAddSkippedCount] = useState(0);
+  const customerFieldFocusRef = useRef(null);
 
   // Get current user
   const { data: authData } = useQuery({
@@ -148,29 +187,17 @@ const InvoiceFormPage = () => {
 
   const userId = authData?.session?.user?.id;
 
-  // Fetch unique platforms from user's items
-  const { data: availablePlatforms = ['Manual'] } = useQuery({
-    queryKey: ['user-platforms', userId],
+  // Fetch configured sales channels for the user.
+  const { data: salesChannels = [] } = useQuery({
+    queryKey: ['sales-channels', userId],
     queryFn: async () => {
       const { data, error } = await supabase
-        .from('items')
-        .select('platforms')
+        .from('sales_channels')
+        .select('id, name, fee_type, fee_value')
         .eq('user_id', userId);
 
       if (error) throw error;
-      
-      // Extract unique platforms from all items
-      const platformSet = new Set(['Manual']); // Always include Manual
-      (data || []).forEach(item => {
-        if (item.platforms && Array.isArray(item.platforms)) {
-          item.platforms.forEach(p => platformSet.add(p));
-        }
-      });
-      
-      // Also add "Lain-lain" as a fallback option
-      platformSet.add('Lain-lain');
-      
-      return Array.from(platformSet).sort();
+      return (data || []).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ms'));
     },
     enabled: !!userId,
   });
@@ -205,29 +232,85 @@ const InvoiceFormPage = () => {
     return map;
   }, [clients]);
 
-  // Fetch the specific item from navigation state (if navigating from inventory)
-  const itemIdFromState = location.state?.itemId;
-  console.log('[InvoiceFormPage] itemIdFromState:', itemIdFromState);
+  // Build quick-add payload from navigation state (bulk + single + legacy fallback).
+  const quickAddPayloadById = useMemo(() => {
+    const map = new Map();
 
-  const { data: itemFromState, isLoading: isLoadingItem, error: itemError } = useQuery({
-    queryKey: ['item-detail', itemIdFromState],
+    const applyPayloadEntry = (entry, fallbackId = null) => {
+      const itemId = entry?.id || fallbackId;
+      if (!itemId) return;
+
+      const parsedAvailableQty = parseInt(entry?.available_qty, 10);
+      const safeAvailableQty = Number.isNaN(parsedAvailableQty)
+        ? null
+        : Math.max(parsedAvailableQty, 0);
+
+      const existing = map.get(itemId);
+      if (existing) {
+        map.set(itemId, {
+          ...existing,
+          quantity_seed: existing.quantity_seed + 1,
+          // Preserve the smaller availability cap if both exist.
+          available_qty:
+            safeAvailableQty === null
+              ? existing.available_qty
+              : existing.available_qty === null
+                ? safeAvailableQty
+                : Math.min(existing.available_qty, safeAvailableQty),
+        });
+        return;
+      }
+
+      map.set(itemId, {
+        id: itemId,
+        name: entry?.name || '',
+        selling_price: entry?.selling_price ?? null,
+        available_qty: safeAvailableQty,
+        quantity_seed: 1,
+      });
+    };
+
+    const bulkItems = Array.isArray(location.state?.quickAddItems)
+      ? location.state.quickAddItems
+      : [];
+    bulkItems.forEach((entry) => applyPayloadEntry(entry));
+
+    if (location.state?.quickAddItem) {
+      applyPayloadEntry(location.state.quickAddItem);
+    }
+
+    if (location.state?.itemId) {
+      applyPayloadEntry(null, location.state.itemId);
+    }
+
+    return map;
+  }, [location.state]);
+
+  const quickAddItemIds = useMemo(
+    () => Array.from(quickAddPayloadById.keys()),
+    [quickAddPayloadById]
+  );
+
+  const { data: stateItems = [], isLoading: isLoadingStateItems } = useQuery({
+    queryKey: ['invoice-quick-add-items', userId, quickAddItemIds],
     queryFn: async () => {
-      console.log('[InvoiceFormPage] Fetching item:', itemIdFromState);
+      if (!userId || quickAddItemIds.length === 0) return [];
+
       const { data, error } = await supabase
         .from('items')
         .select('*, client:clients(id, name), inventory_reservations(id, quantity_reserved, customer_id, customer_name, created_at)')
-        .eq('id', itemIdFromState)
-        .single();
+        .eq('user_id', userId)
+        .in('id', quickAddItemIds);
 
       if (error) {
-        console.error('[InvoiceFormPage] Error fetching item:', error);
+        console.error('[InvoiceFormPage] Error fetching quick-add items:', error);
         throw error;
       }
 
-      console.log('[InvoiceFormPage] Item fetched successfully:', data);
-      return data;
+      const itemById = new Map((data || []).map((item) => [item.id, item]));
+      return quickAddItemIds.map((id) => itemById.get(id)).filter(Boolean);
     },
-    enabled: !!itemIdFromState,
+    enabled: !!userId && quickAddItemIds.length > 0,
   });
 
   // Fetch available items (exclude sold)
@@ -259,11 +342,18 @@ const InvoiceFormPage = () => {
     if (existingInvoice) {
       setSelectedClientId(existingInvoice.client_id);
       setNotes(existingInvoice.notes || '');
+      setSelectedSalesChannelId(existingInvoice.sales_channel_id || '');
+      setShippingMethod(resolveShippingMethodForInvoice(existingInvoice));
+      setCourierPaymentMode(resolveCourierPaymentModeForInvoice(existingInvoice));
+      setShippingChargedInput(roundCurrencyAmount(existingInvoice.shipping_charged || 0).toFixed(2));
+      setShippingChargedError('');
       setSelectedItems(
         existingInvoice.invoice_items?.map((ii) => ({
           ...ii.item,
           invoice_item_id: ii.id,
           unit_price: ii.unit_price,
+          selling_price: ii.unit_price,
+          cost_price: ii.cost_price ?? 0,
           quantity: ii.quantity,
           line_total: ii.line_total,
         })) || []
@@ -271,56 +361,107 @@ const InvoiceFormPage = () => {
     }
   }, [existingInvoice]);
 
-  // Initialize form with item from navigation state (from inventory)
+  // Initialize form with quick-add items from inventory (single or bulk).
   useEffect(() => {
-    console.log('[InvoiceFormPage] Effect running - itemFromState:', itemFromState, 'initialItemLoaded:', initialItemLoaded, 'invoiceId:', invoiceId);
+    if (invoiceId || initialItemLoaded || quickAddItemIds.length === 0 || isLoadingStateItems) return;
 
-    if (itemFromState && !initialItemLoaded && !invoiceId) {
-      const availabilityClientId = itemFromState.client_id || selectedClientId || null;
-      const availableQuantity = getClientAwareAvailability(itemFromState, availabilityClientId);
+    const stateItemById = new Map(stateItems.map((item) => [item.id, item]));
+    let skippedCount = 0;
+    let addedCount = 0;
+    let defaultClientId = null;
 
-      if (availableQuantity <= 0) {
-        toast.error(`Stok tidak mencukupi untuk ${itemFromState.name}. Available: ${availableQuantity}`);
-        setInitialItemLoaded(true);
-        return;
-      }
+    setSelectedItems((prevItems) => {
+      const nextItems = [...prevItems];
 
-      console.log('[InvoiceFormPage] Setting up item, itemFromState data:', {
-        id: itemFromState.id,
-        name: itemFromState.name,
-        status: itemFromState.status,
-        client_id: itemFromState.client_id,
-        selling_price: itemFromState.selling_price,
-        cost_price: itemFromState.cost_price
-      });
+      quickAddItemIds.forEach((itemId) => {
+        const payload = quickAddPayloadById.get(itemId);
+        const requestedQuantity = Math.max(parseInt(payload?.quantity_seed, 10) || 1, 1);
+        const liveItem = stateItemById.get(itemId);
 
-      // Pre-populate the sold item with available quantity
-      setSelectedItems([
-        {
-          ...itemFromState,
-          quantity: 1,
-          unit_price: itemFromState.selling_price,
-          maxQuantity: Math.max(availableQuantity, 1),
+        if (!liveItem) {
+          skippedCount += requestedQuantity;
+          return;
+        }
+
+        const availabilityClientId = liveItem.client_id || selectedClientId || null;
+        const liveAvailableQuantity = getClientAwareAvailability(liveItem, availabilityClientId);
+        const stateAvailableQuantity = Number.isFinite(parseInt(payload?.available_qty, 10))
+          ? Math.max(parseInt(payload?.available_qty, 10), 0)
+          : null;
+
+        const availableQuantity = stateAvailableQuantity === null
+          ? liveAvailableQuantity
+          : Math.min(liveAvailableQuantity, stateAvailableQuantity);
+
+        if (availableQuantity <= 0) {
+          skippedCount += requestedQuantity;
+          return;
+        }
+
+        const maxQuantity = Math.max(availableQuantity, 1);
+        const existingIndex = nextItems.findIndex((item) => item.id === itemId && !item.is_manual);
+
+        if (existingIndex >= 0) {
+          const currentQuantity = Math.max(parseInt(nextItems[existingIndex].quantity, 10) || 1, 1);
+          const mergedQuantity = Math.min(currentQuantity + requestedQuantity, maxQuantity);
+          nextItems[existingIndex] = {
+            ...nextItems[existingIndex],
+            maxQuantity,
+            availableQuantity,
+            quantity: mergedQuantity,
+            unit_price: nextItems[existingIndex].unit_price ?? liveItem.selling_price,
+            isQuickAdded: true,
+          };
+          addedCount += Math.max(mergedQuantity - currentQuantity, 0);
+          return;
+        }
+
+        const newQuantity = Math.min(requestedQuantity, maxQuantity);
+        nextItems.push({
+          ...liveItem,
+          quantity: newQuantity,
+          unit_price: liveItem.selling_price,
+          maxQuantity,
           availableQuantity,
-        },
-      ]);
+          isQuickAdded: true,
+        });
+        addedCount += newQuantity;
 
-      // Auto-select the client if the item has one
-      if (itemFromState.client_id) {
-        console.log('[InvoiceFormPage] Setting client:', itemFromState.client_id);
-        setSelectedClientId(itemFromState.client_id);
-      }
-
-      setInitialItemLoaded(true);
-      console.log('[InvoiceFormPage] Item from inventory loaded:', itemFromState.name);
-    } else {
-      console.log('[InvoiceFormPage] Conditions not met:', {
-        hasItemFromState: !!itemFromState,
-        initialItemLoaded,
-        hasInvoiceId: !!invoiceId
+        if (!defaultClientId && liveItem.client_id) {
+          defaultClientId = liveItem.client_id;
+        }
       });
+
+      return nextItems;
+    });
+
+    if (!selectedClientId && defaultClientId) {
+      setSelectedClientId(defaultClientId);
     }
-  }, [itemFromState, initialItemLoaded, invoiceId, selectedClientId]);
+
+    setQuickAddSkippedCount(skippedCount);
+    setInitialItemLoaded(true);
+
+    if (addedCount > 0) {
+      toast.success(`${addedCount} item ditambah dari Inventory`);
+    }
+
+    if (skippedCount > 0) {
+      toast.error(`${skippedCount} item tidak dapat ditambah (stok habis atau item tidak ditemui).`);
+    }
+
+    window.requestAnimationFrame(() => {
+      customerFieldFocusRef.current?.focus();
+    });
+  }, [
+    invoiceId,
+    initialItemLoaded,
+    isLoadingStateItems,
+    quickAddItemIds,
+    quickAddPayloadById,
+    selectedClientId,
+    stateItems,
+  ]);
 
   const selectedInventoryIds = selectedItems
     .filter((item) => item?.id && !item.is_manual)
@@ -464,15 +605,37 @@ const InvoiceFormPage = () => {
   }, [baseSortedAvailableItems]);
 
   // Calculate totals
-  const subtotal = selectedItems.reduce(
-    (sum, item) => sum + ((item.unit_price || item.selling_price) * (item.quantity || 1)),
-    0
-  ) + manualItems.reduce(
-    (sum, item) => sum + ((item.unit_price || item.selling_price) * (item.quantity || 1)),
-    0
-  );
+  const subtotal = selectedItems.reduce((sum, item) => (
+    sum + (getLineUnitPrice(item) * getLineQuantity(item))
+  ), 0) + manualItems.reduce((sum, item) => (
+    sum + (getLineUnitPrice(item) * getLineQuantity(item))
+  ), 0);
+
+  const totalCostPreview = selectedItems.reduce((sum, item) => (
+    sum + (parseNonNegativeNumber(item?.cost_price, 0) * getLineQuantity(item))
+  ), 0) + manualItems.reduce((sum, item) => (
+    sum + (parseNonNegativeNumber(item?.cost_price, 0) * getLineQuantity(item))
+  ), 0);
+
+  const normalizedCourierPaymentMode = normalizeCourierPaymentMode(courierPaymentMode);
+  const shippingCharged = normalizedCourierPaymentMode === COURIER_PAYMENT_MODES.PLATFORM
+    ? 0
+    : roundCurrencyAmount(shippingChargedInput);
+  const deliveryRequired = isDeliveryRequired({
+    shippingMethod,
+    shippingCharged,
+  });
   const tax = 0;
-  const total = subtotal + tax;
+  const total = subtotal + tax + shippingCharged;
+
+  const selectedSalesChannel = useMemo(
+    () => salesChannels.find((channel) => channel.id === selectedSalesChannelId) || null,
+    [salesChannels, selectedSalesChannelId]
+  );
+  const channelFeePreview = calculateSalesChannelFee(subtotal, selectedSalesChannel);
+  const channelFeeLabel = formatSalesChannelFeeLabel(selectedSalesChannel);
+  const grossProfitPreview = subtotal - totalCostPreview;
+  const netProfitPreview = grossProfitPreview - channelFeePreview;
 
   const handleAddItem = (item, quantityOverride = 1, options = { closeSelector: true }) => {
     // Start with quantity 1, max is item's available quantity
@@ -493,7 +656,7 @@ const InvoiceFormPage = () => {
     const newItem = {
       ...item,
       quantity: initialQuantity,
-      unit_price: item.selling_price,
+      unit_price: parseNonNegativeNumber(item.selling_price, 0),
       maxQuantity,
       availableQuantity,
     };
@@ -523,7 +686,7 @@ const InvoiceFormPage = () => {
       return {
         ...item,
         quantity: initialQuantity,
-        unit_price: item.selling_price,
+        unit_price: parseNonNegativeNumber(item.selling_price, 0),
         maxQuantity,
         availableQuantity,
       };
@@ -594,6 +757,102 @@ const InvoiceFormPage = () => {
         return item;
       })
     );
+  };
+
+  const handleUpdateUnitPrice = (itemId, nextPriceValue) => {
+    setSelectedItems((prevItems) => prevItems.map((item) => {
+      if (item.id !== itemId) return item;
+      return {
+        ...item,
+        unit_price: parseNonNegativeNumber(nextPriceValue, 0),
+      };
+    }));
+  };
+
+  const normalizeShippingChargedInput = (value) => {
+    const raw = value === null || value === undefined ? '' : String(value);
+    const cleaned = raw.replace(/,/g, '').replace(/\s+/g, '');
+
+    if (!cleaned) {
+      return { ok: true, value: 0, display: '0.00' };
+    }
+
+    const parsed = Number.parseFloat(cleaned);
+    if (!Number.isFinite(parsed)) {
+      return { ok: false, message: 'Caj pos tidak sah.' };
+    }
+
+    if (parsed < 0) {
+      return { ok: false, message: 'Caj pos mesti 0 atau lebih.' };
+    }
+
+    if (parsed > SHIPPING_CHARGED_CAP) {
+      return { ok: false, message: 'Nombor terlalu besar - semak semula.' };
+    }
+
+    const rounded = roundCurrencyAmount(parsed);
+    return { ok: true, value: rounded, display: rounded.toFixed(2) };
+  };
+
+  const handleShippingMethodChange = (nextMethod) => {
+    if (nextMethod === shippingMethod) return;
+
+    if (nextMethod === SHIPPING_METHODS.WALK_IN && shippingCharged > 0) {
+      const confirmed = window.confirm(
+        'Caj pos akan diset kepada 0 dan info penghantaran akan disembunyikan. Teruskan?'
+      );
+      if (!confirmed) return;
+      setShippingChargedInput('0.00');
+      setShippingChargedError('');
+    }
+
+    setShippingMethod(nextMethod);
+    if (nextMethod !== SHIPPING_METHODS.COURIER) {
+      setCourierPaymentMode(COURIER_PAYMENT_MODES.SELLER);
+    }
+  };
+
+  const handleCourierPaymentModeChange = (nextModeRaw) => {
+    const nextMode = normalizeCourierPaymentMode(nextModeRaw);
+    if (nextMode === normalizedCourierPaymentMode) return;
+
+    if (nextMode === COURIER_PAYMENT_MODES.PLATFORM && shippingCharged > 0) {
+      const confirmed = window.confirm(
+        'Caj pos akan diset kepada RM0 kerana platform uruskan penghantaran. Teruskan?'
+      );
+      if (!confirmed) return;
+    }
+
+    setCourierPaymentMode(nextMode);
+    setShippingChargedError('');
+
+    if (nextMode === COURIER_PAYMENT_MODES.PLATFORM) {
+      setShippingChargedInput('0.00');
+    }
+  };
+
+  const handleShippingChargedBlur = () => {
+    if (normalizedCourierPaymentMode === COURIER_PAYMENT_MODES.PLATFORM) {
+      setShippingChargedInput('0.00');
+      setShippingChargedError('');
+      return true;
+    }
+
+    const normalized = normalizeShippingChargedInput(shippingChargedInput);
+    if (!normalized.ok) {
+      setShippingChargedError(normalized.message);
+      return false;
+    }
+
+    setShippingChargedError('');
+    setShippingChargedInput(normalized.display);
+
+    if (normalized.value > 0 && shippingMethod !== SHIPPING_METHODS.COURIER) {
+      setShippingMethod(SHIPPING_METHODS.COURIER);
+      toast('Caj pos > 0, kaedah serahan ditukar ke Courier.');
+    }
+
+    return true;
   };
 
   const handleAddManualItem = () => {
@@ -722,12 +981,65 @@ const InvoiceFormPage = () => {
       return;
     }
 
+    const selectedMode = normalizeCourierPaymentMode(courierPaymentMode);
+    const normalizedShipping = selectedMode === COURIER_PAYMENT_MODES.PLATFORM
+      ? { ok: true, value: 0, display: '0.00' }
+      : normalizeShippingChargedInput(shippingChargedInput);
+    if (!normalizedShipping.ok) {
+      setShippingChargedError(normalizedShipping.message);
+      toast.error(normalizedShipping.message);
+      return;
+    }
+
+    setShippingChargedError('');
+    setShippingChargedInput(normalizedShipping.display);
+
+    const resolvedShippingMethod = normalizedShipping.value > 0
+      ? SHIPPING_METHODS.COURIER
+      : shippingMethod;
+    const resolvedCourierPaymentMode = resolvedShippingMethod === SHIPPING_METHODS.COURIER
+      ? selectedMode
+      : COURIER_PAYMENT_MODES.SELLER;
+    const resolvedShippingRequired = isDeliveryRequired({
+      shippingMethod: resolvedShippingMethod,
+      shippingCharged: normalizedShipping.value,
+    });
+    if (resolvedShippingMethod !== shippingMethod) {
+      setShippingMethod(resolvedShippingMethod);
+    }
+    if (resolvedCourierPaymentMode !== normalizedCourierPaymentMode) {
+      setCourierPaymentMode(resolvedCourierPaymentMode);
+    }
+
     setIsSaving(true);
 
     try {
       if (invoiceId) {
-        // Update existing invoice - for now just save notes
-        // In a real app, you'd have a full update mutation
+        if (!userId) {
+          throw new Error('User tidak sah');
+        }
+
+        const { error: updateInvoiceError } = await supabase
+          .from('invoices')
+          .update({
+            client_id: selectedClientId || null,
+            notes,
+            platform: selectedSalesChannel?.name || 'Manual',
+            sales_channel_id: selectedSalesChannel?.id || null,
+            channel_fee_amount: channelFeePreview,
+            shipping_method: resolvedShippingMethod,
+            courier_payment_mode: resolvedCourierPaymentMode,
+            shipping_required: resolvedShippingRequired,
+            shipping_charged: normalizedShipping.value,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', invoiceId)
+          .eq('user_id', userId);
+
+        if (updateInvoiceError) {
+          throw updateInvoiceError;
+        }
+
         toast.success('Invois dikemaskini');
         navigate(`/invoices/${invoiceId}`);
       } else {
@@ -737,7 +1049,13 @@ const InvoiceFormPage = () => {
           selectedItems,
           notes,
           manualItems,
-          platform,
+          platform: selectedSalesChannel?.name || 'Manual',
+          salesChannelId: selectedSalesChannel?.id || null,
+          channelFeeAmount: channelFeePreview,
+          shippingMethod: resolvedShippingMethod,
+          courierPaymentMode: resolvedCourierPaymentMode,
+          shippingCharged: normalizedShipping.value,
+          shippingRequired: resolvedShippingRequired,
         });
         toast.success('Invois berjaya dibuat');
         // Navigate to the newly created invoice details page
@@ -755,7 +1073,7 @@ const InvoiceFormPage = () => {
   };
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="space-y-6 overflow-x-hidden p-4 sm:p-6">
       {/* Header */}
       <div className="flex flex-col gap-4 md:gap-0 md:flex-row md:items-start md:justify-between">
         <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
@@ -790,11 +1108,11 @@ const InvoiceFormPage = () => {
               <div>
                 <label className="block text-sm font-medium mb-2">Pilih Pembeli (Opsyon)</label>
                 {clients.length === 0 ? (
-                  <div className="text-center py-4 text-gray-500">
+                  <div className="text-center py-4 text-gray-500" ref={customerFieldFocusRef} tabIndex={-1}>
                     Tiada pembeli tersedia
                   </div>
                 ) : (
-                  <div className="max-h-60 space-y-2 overflow-y-auto border rounded-lg p-3">
+                  <div className="max-h-60 space-y-2 overflow-y-auto border rounded-lg p-3" ref={customerFieldFocusRef} tabIndex={-1}>
                     {clients.map((client) => (
                       <button
                         key={client.id}
@@ -805,8 +1123,8 @@ const InvoiceFormPage = () => {
                             : 'border-gray-200 hover:border-gray-300'
                         }`}
                       >
-                        <p className="font-medium">{client.name}</p>
-                        <p className="text-sm text-gray-600">{client.email || '-'}</p>
+                        <p className="font-medium break-words">{client.name}</p>
+                        <p className="text-sm text-gray-600 break-all">{client.email || '-'}</p>
                       </button>
                     ))}
                   </div>
@@ -825,6 +1143,100 @@ const InvoiceFormPage = () => {
             </CardContent>
           </Card>
 
+          {/* Shipping Method */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Kaedah Serahan</CardTitle>
+              <CardDescription>
+                Tetapkan sama ada invois ini perlukan penghantaran.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <Button
+                  type="button"
+                  variant={shippingMethod === SHIPPING_METHODS.WALK_IN ? 'default' : 'outline'}
+                  onClick={() => handleShippingMethodChange(SHIPPING_METHODS.WALK_IN)}
+                  className="h-10"
+                >
+                  Walk-in / Pickup
+                </Button>
+                <Button
+                  type="button"
+                  variant={shippingMethod === SHIPPING_METHODS.COURIER ? 'default' : 'outline'}
+                  onClick={() => handleShippingMethodChange(SHIPPING_METHODS.COURIER)}
+                  className="h-10"
+                >
+                  Courier / Penghantaran
+                </Button>
+              </div>
+
+              {!deliveryRequired && (
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                  Tiada penghantaran diperlukan.
+                </div>
+              )}
+
+              {deliveryRequired && (
+                <div className="space-y-2 rounded-lg border border-slate-200 p-3">
+                  <label className="block text-sm font-medium">Bayaran Penghantaran</label>
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    <Button
+                      type="button"
+                      variant={normalizedCourierPaymentMode === COURIER_PAYMENT_MODES.SELLER ? 'default' : 'outline'}
+                      onClick={() => handleCourierPaymentModeChange(COURIER_PAYMENT_MODES.SELLER)}
+                      className="h-10"
+                    >
+                      Seller kutip & bayar courier
+                    </Button>
+                    <Button
+                      type="button"
+                      variant={normalizedCourierPaymentMode === COURIER_PAYMENT_MODES.PLATFORM ? 'default' : 'outline'}
+                      onClick={() => handleCourierPaymentModeChange(COURIER_PAYMENT_MODES.PLATFORM)}
+                      className="h-10"
+                    >
+                      Platform uruskan
+                    </Button>
+                  </div>
+
+                  {normalizedCourierPaymentMode === COURIER_PAYMENT_MODES.PLATFORM ? (
+                    <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+                      Pembeli bayar penghantaran kepada platform. Tidak direkod sebagai jualan/duit masuk.
+                    </div>
+                  ) : (
+                    <>
+                      <label className="block text-sm font-medium">Caj Pos Dikutip (RM)</label>
+                      <Input
+                        type="text"
+                        inputMode="decimal"
+                        placeholder="0.00"
+                        value={shippingChargedInput}
+                        onChange={(event) => {
+                          setShippingChargedInput(event.target.value);
+                          if (shippingChargedError) setShippingChargedError('');
+                        }}
+                        onBlur={handleShippingChargedBlur}
+                        className="h-10"
+                      />
+                      {shippingChargedError && (
+                        <p className="text-xs text-red-600">{shippingChargedError}</p>
+                      )}
+                    </>
+                  )}
+
+                  <p className="text-xs text-muted-foreground">
+                    {normalizedCourierPaymentMode === COURIER_PAYMENT_MODES.PLATFORM
+                      ? 'Penghantaran tetap perlu diurus (tracking/status), tetapi aliran tunai pos dikecualikan.'
+                      : 'Masukkan caj pos yang dibayar pembeli (jika ada).'}
+                  </p>
+                  <div className="rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                    Butiran Delivery (courier/tracking/status) boleh diurus selepas invois disimpan di halaman butiran invois.
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
           {/* Items Selection */}
           <Card>
             <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -833,6 +1245,19 @@ const InvoiceFormPage = () => {
                 <CardDescription>
                   {selectedItems.length + manualItems.length} item ({selectedItems.length} invois + {manualItems.length} manual)
                 </CardDescription>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Harga boleh diubah untuk jualan ini sahaja.
+                </p>
+                {selectedItems.some((item) => item.isQuickAdded) && (
+                  <p className="mt-2 inline-flex items-center rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-medium text-emerald-800">
+                    Item ditambah dari Inventory
+                  </p>
+                )}
+                {quickAddSkippedCount > 0 && (
+                  <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900">
+                    {quickAddSkippedCount} item tidak dimasukkan kerana stok habis atau item sudah tiada.
+                  </p>
+                )}
               </div>
               <div className="flex gap-3 flex-col sm:flex-row w-full sm:w-auto">
                 <Button
@@ -887,6 +1312,9 @@ const InvoiceFormPage = () => {
                     const otherSummaryText = topOtherReservations
                       .map((entry) => `${entry.name} (${entry.quantity})`)
                       .join(', ');
+                    const lineUnitPrice = getLineUnitPrice(item);
+                    const lineQuantity = getLineQuantity(item);
+                    const lineTotal = lineUnitPrice * lineQuantity;
                     console.log(`[InvoiceFormPage] Rendering item ${item.id} (${item.name}):`, {
                       quantity: item.quantity,
                       maxQuantity: item.maxQuantity,
@@ -898,12 +1326,12 @@ const InvoiceFormPage = () => {
                         key={item.id}
                         className="rounded-lg border p-3"
                       >
-                        <div className="flex items-center justify-between">
-                          <div className="flex-1">
-                            <p className="font-medium">{item.name}</p>
-                            <p className="text-sm text-gray-600">{item.category}</p>
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                          <div className="min-w-0 flex-1">
+                            <p className="font-medium break-words">{item.name}</p>
+                            <p className="text-sm text-gray-600 break-words">{item.category}</p>
                           </div>
-                          <div className="flex items-center gap-4">
+                          <div className="flex flex-wrap items-center justify-between gap-3 sm:flex-nowrap sm:justify-end">
                             <div className="flex items-center gap-2">
                               <div className="flex items-center gap-1">
                                 <Input
@@ -912,25 +1340,31 @@ const InvoiceFormPage = () => {
                                   max={effectiveMax}
                                   value={item.quantity || 1}
                                   onChange={(e) => handleUpdateQuantity(item.id, e.target.value)}
-                                  className="w-16"
+                                  className="w-14 sm:w-16"
                                   title={`Maximum: ${displayAvailable}`}
                                   disabled={displayAvailable <= 1}
                                 />
-                                <span className="text-xs text-gray-500">
+                                <span className="whitespace-nowrap text-xs text-gray-500">
                                   / {displayAvailable}
                                 </span>
                               </div>
                               <span className="text-sm">×</span>
-                              <span className="w-20 text-right">
-                                {formatCurrency(item.selling_price)}
-                              </span>
+                              <Input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                value={lineUnitPrice}
+                                onChange={(e) => handleUpdateUnitPrice(item.id, e.target.value)}
+                                className="w-24 sm:w-28 text-right"
+                                inputMode="decimal"
+                              />
                             </div>
-                            <div className="w-24 text-right font-semibold">
-                              {formatCurrency(item.selling_price * (item.quantity || 1))}
+                            <div className="min-w-[80px] whitespace-nowrap text-right font-semibold sm:w-24">
+                              {formatCurrency(lineTotal)}
                             </div>
                             <button
                               onClick={() => handleRemoveItem(item.id)}
-                              className="ml-2 text-red-600 hover:text-red-800"
+                              className="text-red-600 hover:text-red-800 sm:ml-2"
                             >
                               <Trash2 className="h-4 w-4" />
                             </button>
@@ -962,35 +1396,35 @@ const InvoiceFormPage = () => {
                   {manualItems.map((item) => (
                     <div
                       key={item.id}
-                      className="flex items-center justify-between rounded-lg border p-3 bg-blue-50"
+                      className="flex flex-col gap-3 rounded-lg border bg-blue-50 p-3 sm:flex-row sm:items-center sm:justify-between"
                     >
-                      <div className="flex-1">
-                        <p className="font-medium">{item.name}</p>
+                      <div className="min-w-0 flex-1">
+                        <p className="font-medium break-words">{item.name}</p>
                         <p className="text-sm text-gray-600">Manual Item</p>
                         <p className="text-xs text-gray-500">
                           Kos: {formatCurrency(item.cost_price || 0)} / unit
                         </p>
                       </div>
-                      <div className="flex items-center gap-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3 sm:flex-nowrap sm:justify-end">
                         <div className="flex items-center gap-2">
                           <Input
                             type="number"
                             min="1"
                             value={item.quantity || 1}
                             onChange={(e) => handleUpdateManualItemQuantity(item.id, e.target.value)}
-                            className="w-16"
+                            className="w-14 sm:w-16"
                           />
                           <span className="text-sm">×</span>
-                          <span className="w-20 text-right">
+                          <span className="min-w-[70px] whitespace-nowrap text-right sm:w-20">
                             {formatCurrency(item.selling_price)}
                           </span>
                         </div>
-                        <div className="w-24 text-right font-semibold">
+                        <div className="min-w-[80px] whitespace-nowrap text-right font-semibold sm:w-24">
                           {formatCurrency(item.selling_price * (item.quantity || 1))}
                         </div>
                         <button
                           onClick={() => handleRemoveManualItem(item.id)}
-                          className="ml-2 text-red-600 hover:text-red-800"
+                          className="text-red-600 hover:text-red-800 sm:ml-2"
                         >
                           <Trash2 className="h-4 w-4" />
                         </button>
@@ -1077,10 +1511,10 @@ const InvoiceFormPage = () => {
                               isSuggested ? 'border-emerald-200 bg-emerald-50/40' : ''
                             }`}
                           >
-                            <div className="flex items-start justify-between gap-4">
-                              <div className="flex-1">
+                            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                              <div className="min-w-0 flex-1">
                                 <div className="flex items-center gap-2">
-                                  <p className="font-medium">{item.name}</p>
+                                  <p className="font-medium break-words">{item.name}</p>
                                   {item.is_favorite ? (
                                     <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800">
                                       <Star className="mr-1 h-3 w-3 fill-amber-500 text-amber-500" />
@@ -1088,7 +1522,7 @@ const InvoiceFormPage = () => {
                                     </span>
                                   ) : null}
                                 </div>
-                                <p className="text-sm text-gray-600">{item.category}</p>
+                                <p className="text-sm text-gray-600 break-words">{item.category}</p>
                                 <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
                                   <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-700">
                                     Total: {totalQuantity}
@@ -1144,8 +1578,8 @@ const InvoiceFormPage = () => {
                                   </div>
                                 )}
                               </div>
-                              <div className="flex items-center gap-3">
-                                <span className="font-semibold">
+                              <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+                                <span className="whitespace-nowrap font-semibold">
                                   {formatCurrency(item.selling_price)}
                                 </span>
                                 {isSuggested && (
@@ -1292,26 +1726,44 @@ const InvoiceFormPage = () => {
             </CardContent>
           </Card>
 
-          {/* Platform Selection */}
+          {/* Sales Channel Selection */}
           <Card>
             <CardHeader>
               <CardTitle>Platform Jualan</CardTitle>
+              <CardDescription>
+                Pilih platform untuk kira caj secara automatik.
+              </CardDescription>
             </CardHeader>
-            <CardContent>
-              <div className="space-y-3">
-                {availablePlatforms.map((p) => (
-                  <button
-                    key={p}
-                    onClick={() => setPlatform(p)}
-                    className={`w-full text-left p-3 rounded-lg border-2 transition-colors ${
-                      platform === p
-                        ? 'border-blue-500 bg-blue-50'
-                        : 'border-gray-200 hover:border-gray-300'
-                    }`}
-                  >
-                    <p className="font-medium">{p}</p>
-                  </button>
-                ))}
+            <CardContent className="space-y-3">
+              <div className="space-y-2">
+                <label htmlFor="sales-channel-select" className="block text-sm font-medium">
+                  Platform
+                </label>
+                <Select
+                  id="sales-channel-select"
+                  value={selectedSalesChannelId}
+                  onChange={(event) => setSelectedSalesChannelId(event.target.value)}
+                >
+                  <option value="">Tanpa Platform (Tiada Caj)</option>
+                  {salesChannels.map((channel) => (
+                    <option key={channel.id} value={channel.id}>
+                      {channel.name}
+                    </option>
+                  ))}
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {channelFeeLabel}
+                </p>
+              </div>
+
+              <div className="rounded-lg border bg-secondary/30 p-3">
+                <p className="text-xs text-muted-foreground">Anggaran Caj Platform</p>
+                <p className="text-lg font-semibold">{formatCurrency(channelFeePreview)}</p>
+                {selectedSalesChannel && normalizeSalesChannelFeeType(selectedSalesChannel.fee_type) === SALES_CHANNEL_FEE_TYPES.PERCENTAGE ? (
+                  <p className="text-xs text-muted-foreground">
+                    {selectedSalesChannel.fee_value}% x {formatCurrency(subtotal)}
+                  </p>
+                ) : null}
               </div>
             </CardContent>
           </Card>
@@ -1330,25 +1782,43 @@ const InvoiceFormPage = () => {
                   <span className="font-medium">{formatCurrency(subtotal)}</span>
                 </div>
                 <div className="flex justify-between text-sm">
+                  <span>Caj Platform:</span>
+                  <span className="font-medium">- {formatCurrency(channelFeePreview)}</span>
+                </div>
+                <div className="flex justify-between text-sm">
                   <span>Cukai:</span>
                   <span className="font-medium">{formatCurrency(tax)}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span>Kos Anggaran:</span>
+                  <span className="font-medium">{formatCurrency(totalCostPreview)}</span>
                 </div>
               </div>
               <div className="flex justify-between text-lg font-bold">
                 <span>Jumlah:</span>
                 <span>{formatCurrency(total)}</span>
               </div>
+              <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-3 text-sm">
+                <div className="flex justify-between">
+                  <span>Untung Kasar:</span>
+                  <span className="font-medium">{formatCurrency(grossProfitPreview)}</span>
+                </div>
+                <div className="mt-1 flex justify-between">
+                  <span>Untung Selepas Caj Platform:</span>
+                  <span className="font-semibold">{formatCurrency(netProfitPreview)}</span>
+                </div>
+              </div>
 
               {selectedClientId && (
                 <div className="rounded-lg bg-blue-50 p-3 text-sm">
-                  <p className="font-medium">
-                    {clients.find((c) => c.id === selectedClientId)?.name}
-                  </p>
-                  {clients.find((c) => c.id === selectedClientId)?.email && (
-                    <p className="text-gray-600">
-                      {clients.find((c) => c.id === selectedClientId)?.email}
+                    <p className="font-medium break-words">
+                      {clients.find((c) => c.id === selectedClientId)?.name}
                     </p>
-                  )}
+                    {clients.find((c) => c.id === selectedClientId)?.email && (
+                      <p className="break-all text-gray-600">
+                        {clients.find((c) => c.id === selectedClientId)?.email}
+                      </p>
+                    )}
                 </div>
               )}
 

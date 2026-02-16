@@ -24,6 +24,11 @@ import { Loader2,
 import { useToast } from '@/components/ui/use-toast';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend, BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts';
 import { cn } from '@/lib/utils';
+import {
+  COURIER_PAYMENT_MODES,
+  isDeliveryRequiredForInvoice,
+  resolveCourierPaymentModeForInvoice,
+} from '@/lib/shipping';
 import { useTheme } from '@/contexts/ThemeProvider';
 import { supabase } from '@/lib/customSupabaseClient';
 import { resolveTransactionClassification, TRANSACTION_CLASSIFICATIONS } from '@/components/wallet/transactionClassification';
@@ -218,7 +223,7 @@ const Dashboard = ({ items, categories }) => {
           is_manual,
           item_name,
           items(id, name, category, cost_price, user_id),
-          invoices(id, invoice_date, status, platform, user_id, created_at, updated_at, shipping_charged, shipment_id)
+          invoices(id, invoice_date, status, platform, user_id, created_at, updated_at, shipping_charged, shipment_id, channel_fee_amount, courier_payment_mode)
         `);
 
       if (error) {
@@ -267,6 +272,58 @@ const Dashboard = ({ items, categories }) => {
       }));
     },
     enabled: !!userId
+  });
+
+  const { data: pendingShippingCount = 0 } = useQuery({
+    queryKey: ['dashboard-pending-shipping', userId],
+    queryFn: async () => {
+      if (!userId) return 0;
+
+      const { data: paidInvoices, error: invoiceError } = await supabase
+        .from('invoices')
+        .select('id, shipment_id, shipping_method, shipping_charged')
+        .eq('user_id', userId)
+        .eq('status', 'paid');
+
+      if (invoiceError) {
+        console.error('[Dashboard] Error fetching paid invoices for shipping reminder:', invoiceError);
+        return 0;
+      }
+
+      const shipmentIds = [...new Set((paidInvoices || []).map((invoice) => invoice?.shipment_id).filter(Boolean))];
+      const shipmentStatusById = new Map();
+
+      if (shipmentIds.length > 0) {
+        const { data: shipmentRows, error: shipmentError } = await supabase
+          .from('shipments')
+          .select('id, ship_status')
+          .eq('user_id', userId)
+          .in('id', shipmentIds);
+
+        if (shipmentError) {
+          console.error('[Dashboard] Error fetching shipment statuses for reminder:', shipmentError);
+        } else {
+          (shipmentRows || []).forEach((row) => {
+            shipmentStatusById.set(row.id, row.ship_status);
+          });
+        }
+      }
+
+      return (paidInvoices || []).reduce((count, invoice) => {
+        if (!isDeliveryRequiredForInvoice(invoice)) return count;
+
+        const shipmentId = invoice?.shipment_id;
+        if (!shipmentId) return count + 1;
+
+        const shipStatus = shipmentStatusById.get(shipmentId);
+        if (!shipStatus || shipStatus === 'pending') return count + 1;
+
+        return count;
+      }, 0);
+    },
+    enabled: !!userId,
+    staleTime: 30 * 1000,
+    refetchOnWindowFocus: true,
   });
 
   // Fetch Business wallet IDs
@@ -451,10 +508,12 @@ const Dashboard = ({ items, categories }) => {
     const invoice = sale?.invoices;
     if (!invoice?.id || acc.has(invoice.id)) return acc;
 
-    const shippingCharged = Math.max(parseFloat(invoice.shipping_charged) || 0, 0);
+    const paymentMode = resolveCourierPaymentModeForInvoice(invoice);
+    const isPlatformMode = paymentMode === COURIER_PAYMENT_MODES.PLATFORM;
+    const shippingCharged = isPlatformMode ? 0 : Math.max(parseFloat(invoice.shipping_charged) || 0, 0);
     const shipment = invoice.shipment || null;
-    const shippingCost = Math.max(parseFloat(shipment?.shipping_cost) || 0, 0);
-    const isCourierPaid = Boolean(shipment?.courier_paid);
+    const shippingCost = isPlatformMode ? 0 : Math.max(parseFloat(shipment?.shipping_cost) || 0, 0);
+    const isCourierPaid = isPlatformMode ? true : Boolean(shipment?.courier_paid);
     const shippingCostPaid = isCourierPaid ? shippingCost : 0;
 
     acc.set(invoice.id, {
@@ -473,13 +532,29 @@ const Dashboard = ({ items, categories }) => {
     (value) => value.shippingCharged > 0 && !value.isCourierPaid
   ).length;
 
+  const channelFeeByInvoice = filteredSales.reduce((acc, sale) => {
+    const invoice = sale?.invoices;
+    if (!invoice?.id || acc.has(invoice.id)) return acc;
+    acc.set(invoice.id, Math.max(parseFloat(invoice.channel_fee_amount) || 0, 0));
+    return acc;
+  }, new Map());
+  const totalChannelFees = Array.from(channelFeeByInvoice.values()).reduce((sum, fee) => sum + fee, 0);
+
   const totalItemRevenue = filteredSales.reduce((sum, sale) => sum + (parseFloat(sale.line_total) || 0), 0);
   const totalItemProfit = filteredSales.reduce((sum, sale) => {
     const revenue = parseFloat(sale.line_total) || 0;
     const costPrice = getEffectiveCostPrice(sale);
     const cost = costPrice * (sale.quantity || 1);
     return sum + (revenue - cost);
-  }, 0);
+  }, 0) - totalChannelFees;
+
+  const revenueByInvoice = filteredSales.reduce((acc, sale) => {
+    const invoiceId = sale?.invoices?.id;
+    if (!invoiceId) return acc;
+    const revenue = parseFloat(sale.line_total) || 0;
+    acc.set(invoiceId, (acc.get(invoiceId) || 0) + revenue);
+    return acc;
+  }, new Map());
 
   const filteredStats = {
     totalRevenue: totalItemRevenue,
@@ -490,6 +565,7 @@ const Dashboard = ({ items, categories }) => {
     totalShippingProfit: totalShippingProfit,
     shippingPendingCount: shippingPendingCount,
     totalRefunds: parseFloat(totalRefunds) || 0,
+    totalChannelFees: totalChannelFees,
     totalItemProfit: totalItemProfit,
     totalProfit: totalItemProfit + totalShippingProfit,
     soldItemsCount: filteredSales.length,
@@ -596,6 +672,29 @@ const Dashboard = ({ items, categories }) => {
         </CardContent>
       </Card>
       
+      {pendingShippingCount > 0 ? (
+        <motion.div
+          initial={{ opacity: 0, y: 14 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.32 }}
+        >
+          <Card className="border-amber-400/80 bg-gradient-to-r from-amber-100 to-orange-100 shadow-md ring-1 ring-amber-300/70">
+            <CardContent className="flex flex-col gap-3 py-5 sm:flex-row sm:items-center sm:justify-between">
+              <div className="space-y-1">
+                <p className="inline-flex items-center gap-2 text-base font-bold text-amber-950 md:text-lg">
+                  <Package className="h-5 w-5" />
+                  Perlu Dihantar
+                </p>
+                <p className="text-sm font-medium text-amber-900 md:text-base">{pendingShippingCount} pesanan menunggu penghantaran</p>
+              </div>
+              <Button asChild size="sm" className="w-full bg-amber-700 text-white hover:bg-amber-800 sm:w-auto">
+                <Link to="/invoices?status=paid&shipping_state=pending">Lihat Senarai</Link>
+              </Button>
+            </CardContent>
+          </Card>
+        </motion.div>
+      ) : null}
+
       <section className="space-y-2">
         <h2 className="px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Performance</h2>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
@@ -617,7 +716,7 @@ const Dashboard = ({ items, categories }) => {
             isHighlighted={true}
             tone="lime"
             size="hero"
-            helperText="Untung selepas semua kos termasuk penghantaran."
+            helperText="Untung selepas semua kos termasuk caj platform dan penghantaran."
           />
           <StatCard
             title="Baki Duit Semasa"
@@ -707,7 +806,23 @@ const Dashboard = ({ items, categories }) => {
                     const costPrice = getEffectiveCostPrice(sale);
                     const totalCost = costPrice * quantity;
                     const totalRevenue = parseFloat(sale.line_total) || 0;
-                    const profit = totalRevenue - totalCost;
+                    const invoiceId = sale?.invoices?.id;
+                    const invoiceRevenue = invoiceId ? (revenueByInvoice.get(invoiceId) || 0) : 0;
+                    const invoiceChannelFee = invoiceId ? (channelFeeByInvoice.get(invoiceId) || 0) : 0;
+                    const channelFeeShare = invoiceRevenue > 0
+                      ? (totalRevenue / invoiceRevenue) * invoiceChannelFee
+                      : 0;
+                    const shippingInvoice = invoiceId ? shippingByInvoice.get(invoiceId) : null;
+                    const shippingCharged = Math.max(parseFloat(shippingInvoice?.shippingCharged) || 0, 0);
+                    const shippingCostPaid = Math.max(parseFloat(shippingInvoice?.shippingCostPaid) || 0, 0);
+                    const shippingChargedShare = invoiceRevenue > 0
+                      ? (totalRevenue / invoiceRevenue) * shippingCharged
+                      : 0;
+                    const shippingCostShare = invoiceRevenue > 0
+                      ? (totalRevenue / invoiceRevenue) * shippingCostPaid
+                      : 0;
+                    const shippingProfitShare = shippingChargedShare - shippingCostShare;
+                    const profit = totalRevenue - totalCost - channelFeeShare + shippingProfitShare;
                     const isLoss = profit < 0;
                     return (
                       <tr key={`${sale.id}-${index}`} className="border-t relative group overflow-hidden">

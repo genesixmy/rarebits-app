@@ -73,12 +73,12 @@ const getContrastTextColor = (hexColor) => {
   return luminance > 150 ? '#111827' : '#ffffff';
 };
 
-const buildWhatsAppMessage = ({ selectedItems, catalogUrl }) => {
+const buildWhatsAppMessage = ({ selectedItems, catalogUrl, showPrices = true }) => {
   const lines = [
     'Hi! Saya berminat dengan item dalam katalog:',
     '',
     ...selectedItems.map((item, index) => (
-      `${index + 1}) ${item.name} - Qty: ${item.quantity} - Harga: RM${formatCurrency(item.selling_price || 0)}`
+      `${index + 1}) ${item.name} - Qty: ${item.quantity}${showPrices ? ` - Harga: RM${formatCurrency(item.selling_price || 0)}` : ''}`
     )),
     '',
     `Link katalog: ${catalogUrl}`,
@@ -141,7 +141,7 @@ const normalizeItemImageUrls = (item) => {
   return Array.from(new Set(next)).slice(0, 10);
 };
 
-const CatalogItemCard = ({ item, isSelected, selectedQty, onToggle, onQuantityChange, onOpenGallery }) => {
+const CatalogItemCard = ({ item, showPrices, isSelected, selectedQty, onToggle, onQuantityChange, onOpenGallery }) => {
   const [imageFailed, setImageFailed] = useState(false);
   const imageUrls = normalizeItemImageUrls(item);
   const coverImageUrl = imageUrls[0] || '';
@@ -201,7 +201,9 @@ const CatalogItemCard = ({ item, isSelected, selectedQty, onToggle, onQuantityCh
       </div>
       <div className="space-y-2 p-4">
         <h3 className="line-clamp-2 text-base font-semibold text-slate-900">{item.name || 'Item'}</h3>
-        <p className="text-xl font-bold text-violet-700">RM {formatCurrency(item.selling_price || 0)}</p>
+        {showPrices ? (
+          <p className="text-xl font-bold text-violet-700">RM {formatCurrency(item.selling_price || 0)}</p>
+        ) : null}
         <div>
           <span
             className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${
@@ -283,6 +285,7 @@ const CatalogPublicPage = () => {
           updatedAt: null,
           sellerCreatedAt: null,
           itemCount: 0,
+          showPrices: true,
           items: [],
           company: null,
           requiresAccess: false,
@@ -311,6 +314,7 @@ const CatalogPublicPage = () => {
           updatedAt: null,
           sellerCreatedAt: null,
           itemCount: 0,
+          showPrices: true,
           items: [],
           company: null,
           requiresAccess: false,
@@ -324,6 +328,7 @@ const CatalogPublicPage = () => {
       const isExpired = Boolean(catalogHeader.is_expired);
       const isInactive = catalogHeader.is_active === false;
       const accessGranted = Boolean(catalogHeader.access_granted);
+      const showPrices = catalogHeader.show_prices !== false;
 
       let itemRows = [];
       let companyRows = null;
@@ -409,6 +414,7 @@ const CatalogPublicPage = () => {
         updatedAt: catalogHeader.updated_at || null,
         sellerCreatedAt: catalogHeader.seller_created_at || null,
         itemCount: Number.parseInt(catalogHeader.item_count, 10) || 0,
+        showPrices,
         items: normalizedItemRows,
         company: company || null,
         visibility: catalogHeader.visibility || 'public',
@@ -464,6 +470,7 @@ const CatalogPublicPage = () => {
 
   const selectedCount = selectedItemList.length;
   const selectedTotalQty = selectedItemList.reduce((sum, entry) => sum + (entry.quantity || 0), 0);
+  const showCatalogPrices = data?.showPrices !== false;
   const companyName = (data?.company?.company_name || '').trim() || 'Penjual';
   const sellerDescription = (data?.description || '').trim();
   const companyLogoUrl = (data?.company?.logo_url || '').trim();
@@ -593,10 +600,10 @@ const CatalogPublicPage = () => {
       if (sortBy === 'name_asc') {
         return (a.name || '').localeCompare(b.name || '');
       }
-      if (sortBy === 'price_low') {
+      if (showCatalogPrices && sortBy === 'price_low') {
         return Number(a.selling_price || 0) - Number(b.selling_price || 0);
       }
-      if (sortBy === 'price_high') {
+      if (showCatalogPrices && sortBy === 'price_high') {
         return Number(b.selling_price || 0) - Number(a.selling_price || 0);
       }
       if (sortBy === 'qty_high') {
@@ -606,7 +613,14 @@ const CatalogPublicPage = () => {
     });
 
     return sortedItems;
-  }, [categoryFilter, data?.items, searchTerm, sortBy]);
+  }, [categoryFilter, data?.items, searchTerm, showCatalogPrices, sortBy]);
+
+  useEffect(() => {
+    if (showCatalogPrices) return;
+    if (sortBy === 'price_low' || sortBy === 'price_high') {
+      setSortBy('latest');
+    }
+  }, [showCatalogPrices, sortBy]);
 
   useEffect(() => {
     if (!isGalleryOpen) return;
@@ -810,6 +824,7 @@ const CatalogPublicPage = () => {
     openWhatsAppThread(buildWhatsAppMessage({
       selectedItems: selectedItemList,
       catalogUrl,
+      showPrices: showCatalogPrices,
     }));
   };
 
@@ -1019,6 +1034,9 @@ const CatalogPublicPage = () => {
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
                       <div>
                         <h2 className="text-2xl font-bold text-slate-900">{data.title}</h2>
+                        {!showCatalogPrices ? (
+                          <p className="mt-1 text-xs text-slate-500">Harga tidak dipaparkan untuk katalog ini.</p>
+                        ) : null}
                       </div>
                       <p className="text-sm font-medium text-violet-700">
                         {filteredItems.length} / {data.items.length} produk dipaparkan
@@ -1068,8 +1086,12 @@ const CatalogPublicPage = () => {
                       <Select value={sortBy} onChange={(event) => setSortBy(event.target.value)}>
                         <option value="latest">Default</option>
                         <option value="name_asc">Nama A-Z</option>
-                        <option value="price_low">Harga Rendah</option>
-                        <option value="price_high">Harga Tinggi</option>
+                        {showCatalogPrices ? (
+                          <option value="price_low">Harga Rendah</option>
+                        ) : null}
+                        {showCatalogPrices ? (
+                          <option value="price_high">Harga Tinggi</option>
+                        ) : null}
                         <option value="qty_high">Stok Tertinggi</option>
                       </Select>
                     </div>
@@ -1105,6 +1127,7 @@ const CatalogPublicPage = () => {
                           <CatalogItemCard
                             key={item.item_id}
                             item={item}
+                            showPrices={showCatalogPrices}
                             isSelected={Object.prototype.hasOwnProperty.call(selectedItems, item.item_id)}
                             selectedQty={selectedItems[item.item_id] || 1}
                             onToggle={handleToggleItem}

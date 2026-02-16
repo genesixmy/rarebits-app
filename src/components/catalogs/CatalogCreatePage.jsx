@@ -18,6 +18,7 @@ const COVER_MAX_BYTES = 2 * 1024 * 1024;
 const COVER_MAX_MB_TEXT = '2MB';
 const COVER_TARGET_BYTES = 250 * 1024;
 const COVER_TARGET_TEXT = '200-250KB';
+const COVER_GALLERY_LIMIT = 60;
 
 const extractStoragePathFromPublicUrl = (url) => {
   if (typeof url !== 'string') return '';
@@ -98,31 +99,20 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
   const [manualSearch, setManualSearch] = useState('');
   const [manualSelectedItemIds, setManualSelectedItemIds] = useState([]);
   const [visibility, setVisibility] = useState('public');
+  const [hideCatalogPrice, setHideCatalogPrice] = useState(false);
   const [accessCode, setAccessCode] = useState('');
   const [hasExpiry, setHasExpiry] = useState(false);
   const [expiresAt, setExpiresAt] = useState('');
   const [createdCatalog, setCreatedCatalog] = useState(null);
-  const [coverFile, setCoverFile] = useState(null);
-  const [coverPreviewUrl, setCoverPreviewUrl] = useState('');
   const [coverImageUrl, setCoverImageUrl] = useState('');
+  const [coverMode, setCoverMode] = useState('upload');
+  const [coverGallerySearch, setCoverGallerySearch] = useState('');
+  const [isUploadingCover, setIsUploadingCover] = useState(false);
+  const [deletingCoverMediaId, setDeletingCoverMediaId] = useState(null);
   const [coverInputKey, setCoverInputKey] = useState(0);
   const [updatingCoverCatalogId, setUpdatingCoverCatalogId] = useState(null);
   const [removingCoverCatalogId, setRemovingCoverCatalogId] = useState(null);
   const [didHydrateEditState, setDidHydrateEditState] = useState(false);
-
-  useEffect(() => {
-    if (!coverFile) {
-      setCoverPreviewUrl('');
-      return undefined;
-    }
-
-    const objectUrl = URL.createObjectURL(coverFile);
-    setCoverPreviewUrl(objectUrl);
-
-    return () => {
-      URL.revokeObjectURL(objectUrl);
-    };
-  }, [coverFile]);
 
   const categoryOptions = useMemo(() => {
     const names = new Set(
@@ -161,10 +151,10 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
   }, [items, manualSelectedItemIds, selectedCategories, selectionMode]);
 
   const selectedItemCount = selectedItemIds.length;
-  const currentCoverPreview = coverPreviewUrl || coverImageUrl || '';
+  const currentCoverPreview = coverImageUrl || '';
+  const normalizedCoverGallerySearch = coverGallerySearch.trim().toLowerCase();
 
   const resetPendingCover = () => {
-    setCoverFile(null);
     setCoverInputKey((prev) => prev + 1);
   };
 
@@ -236,14 +226,28 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
     return bestCandidate;
   };
 
-  const uploadCatalogCover = async ({ catalogId, file }) => {
-    const compressedFile = await compressCatalogCoverForTarget(file);
+  const removeCatalogCoverFromStoragePath = async (storagePath) => {
+    if (!storagePath) return;
 
-    const storagePath = `catalog-covers/${userId}/${catalogId}.jpg`;
+    const { error } = await supabase.storage
+      .from(CATALOG_COVER_BUCKET)
+      .remove([storagePath]);
+
+    if (error && !/not found/i.test(error.message || '')) {
+      throw new Error(`Gagal buang cover dari storage: ${error.message}`);
+    }
+  };
+
+  const uploadCatalogCover = async ({ file }) => {
+    if (!userId) throw new Error('Sesi pengguna tidak sah');
+
+    const compressedFile = await compressCatalogCoverForTarget(file);
+    const storagePath = `catalog-covers/${userId}/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.jpg`;
+
     const { error: uploadError } = await supabase.storage
       .from(CATALOG_COVER_BUCKET)
       .upload(storagePath, compressedFile, {
-        upsert: true,
+        upsert: false,
         contentType: 'image/jpeg',
         cacheControl: '0',
       });
@@ -258,23 +262,32 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
 
     const nextUrl = publicUrlData?.publicUrl || '';
     if (!nextUrl) {
+      await removeCatalogCoverFromStoragePath(storagePath);
       throw new Error('URL cover tidak dapat dijana.');
     }
 
-    return nextUrl;
-  };
+    const mediaPayload = {
+      user_id: userId,
+      file_path: storagePath,
+      public_url: nextUrl,
+      filename: file?.name || null,
+      size_bytes: compressedFile?.size || file?.size || null,
+      width: null,
+      height: null,
+    };
 
-  const removeCatalogCoverFromStorage = async (coverUrl) => {
-    const storagePath = extractStoragePathFromPublicUrl(coverUrl);
-    if (!storagePath) return;
+    const { data: mediaRow, error: mediaError } = await supabase
+      .from('catalog_cover_media')
+      .insert(mediaPayload)
+      .select('id, user_id, file_path, public_url, filename, size_bytes, width, height, created_at')
+      .single();
 
-    const { error } = await supabase.storage
-      .from(CATALOG_COVER_BUCKET)
-      .remove([storagePath]);
-
-    if (error && !/not found/i.test(error.message || '')) {
-      throw new Error(`Gagal buang cover dari storage: ${error.message}`);
+    if (mediaError) {
+      await removeCatalogCoverFromStoragePath(storagePath);
+      throw new Error(`Gagal simpan media cover: ${mediaError.message}`);
     }
+
+    return mediaRow;
   };
 
   const {
@@ -287,7 +300,7 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
       if (!userId) return [];
       const { data, error } = await supabase
         .from('catalogs')
-        .select('id, title, description, cover_image_url, public_code, selection_type, selected_categories, visibility, access_code, expires_at, is_active, created_at')
+        .select('id, title, description, cover_image_url, public_code, selection_type, selected_categories, show_prices, visibility, access_code, expires_at, is_active, created_at')
         .eq('user_id', userId)
         .order('created_at', { ascending: false });
 
@@ -300,6 +313,39 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
   });
 
   const {
+    data: coverMediaList = [],
+    isLoading: isCoverMediaLoading,
+    refetch: refetchCoverMediaList,
+  } = useQuery({
+    queryKey: ['catalog-cover-media', userId],
+    queryFn: async () => {
+      if (!userId) return [];
+
+      const { data, error } = await supabase
+        .from('catalog_cover_media')
+        .select('id, user_id, file_path, public_url, filename, size_bytes, width, height, created_at')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(COVER_GALLERY_LIMIT);
+
+      if (error) throw error;
+      return data || [];
+    },
+    enabled: !!userId,
+    staleTime: 30 * 1000,
+    refetchOnWindowFocus: false,
+  });
+
+  const filteredCoverMediaList = useMemo(() => {
+    if (!normalizedCoverGallerySearch) return coverMediaList;
+    return coverMediaList.filter((entry) => {
+      const name = (entry?.filename || '').toLowerCase();
+      const path = (entry?.file_path || '').toLowerCase();
+      return name.includes(normalizedCoverGallerySearch) || path.includes(normalizedCoverGallerySearch);
+    });
+  }, [coverMediaList, normalizedCoverGallerySearch]);
+
+  const {
     data: editCatalogData,
     isLoading: isEditCatalogLoading,
   } = useQuery({
@@ -309,7 +355,7 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
 
       const { data: catalog, error: catalogError } = await supabase
         .from('catalogs')
-        .select('id, title, description, cover_image_url, selection_type, selected_categories, include_all_items, allowed_category_ids, manual_item_ids, only_available, visibility, access_code, expires_at, is_active')
+        .select('id, title, description, cover_image_url, selection_type, selected_categories, include_all_items, allowed_category_ids, manual_item_ids, only_available, show_prices, visibility, access_code, expires_at, is_active')
         .eq('id', catalogId)
         .eq('user_id', userId)
         .maybeSingle();
@@ -373,12 +419,13 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
     setTitle(editCatalogData.title || '');
     setDescription(editCatalogData.description || '');
     setSelectionMode(normalizedSelectionType);
+    setHideCatalogPrice(editCatalogData.show_prices === false);
     setVisibility(editCatalogData.visibility === 'unlisted' ? 'unlisted' : 'public');
     setAccessCode(editCatalogData.access_code || '');
     setHasExpiry(Boolean(editCatalogData.expires_at));
     setExpiresAt(editCatalogData.expires_at ? new Date(editCatalogData.expires_at).toISOString().slice(0, 16) : '');
     setCoverImageUrl(editCatalogData.cover_image_url || '');
-    setCoverFile(null);
+    setCoverMode('upload');
     setCoverInputKey((prev) => prev + 1);
 
     if (normalizedSelectionType === 'manual') {
@@ -412,6 +459,7 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
       const normalizedTitle = title.trim();
       const normalizedDescription = description.trim();
       const normalizedVisibility = visibility === 'unlisted' ? 'unlisted' : 'public';
+      const normalizedShowPrices = !hideCatalogPrice;
       const normalizedSelectionType = selectionMode === 'category' ? 'categories' : selectionMode;
       const normalizedAccessCode = normalizedVisibility === 'unlisted'
         ? (accessCode.trim().toUpperCase() || generateAccessCode())
@@ -461,12 +509,14 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
           allowed_tag_ids: [],
           manual_item_ids: normalizedManualItemIds,
           only_available: true,
+          show_prices: normalizedShowPrices,
           visibility: normalizedVisibility,
           access_code: normalizedAccessCode,
           expires_at: normalizedExpiresAt || null,
+          cover_image_url: coverImageUrl || null,
           is_active: true,
         })
-        .select('id, title, description, cover_image_url, public_code, selection_type, selected_categories, visibility, access_code, expires_at, is_active, created_at')
+        .select('id, title, description, cover_image_url, public_code, selection_type, selected_categories, show_prices, visibility, access_code, expires_at, is_active, created_at')
         .single();
 
       if (catalogError) {
@@ -474,31 +524,6 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
           throw new Error('Kod pautan telah digunakan. Sila guna kod lain.');
         }
         throw new Error(`Gagal mencipta katalog: ${catalogError.message}`);
-      }
-
-      let uploadedCoverUrl = null;
-      if (coverFile) {
-        uploadedCoverUrl = await uploadCatalogCover({
-          catalogId: catalogData.id,
-          file: coverFile,
-        });
-
-        const { error: coverUpdateError } = await supabase
-          .from('catalogs')
-          .update({ cover_image_url: uploadedCoverUrl })
-          .eq('id', catalogData.id)
-          .eq('user_id', userId);
-
-        if (coverUpdateError) {
-          try {
-            await removeCatalogCoverFromStorage(uploadedCoverUrl);
-          } catch (cleanupError) {
-            console.error('[CatalogCreatePage] Failed to cleanup cover after update error:', cleanupError);
-          }
-          throw new Error(`Cover berjaya dimuat naik tetapi gagal disimpan: ${coverUpdateError.message}`);
-        }
-
-        catalogData.cover_image_url = uploadedCoverUrl;
       }
 
       return {
@@ -533,6 +558,7 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
       const normalizedTitle = title.trim();
       const normalizedDescription = description.trim();
       const normalizedSelectionType = selectionMode === 'category' ? 'categories' : selectionMode;
+      const normalizedShowPrices = !hideCatalogPrice;
       const normalizedSelectedCategories = normalizedSelectionType === 'categories'
         ? selectedCategories
             .map((name) => (typeof name === 'string' ? name.trim() : ''))
@@ -552,19 +578,7 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
         throw new Error('Pilih sekurang-kurangnya satu kategori');
       }
 
-      const originalCoverUrl = editCatalogData?.cover_image_url || '';
-      let nextCoverUrl = coverImageUrl || null;
-      let shouldDeleteOriginalCoverAfterSave = false;
-      const shouldCleanupUploadedCoverOnFailure = Boolean(coverFile) && !originalCoverUrl;
-
-      if (coverFile) {
-        nextCoverUrl = await uploadCatalogCover({
-          catalogId,
-          file: coverFile,
-        });
-      } else if (!nextCoverUrl && originalCoverUrl) {
-        shouldDeleteOriginalCoverAfterSave = true;
-      }
+      const nextCoverUrl = coverImageUrl || null;
       try {
         const rpcItemIds = normalizedSelectionType === 'manual' ? selectedItemIds : [];
         const { data: rpcRows, error: rpcError } = await supabase.rpc('update_catalog_with_items', {
@@ -579,6 +593,7 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
           p_access_code: normalizedAccessCode,
           p_expires_at: normalizedExpiresAt || null,
           p_cover_image_url: nextCoverUrl || null,
+          p_show_prices: normalizedShowPrices,
         });
 
         if (rpcError) {
@@ -590,26 +605,11 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
           throw new Error(rpcResult?.message || 'Gagal kemas kini katalog');
         }
 
-        if (shouldDeleteOriginalCoverAfterSave) {
-          try {
-            await removeCatalogCoverFromStorage(originalCoverUrl);
-          } catch (cleanupError) {
-            console.warn('[CatalogCreatePage] Failed to cleanup old cover after save:', cleanupError);
-          }
-        }
-
         return {
           ...rpcResult,
           cover_image_url: nextCoverUrl || null,
         };
       } catch (error) {
-        if (shouldCleanupUploadedCoverOnFailure && nextCoverUrl) {
-          try {
-            await removeCatalogCoverFromStorage(nextCoverUrl);
-          } catch (cleanupError) {
-            console.warn('[CatalogCreatePage] Failed to cleanup uploaded cover after save error:', cleanupError);
-          }
-        }
         throw error;
       }
     },
@@ -775,14 +775,40 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
 
   const handlePendingCoverChange = (event) => {
     const file = event?.target?.files?.[0];
-    if (!file) return;
+    event.target.value = '';
+    if (!file || isUploadingCover) return;
 
     if (!validateCoverFile(file)) {
-      event.target.value = '';
       return;
     }
 
-    setCoverFile(file);
+    setIsUploadingCover(true);
+    uploadCatalogCover({ file })
+      .then((mediaRecord) => {
+        if (!mediaRecord?.public_url) {
+          throw new Error('URL cover tidak sah.');
+        }
+
+        setCoverImageUrl(mediaRecord.public_url);
+        setCoverMode('upload');
+        resetPendingCover();
+        queryClient.invalidateQueries({ queryKey: ['catalog-cover-media', userId] });
+        refetchCoverMediaList();
+        toast({
+          title: 'Cover berjaya dimuat naik',
+          description: 'Gambar telah ditambah ke galeri dan dipilih untuk katalog.',
+        });
+      })
+      .catch((error) => {
+        toast({
+          title: 'Gagal muat naik cover',
+          description: error.message,
+          variant: 'destructive',
+        });
+      })
+      .finally(() => {
+        setIsUploadingCover(false);
+      });
   };
 
   const handleReplaceCatalogCover = async (catalog, file) => {
@@ -791,10 +817,11 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
 
     setUpdatingCoverCatalogId(catalog.id);
     try {
-      const nextCoverUrl = await uploadCatalogCover({
-        catalogId: catalog.id,
-        file,
-      });
+      const uploadedMedia = await uploadCatalogCover({ file });
+      const nextCoverUrl = uploadedMedia?.public_url || null;
+      if (!nextCoverUrl) {
+        throw new Error('URL cover tidak sah.');
+      }
 
       const { error: updateError } = await supabase
         .from('catalogs')
@@ -810,6 +837,8 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
         setCreatedCatalog((prev) => (prev ? { ...prev, cover_image_url: nextCoverUrl } : prev));
       }
 
+      queryClient.invalidateQueries({ queryKey: ['catalog-cover-media', userId] });
+      refetchCoverMediaList();
       queryClient.invalidateQueries({ queryKey: ['catalog-list', userId] });
       refetchCatalogList();
       toast({ title: 'Cover katalog berjaya dikemaskini' });
@@ -832,8 +861,6 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
 
     setRemovingCoverCatalogId(catalog.id);
     try {
-      await removeCatalogCoverFromStorage(catalog.cover_image_url);
-
       const { error: updateError } = await supabase
         .from('catalogs')
         .update({ cover_image_url: null })
@@ -859,6 +886,73 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
       });
     } finally {
       setRemovingCoverCatalogId(null);
+    }
+  };
+
+  const handleSelectGalleryCover = (media) => {
+    if (!media?.public_url) return;
+    setCoverImageUrl(media.public_url);
+    setCoverMode('gallery');
+    resetPendingCover();
+  };
+
+  const handleDeleteCoverMedia = async (media) => {
+    if (!media?.id) return;
+
+    const inUseUrl = media.public_url || '';
+    if (!inUseUrl) return;
+
+    setDeletingCoverMediaId(media.id);
+    try {
+      const { count, error: inUseError } = await supabase
+        .from('catalogs')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .eq('cover_image_url', inUseUrl);
+
+      if (inUseError) {
+        throw new Error(`Gagal semak penggunaan cover: ${inUseError.message}`);
+      }
+
+      if ((count || 0) > 0) {
+        toast({
+          title: 'Cover sedang digunakan',
+          description: 'Buang cover daripada katalog dahulu sebelum padam dari galeri.',
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      const storagePath = media.file_path || extractStoragePathFromPublicUrl(inUseUrl);
+      if (storagePath) {
+        await removeCatalogCoverFromStoragePath(storagePath);
+      }
+
+      const { error: deleteError } = await supabase
+        .from('catalog_cover_media')
+        .delete()
+        .eq('id', media.id)
+        .eq('user_id', userId);
+
+      if (deleteError) {
+        throw new Error(`Gagal padam cover dari galeri: ${deleteError.message}`);
+      }
+
+      if (coverImageUrl === inUseUrl) {
+        setCoverImageUrl('');
+      }
+
+      queryClient.invalidateQueries({ queryKey: ['catalog-cover-media', userId] });
+      refetchCoverMediaList();
+      toast({ title: 'Cover berjaya dipadam dari galeri' });
+    } catch (error) {
+      toast({
+        title: 'Gagal padam cover galeri',
+        description: error.message,
+        variant: 'destructive',
+      });
+    } finally {
+      setDeletingCoverMediaId(null);
     }
   };
 
@@ -928,6 +1022,11 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
                     Tamat: {new Date(createdCatalog.expires_at).toLocaleString('ms-MY')}
                   </span>
                 )}
+                {createdCatalog?.show_prices === false && (
+                  <span className="rounded-full bg-slate-900 px-2 py-1 font-medium text-white">
+                    Harga Disembunyikan
+                  </span>
+                )}
               </div>
               {createdCatalog?.visibility === 'unlisted' && createdCatalog?.access_code && (
                 <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -970,11 +1069,14 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
                   setSelectedCategories([]);
                   setManualSearch('');
                   setManualSelectedItemIds([]);
+                  setHideCatalogPrice(false);
                   setVisibility('public');
                   setAccessCode('');
                   setHasExpiry(false);
                   setExpiresAt('');
                   setCoverImageUrl('');
+                  setCoverMode('upload');
+                  setCoverGallerySearch('');
                   resetPendingCover();
                 }}
               >
@@ -1032,6 +1134,11 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
                               <span className={`rounded-full px-2 py-0.5 font-medium ${catalog.visibility === 'unlisted' ? 'bg-violet-100 text-violet-800' : 'bg-sky-100 text-sky-800'}`}>
                                 {catalog.visibility === 'unlisted' ? 'Unlisted' : 'Public'}
                               </span>
+                              {catalog.show_prices === false ? (
+                                <span className="rounded-full bg-slate-900 px-2 py-0.5 font-medium text-white">
+                                  Harga Disembunyikan
+                                </span>
+                              ) : null}
                               <span className={`rounded-full px-2 py-0.5 font-medium ${catalogStatus.className}`}>
                                 {catalogStatus.label}
                               </span>
@@ -1209,26 +1316,42 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
             )}
 
             <div className="flex flex-wrap gap-2">
-              <label
-                htmlFor="catalog-cover-upload"
-                className="inline-flex cursor-pointer items-center justify-center rounded-md border border-input bg-background px-3 py-2 text-sm font-medium text-foreground transition hover:bg-accent"
+              <Button
+                type="button"
+                variant={coverMode === 'upload' ? 'default' : 'outline'}
+                onClick={() => {
+                  setCoverMode('upload');
+                  document.getElementById('catalog-cover-upload')?.click();
+                }}
+                disabled={isUploadingCover || createCatalogMutation.isPending || updateCatalogMutation.isPending}
+              >
+                {isUploadingCover ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <ImagePlus className="mr-2 h-4 w-4" />
+                )}
+                Upload Baru
+              </Button>
+              <Button
+                type="button"
+                variant={coverMode === 'gallery' ? 'default' : 'outline'}
+                onClick={() => setCoverMode('gallery')}
               >
                 <ImagePlus className="mr-2 h-4 w-4" />
-                {currentCoverPreview ? 'Ganti Gambar' : 'Muat Naik Gambar'}
-              </label>
-              {currentCoverPreview ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => {
-                    resetPendingCover();
-                    setCoverImageUrl('');
-                  }}
-                >
-                  <Trash2 className="mr-2 h-4 w-4" />
-                  Buang
-                </Button>
-              ) : null}
+                Pilih Dari Galeri
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  resetPendingCover();
+                  setCoverImageUrl('');
+                }}
+                disabled={!currentCoverPreview}
+              >
+                <Trash2 className="mr-2 h-4 w-4" />
+                Buang
+              </Button>
               <Input
                 key={`catalog-cover-${coverInputKey}`}
                 id="catalog-cover-upload"
@@ -1238,6 +1361,90 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
                 onChange={handlePendingCoverChange}
               />
             </div>
+
+            {coverMode === 'gallery' ? (
+              <div className="space-y-3 rounded-lg border border-dashed p-3">
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    value={coverGallerySearch}
+                    onChange={(event) => setCoverGallerySearch(event.target.value)}
+                    placeholder="Cari cover mengikut nama fail..."
+                    className="pl-9"
+                  />
+                </div>
+
+                {isCoverMediaLoading ? (
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Memuatkan galeri cover...
+                  </div>
+                ) : filteredCoverMediaList.length === 0 ? (
+                  <p className="rounded border border-dashed p-4 text-center text-sm text-muted-foreground">
+                    Tiada cover dalam galeri.
+                  </p>
+                ) : (
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                    {filteredCoverMediaList.map((media) => {
+                      const isSelected = media.public_url === coverImageUrl;
+                      const isDeleting = deletingCoverMediaId === media.id;
+                      return (
+                        <div
+                          key={media.id}
+                          role="button"
+                          tabIndex={0}
+                          className={`relative overflow-hidden rounded-lg border transition ${
+                            isSelected ? 'border-primary ring-2 ring-primary/40' : 'border-border hover:border-primary/40'
+                          }`}
+                          onClick={() => handleSelectGalleryCover(media)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault();
+                              handleSelectGalleryCover(media);
+                            }
+                          }}
+                        >
+                          <img
+                            src={media.public_url}
+                            alt={media.filename || 'Cover katalog'}
+                            className="h-28 w-full object-cover"
+                            loading="lazy"
+                          />
+                          <div className="space-y-1 p-2">
+                            <p className="truncate text-xs font-medium text-foreground">
+                              {media.filename || 'cover-katalog.jpg'}
+                            </p>
+                            <p className="text-[11px] text-muted-foreground">
+                              {(media.size_bytes || 0) > 0
+                                ? `${Math.round((media.size_bytes / 1024) * 10) / 10} KB`
+                                : 'Saiz tidak diketahui'}
+                            </p>
+                          </div>
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="destructive"
+                            className="absolute right-2 top-2 h-7 w-7"
+                            disabled={isDeleting}
+                            onClick={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              handleDeleteCoverMedia(media);
+                            }}
+                          >
+                            {isDeleting ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-3.5 w-3.5" />
+                            )}
+                          </Button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            ) : null}
             <p className="text-xs text-muted-foreground">
               Format: JPG, PNG, WEBP. Maksimum {COVER_MAX_MB_TEXT}. Auto compress target {COVER_TARGET_TEXT} untuk kekalkan visual tajam.
             </p>
@@ -1316,6 +1523,20 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
                   className="max-w-xs"
                 />
               )}
+            </div>
+
+            <div className="space-y-1 rounded-lg border border-dashed p-3">
+              <label className="flex items-center gap-2 text-sm font-medium text-foreground">
+                <input
+                  type="checkbox"
+                  checked={hideCatalogPrice}
+                  onChange={(event) => setHideCatalogPrice(event.target.checked)}
+                />
+                Tidak paparkan harga kepada public
+              </label>
+              <p className="text-xs text-muted-foreground">
+                Bila aktif, harga item akan disembunyikan pada halaman katalog awam.
+              </p>
             </div>
           </div>
 
@@ -1457,7 +1678,7 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
               }
               createCatalogMutation.mutate();
             }}
-            disabled={createCatalogMutation.isPending || updateCatalogMutation.isPending}
+            disabled={isUploadingCover || createCatalogMutation.isPending || updateCatalogMutation.isPending}
           >
             {createCatalogMutation.isPending || updateCatalogMutation.isPending ? (
               <>
@@ -1523,6 +1744,11 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
                             <span className={`rounded-full px-2 py-0.5 font-medium ${catalog.visibility === 'unlisted' ? 'bg-violet-100 text-violet-800' : 'bg-sky-100 text-sky-800'}`}>
                               {catalog.visibility === 'unlisted' ? 'Unlisted' : 'Public'}
                             </span>
+                            {catalog.show_prices === false ? (
+                              <span className="rounded-full bg-slate-900 px-2 py-0.5 font-medium text-white">
+                                Harga Disembunyikan
+                              </span>
+                            ) : null}
                             <span className={`rounded-full px-2 py-0.5 font-medium ${catalogStatus.className}`}>
                               {catalogStatus.label}
                             </span>

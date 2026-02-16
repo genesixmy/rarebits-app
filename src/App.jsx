@@ -70,6 +70,63 @@ const resolveCoverImageUrl = (legacyImageUrl, mediaList = []) => {
   return coverMedia?.url || legacyImageUrl || '';
 };
 
+const getReservedQuantityForItem = (item) => {
+  const reservations = Array.isArray(item?.inventory_reservations) ? item.inventory_reservations : [];
+
+  if (reservations.length > 0) {
+    return reservations.reduce((sum, reservation) => {
+      const qty = parseInt(reservation?.quantity_reserved, 10);
+      return sum + (Number.isNaN(qty) ? 0 : Math.max(qty, 0));
+    }, 0);
+  }
+
+  const legacyReserved = parseInt(item?.quantity_reserved, 10);
+  return Number.isNaN(legacyReserved) ? 0 : Math.max(legacyReserved, 0);
+};
+
+const getAvailableQuantityForItem = (item) => {
+  const totalQuantityRaw = parseInt(item?.quantity, 10);
+  const totalQuantity = Number.isNaN(totalQuantityRaw) ? 1 : Math.max(totalQuantityRaw, 0);
+  return Math.max(totalQuantity - getReservedQuantityForItem(item), 0);
+};
+
+const getItemAgingMeta = (item, todayUtcMs) => {
+  const availableQuantity = getAvailableQuantityForItem(item);
+  if ((item?.status || '').toLowerCase() === 'terjual' || availableQuantity <= 0 || !item?.created_at) {
+    return {
+      available_quantity: availableQuantity,
+      aging_days: null,
+      aging_status: null,
+    };
+  }
+
+  const createdAt = new Date(item.created_at);
+  if (Number.isNaN(createdAt.getTime())) {
+    return {
+      available_quantity: availableQuantity,
+      aging_days: null,
+      aging_status: null,
+    };
+  }
+
+  const createdUtcMs = Date.UTC(
+    createdAt.getUTCFullYear(),
+    createdAt.getUTCMonth(),
+    createdAt.getUTCDate()
+  );
+  const diffDays = Math.max(Math.floor((todayUtcMs - createdUtcMs) / (1000 * 60 * 60 * 24)), 0);
+
+  let agingStatus = 'normal';
+  if (diffDays >= 60) agingStatus = 'aging_risk';
+  else if (diffDays >= 30) agingStatus = 'slow_moving';
+
+  return {
+    available_quantity: availableQuantity,
+    aging_days: diffDays,
+    aging_status: agingStatus,
+  };
+};
+
 const fetchItems = async (userId) => {
   const { data, error } = await supabase
     .from('items')
@@ -133,6 +190,8 @@ function App() {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterCategory, setFilterCategory] = useState('all');
   const [filterStatus, setFilterStatus] = useState('all');
+  const [filterAgingStatus, setFilterAgingStatus] = useState('all');
+  const [inventorySort, setInventorySort] = useState('default');
   const [favoriteUpdatingIds, setFavoriteUpdatingIds] = useState(new Set());
   const inventoryRefetchTimeoutRef = useRef(null);
   const previousPathRef = useRef(location.pathname);
@@ -350,10 +409,18 @@ function App() {
         }
         const coverImageUrl = normalizedMedia.find((media) => media.is_cover)?.url || '';
 
-        const { wallet_id, reservations, media: _media, ...sanitizedItemData } = {
+        const hasTagPayload = Array.isArray(itemData.tag_ids);
+        const desiredTagIds = hasTagPayload
+            ? Array.from(new Set(itemData.tag_ids.filter(Boolean)))
+            : null;
+
+        const { wallet_id, reservations, media: _media, tag_ids: _tagIds, ...sanitizedItemData } = {
             ...itemData,
             status: computedStatus,
             client_id: itemData.client_id === '' ? null : itemData.client_id,
+            sku: itemData.sku?.trim() || null,
+            description: itemData.description?.trim() || null,
+            rackLocation: itemData.rackLocation?.trim() || null,
             dateSold: itemData.dateSold === '' ? null : itemData.dateSold,
             sellingPrice: (itemData.sellingPrice === '' || itemData.sellingPrice === null) ? 0 : parseFloat(itemData.sellingPrice),
             costPrice: (itemData.costPrice === '' || itemData.costPrice === null) ? 0 : parseFloat(itemData.costPrice),
@@ -439,6 +506,61 @@ function App() {
         } catch (reservationError) {
             console.error('[App] Reservation sync failed:', reservationError);
             throw reservationError;
+        }
+
+        // === STEP 1.75: SYNC ITEM TAGS (DIFF UPDATE) ===
+        if (desiredTagIds !== null) {
+            try {
+                const { data: existingTagRows, error: existingTagsError } = await supabase
+                    .from('item_tags')
+                    .select('tag_id')
+                    .eq('item_id', upsertedItem.id);
+
+                if (existingTagsError) {
+                    if (existingTagsError.code === '42P01') {
+                        console.warn('[App] item_tags table not found, skipping tag sync.');
+                    } else {
+                        throw new Error(`Gagal mendapatkan tag item: ${existingTagsError.message}`);
+                    }
+                } else {
+                    const existingTagIds = (existingTagRows || [])
+                        .map((row) => row.tag_id)
+                        .filter(Boolean);
+
+                    const tagsToDelete = existingTagIds.filter((tagId) => !desiredTagIds.includes(tagId));
+                    const tagsToInsert = desiredTagIds.filter((tagId) => !existingTagIds.includes(tagId));
+
+                    if (tagsToDelete.length > 0) {
+                        const { error: deleteTagsError } = await supabase
+                            .from('item_tags')
+                            .delete()
+                            .eq('item_id', upsertedItem.id)
+                            .in('tag_id', tagsToDelete);
+
+                        if (deleteTagsError) {
+                            throw new Error(`Gagal membuang tag item: ${deleteTagsError.message}`);
+                        }
+                    }
+
+                    if (tagsToInsert.length > 0) {
+                        const insertRows = tagsToInsert.map((tagId) => ({
+                            item_id: upsertedItem.id,
+                            tag_id: tagId,
+                        }));
+
+                        const { error: insertTagsError } = await supabase
+                            .from('item_tags')
+                            .insert(insertRows);
+
+                        if (insertTagsError) {
+                            throw new Error(`Gagal menyimpan tag item: ${insertTagsError.message}`);
+                        }
+                    }
+                }
+            } catch (tagSyncError) {
+                console.error('[App] Tag sync failed:', tagSyncError);
+                throw tagSyncError;
+            }
         }
 
 
@@ -883,11 +1005,61 @@ function App() {
     });
   }, [toggleFavoriteMutation]);
 
-  const filteredItems = items.filter(item => 
-    ((item.name || '').toLowerCase().includes(searchTerm.toLowerCase()) || (item.category || '').toLowerCase().includes(searchTerm.toLowerCase())) &&
-    (filterCategory === 'all' || item.category === filterCategory) &&
-    (filterStatus === 'all' || item.status === filterStatus)
-  );
+  const itemsWithAging = useMemo(() => {
+    const now = new Date();
+    const todayUtcMs = Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate()
+    );
+
+    return items.map((item) => ({
+      ...item,
+      ...getItemAgingMeta(item, todayUtcMs),
+    }));
+  }, [items]);
+
+  const normalizedSearchTerm = searchTerm.trim().toLowerCase();
+  const filteredItems = useMemo(() => {
+    const filtered = itemsWithAging.filter((item) => {
+      const itemName = (item.name || '').toLowerCase();
+      const itemCategory = (item.category || '').toLowerCase();
+      const itemSku = (item.sku || '').toLowerCase();
+      const itemDescription = (item.description || '').toLowerCase();
+      const itemRackLocation = (item.rack_location || '').toLowerCase();
+      const matchesKeyword = !normalizedSearchTerm
+        || itemName.includes(normalizedSearchTerm)
+        || itemCategory.includes(normalizedSearchTerm)
+        || itemSku.includes(normalizedSearchTerm)
+        || itemDescription.includes(normalizedSearchTerm)
+        || itemRackLocation.includes(normalizedSearchTerm);
+      const matchesAgingStatus = filterAgingStatus === 'all'
+        || item.aging_status === filterAgingStatus;
+
+      return matchesKeyword
+        && (filterCategory === 'all' || item.category === filterCategory)
+        && (filterStatus === 'all' || item.status === filterStatus)
+        && matchesAgingStatus;
+    });
+
+    if (inventorySort === 'aging_desc') {
+      filtered.sort((a, b) => {
+        const aAgingDays = Number.isInteger(a.aging_days) ? a.aging_days : -1;
+        const bAgingDays = Number.isInteger(b.aging_days) ? b.aging_days : -1;
+        if (bAgingDays !== aAgingDays) return bAgingDays - aAgingDays;
+        return (a.name || '').localeCompare(b.name || '');
+      });
+    }
+
+    return filtered;
+  }, [
+    itemsWithAging,
+    normalizedSearchTerm,
+    filterCategory,
+    filterStatus,
+    filterAgingStatus,
+    inventorySort,
+  ]);
   
   if (isPublicCatalogRoute) {
     return (
@@ -947,12 +1119,12 @@ function App() {
                       <CardTitle className="text-lg font-semibold">Tapis Item</CardTitle>
                     </CardHeader>
                     <CardContent>
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
                         <div className="flex flex-col gap-2">
                           <label className="text-xs font-medium text-muted-foreground">Cari Item</label>
                           <div className="relative">
                             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground w-4 h-4" />
-                            <Input placeholder="Cari nama atau kategori..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="pl-10 h-10" />
+                            <Input placeholder="Cari nama, SKU, kategori atau lokasi..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="pl-10 h-10" />
                           </div>
                         </div>
                         <div className="flex flex-col gap-2">
@@ -969,6 +1141,22 @@ function App() {
                             <option value="tersedia">Tersedia</option>
                             <option value="reserved">Reserved</option>
                             <option value="terjual">Terjual</option>
+                          </Select>
+                        </div>
+                        <div className="flex flex-col gap-2">
+                          <label className="text-xs font-medium text-muted-foreground">Aging Status</label>
+                          <Select value={filterAgingStatus} onChange={(e) => setFilterAgingStatus(e.target.value)}>
+                            <option value="all">Semua</option>
+                            <option value="normal">Normal (&lt;30 hari)</option>
+                            <option value="slow_moving">Slow Moving (30-59 hari)</option>
+                            <option value="aging_risk">Aging Risk (60+ hari)</option>
+                          </Select>
+                        </div>
+                        <div className="flex flex-col gap-2">
+                          <label className="text-xs font-medium text-muted-foreground">Susunan</label>
+                          <Select value={inventorySort} onChange={(e) => setInventorySort(e.target.value)}>
+                            <option value="default">Terbaharu</option>
+                            <option value="aging_desc">Paling Lama Dalam Stok</option>
                           </Select>
                         </div>
                       </div>
