@@ -1,5 +1,4 @@
 import React, { useMemo, useState, useEffect } from 'react';
-import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -22,10 +21,15 @@ import { Loader2,
   CheckCircle,
   XCircle,
   AlertTriangle,
-  Info
+  Info,
+  Plus,
+  Receipt,
+  ArrowRight,
+  SlidersHorizontal,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
-import { useToast } from '@/components/ui/use-toast';
-import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend, BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts';
+import { Cell, Tooltip, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts';
 import { cn } from '@/lib/utils';
 import {
   COURIER_PAYMENT_MODES,
@@ -37,146 +41,6 @@ import { supabase } from '@/lib/customSupabaseClient';
 import { resolveTransactionClassification, TRANSACTION_CLASSIFICATIONS } from '@/components/wallet/transactionClassification';
 import { calculateBusinessHealth, getItemAvailableQuantity } from '@/lib/dashboardHealth';
 import { calculateRealityCheck } from '@/lib/dashboardRealityCheck';
-
-const StatCard = ({ title, value, icon, subtext, subtextSecondary = '', delay, isHighlighted = false, tone = 'sky', size = 'default', helperText = '' }) => {
-  const [isHelperOpen, setIsHelperOpen] = useState(false);
-  const toneMap = {
-    sky: {
-      iconWrap: 'bg-sky-100',
-      icon: 'text-sky-600',
-      trendWrap: 'bg-sky-100',
-      trendIcon: 'text-sky-600',
-    },
-    amber: {
-      iconWrap: 'bg-amber-100',
-      icon: 'text-amber-600',
-      trendWrap: 'bg-amber-100',
-      trendIcon: 'text-amber-600',
-    },
-    emerald: {
-      iconWrap: 'bg-emerald-100',
-      icon: 'text-emerald-600',
-      trendWrap: 'bg-emerald-100',
-      trendIcon: 'text-emerald-600',
-    },
-    fuchsia: {
-      iconWrap: 'bg-fuchsia-100',
-      icon: 'text-fuchsia-600',
-      trendWrap: 'bg-fuchsia-100',
-      trendIcon: 'text-fuchsia-600',
-    },
-    rose: {
-      iconWrap: 'bg-rose-100',
-      icon: 'text-rose-600',
-      trendWrap: 'bg-rose-100',
-      trendIcon: 'text-rose-600',
-    },
-    indigo: {
-      iconWrap: 'bg-indigo-100',
-      icon: 'text-indigo-600',
-      trendWrap: 'bg-indigo-100',
-      trendIcon: 'text-indigo-600',
-    },
-    lime: {
-      iconWrap: 'bg-lime-100',
-      icon: 'text-lime-600',
-      trendWrap: 'bg-lime-100',
-      trendIcon: 'text-lime-600',
-    },
-  };
-  const toneStyle = toneMap[tone] || toneMap.sky;
-  const isHero = size === 'hero';
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ delay }}
-    >
-      <Card
-        className={cn(
-          "overflow-hidden rounded-3xl border transition-all duration-300",
-          isHighlighted
-            ? "border-transparent bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white shadow-[0_20px_45px_-22px_rgba(124,58,237,0.8)]"
-            : cn(
-                "border-slate-200/80 bg-card shadow-sm hover:-translate-y-0.5 hover:shadow-lg",
-                isHero && "border-slate-300/80 shadow-md"
-              )
-        )}
-      >
-        <CardHeader className="pb-3">
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-3">
-              <span
-                className={cn(
-                  "inline-flex items-center justify-center rounded-full",
-                  isHero ? "h-11 w-11" : "h-10 w-10",
-                  isHighlighted ? "bg-white/95 text-sky-500" : toneStyle.iconWrap
-                )}
-              >
-                {React.cloneElement(icon, { className: cn(isHero ? 'h-5 w-5' : 'h-4 w-4', isHighlighted ? 'text-sky-500' : toneStyle.icon) })}
-              </span>
-              <CardTitle className={cn("text-base", "font-semibold", isHighlighted ? 'text-white' : 'text-foreground')}>
-                <span className="inline-flex items-center gap-2">
-                  <span>{title}</span>
-                  {helperText ? (
-                    <UiTooltip open={isHelperOpen} onOpenChange={setIsHelperOpen}>
-                      <UiTooltipTrigger asChild>
-                        <button
-                          type="button"
-                          className={cn(
-                            "inline-flex h-6 w-6 items-center justify-center rounded-full transition-colors",
-                            isHighlighted
-                              ? "bg-white/20 text-white hover:bg-white/30"
-                              : "bg-slate-100 text-slate-500 hover:bg-slate-200"
-                          )}
-                          onClick={(event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            setIsHelperOpen((prev) => !prev);
-                          }}
-                          aria-label={helperText}
-                        >
-                          <Info className="h-5 w-5" />
-                        </button>
-                      </UiTooltipTrigger>
-                      <UiTooltipContent side="top" className="max-w-[240px] text-xs leading-relaxed">
-                        {helperText}
-                      </UiTooltipContent>
-                    </UiTooltip>
-                  ) : null}
-                </span>
-              </CardTitle>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="pt-0">
-          <div className={cn("text-2xl", "font-bold leading-none tracking-tight", isHighlighted ? 'text-white' : 'text-foreground')}>
-            {value}
-          </div>
-          <div className="mt-3 flex items-center gap-2">
-            <span
-              className={cn(
-                "inline-flex h-4 w-4 items-center justify-center rounded-md",
-                isHighlighted ? "bg-white/20 text-white" : toneStyle.trendWrap
-              )}
-            >
-              <BarChart3 className={cn("h-3 w-3", isHighlighted ? 'text-white' : toneStyle.trendIcon)} />
-            </span>
-            <p className={cn("text-sm font-medium", isHighlighted ? 'text-white/90' : 'text-muted-foreground')}>
-              {subtext}
-            </p>
-          </div>
-          {subtextSecondary ? (
-            <p className={cn("mt-1 text-xs", isHighlighted ? 'text-white/80' : 'text-muted-foreground')}>
-              {subtextSecondary}
-            </p>
-          ) : null}
-        </CardContent>
-      </Card>
-    </motion.div>
-  );
-};
 
 const getInitialDateRange = () => {
   const today = new Date();
@@ -430,7 +294,7 @@ const getRealityInsightText = ({
   isSlowWeek,
 }) => {
   if (!hasComparison) {
-    return 'Ringkasan awal minggu ini — trend akan lebih jelas bila ada bandingan.';
+    return 'Ringkasan awal minggu ini - trend akan lebih jelas bila ada bandingan.';
   }
 
   if (revenueChangePct > 0 && profitChangePct > -5 && profitChangePct < (revenueChangePct - 3)) {
@@ -452,11 +316,614 @@ const getRealityInsightText = ({
   return 'Revenue dan profit bergerak seimbang minggu ini.';
 };
 
-const Dashboard = ({ items, categories }) => {
-  const { toast } = useToast();
+const formatRM = (value) => `RM ${Number.parseFloat(value || 0).toFixed(2)}`;
+const GLASS_CARD_CLASS =
+  'rounded-2xl border border-white/65 bg-white/70 backdrop-blur-xl shadow-[0_14px_34px_-24px_rgba(148,163,184,0.5)]';
+
+const GlassCard = ({ className, children, ...props }) => (
+  <Card className={cn(GLASS_CARD_CLASS, className)} {...props}>
+    {children}
+  </Card>
+);
+
+const KpiCard = ({ title, value, subtext, icon: Icon, toneClass = 'bg-slate-100 text-slate-700' }) => (
+  <GlassCard className="overflow-hidden">
+    <CardContent className="space-y-2.5 p-4">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500">{title}</p>
+        <span className={cn('inline-flex h-8 w-8 items-center justify-center rounded-xl', toneClass)}>
+          <Icon className="h-4 w-4" />
+        </span>
+      </div>
+      <p className="text-[1.55rem] font-semibold leading-none tracking-tight text-slate-900">{value}</p>
+      <p className="truncate text-xs text-slate-500">{subtext}</p>
+    </CardContent>
+  </GlassCard>
+);
+
+const ActionRow = ({ label, description, value, to }) => (
+  <Link
+    to={to}
+    className="group flex items-center justify-between gap-3 rounded-xl px-2 py-2.5 transition-colors hover:bg-slate-100/70"
+  >
+    <div className="min-w-0">
+      <p className="text-sm font-semibold text-slate-900">{label}</p>
+      <p className="truncate text-xs text-slate-500">{description}</p>
+    </div>
+    <div className="inline-flex shrink-0 items-center gap-1.5">
+      <span className="rounded-full border border-white/80 bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-600 shadow-sm">
+        {value}
+      </span>
+      <ArrowRight className="h-3.5 w-3.5 text-slate-400 transition-transform group-hover:translate-x-0.5" />
+    </div>
+  </Link>
+);
+
+const InsightCard = ({ title, badge, action, children, className }) => (
+  <GlassCard className={cn('overflow-hidden', className)}>
+    <CardHeader className="pb-2">
+      <div className="flex items-center justify-between gap-2">
+        <CardTitle className="text-sm font-semibold text-slate-900">{title}</CardTitle>
+        {action ? action : badge}
+      </div>
+    </CardHeader>
+    <CardContent className="pt-0">{children}</CardContent>
+  </GlassCard>
+);
+
+const EmptyStateMini = ({ message }) => (
+  <div className="flex flex-col items-center justify-center gap-2 py-7 text-center">
+    <svg viewBox="0 0 96 72" className="h-16 w-24 text-indigo-200" aria-hidden="true">
+      <rect x="8" y="22" width="80" height="40" rx="10" fill="currentColor" opacity="0.22" />
+      <rect x="18" y="12" width="60" height="36" rx="9" fill="currentColor" opacity="0.4" />
+      <circle cx="48" cy="30" r="8" fill="currentColor" opacity="0.75" />
+      <circle cx="33" cy="30" r="1.5" fill="#ffffff" />
+      <circle cx="63" cy="30" r="1.5" fill="#ffffff" />
+      <path d="M40 36h16" stroke="#ffffff" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+    <p className="max-w-[22rem] text-xs text-slate-500">{message}</p>
+  </div>
+);
+
+const DashboardHero = ({ userDisplayName, summaryText, priorityLine }) => (
+  <GlassCard className="relative overflow-hidden">
+    <span className="pointer-events-none absolute -right-14 -top-16 h-44 w-44 rounded-full bg-gradient-to-br from-violet-300/45 to-indigo-400/30 blur-2xl" />
+    <span className="pointer-events-none absolute right-24 top-16 h-24 w-24 rounded-full bg-emerald-200/30 blur-xl" />
+    <CardContent className="relative z-10 flex flex-col gap-4 p-5 sm:p-6 lg:min-h-[168px] lg:flex-row lg:items-center lg:justify-between">
+      <div className="space-y-2">
+        <p className="text-xs font-semibold uppercase tracking-[0.09em] text-slate-500">Welcome Back</p>
+        <h2 className="font-['Roboto'] text-[24px] font-semibold leading-tight text-primary sm:text-[26px]">Selamat Kembali, {userDisplayName}</h2>
+        <p className="max-w-[44ch] text-[14.5px] text-slate-600">{summaryText}</p>
+        <p className="text-xs font-medium text-slate-500">{priorityLine}</p>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-white/80 bg-white/75 p-2.5 shadow-sm backdrop-blur-sm">
+        <Button asChild variant="outline" size="sm" className="h-9 rounded-xl border-white/80 bg-white/80 px-3">
+          <Link to="/inventory" className="inline-flex items-center gap-1.5">
+            <Plus className="h-3.5 w-3.5" />
+            Tambah Item
+          </Link>
+        </Button>
+        <Button asChild size="sm" className="h-9 rounded-xl bg-primary px-3 text-primary-foreground hover:bg-primary/90">
+          <Link to="/invoices/create" className="inline-flex items-center gap-1.5">
+            <Receipt className="h-3.5 w-3.5" />
+            Invois Baru
+          </Link>
+        </Button>
+        <Button asChild variant="outline" size="sm" className="h-9 rounded-xl border-white/80 bg-white/80 px-3">
+          <Link to="/invoices?status=paid&shipping_state=pending" className="inline-flex items-center gap-1.5">
+            <Truck className="h-3.5 w-3.5" />
+            Semak Penghantaran
+          </Link>
+        </Button>
+      </div>
+    </CardContent>
+  </GlassCard>
+);
+
+const DashboardNextSteps = ({ steps }) => (
+  <GlassCard>
+    <CardHeader className="pb-1 sm:pb-0">
+      <CardTitle className="text-[17px] font-semibold text-slate-900">Apa perlu buat seterusnya</CardTitle>
+    </CardHeader>
+    <CardContent className="pt-0 sm:pt-1">
+      <div className="divide-y divide-white/80">
+        {steps.map((step) => (
+          <ActionRow
+            key={step.label}
+            label={step.label}
+            description={step.description}
+            value={step.value}
+            to={step.to}
+          />
+        ))}
+      </div>
+    </CardContent>
+  </GlassCard>
+);
+
+const DashboardKpiGrid = ({
+  filteredStats,
+  netProfitPercentText,
+  businessWalletBalance,
+  totalUnitStock,
+  soldUnitMovementPercent,
+}) => {
+  const cards = [
+    {
+      key: 'revenue',
+      title: 'Revenue Item',
+      value: formatRM(filteredStats.totalRevenue),
+      subtext: `${filteredStats.soldItemsCount} jualan`,
+      icon: Wallet,
+      tone: 'bg-emerald-100 text-emerald-700',
+    },
+    {
+      key: 'profit',
+      title: 'Untung Sebenar',
+      value: formatRM(filteredStats.totalProfit),
+      subtext: netProfitPercentText,
+      icon: TrendingUp,
+      tone: 'bg-violet-100 text-violet-700',
+    },
+    {
+      key: 'wallet',
+      title: 'Baki Duit Semasa',
+      value: formatRM(parseFloat(businessWalletBalance?.balance || 0)),
+      subtext: businessWalletBalance?.name ? `${businessWalletBalance.name} (live)` : 'Wallet Business',
+      icon: Wallet,
+      tone: 'bg-indigo-100 text-indigo-700',
+    },
+    {
+      key: 'units',
+      title: 'Unit Terjual',
+      value: `${filteredStats.totalQuantitySold}`,
+      subtext: `${filteredStats.totalQuantitySold}/${totalUnitStock} unit - ${soldUnitMovementPercent.toFixed(1)}% bergerak`,
+      icon: CheckCircle,
+      tone: 'bg-amber-100 text-amber-700',
+    },
+  ];
+
+  return (
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      {cards.map((card) => (
+        <KpiCard
+          key={card.key}
+          title={card.title}
+          value={card.value}
+          subtext={card.subtext}
+          icon={card.icon}
+          toneClass={card.tone}
+        />
+      ))}
+    </div>
+  );
+};
+
+const DashboardFiltersBar = ({
+  dateRange,
+  setDateRange,
+  isFiltersOpen,
+  setIsFiltersOpen,
+}) => {
+  const toDisplayDate = (value) => {
+    if (!value) return '-';
+    const parsed = new Date(`${value}T00:00:00`);
+    if (Number.isNaN(parsed.getTime())) return value;
+    return parsed.toLocaleDateString('en-GB');
+  };
+
+  return (
+    <GlassCard>
+      <CardContent className="space-y-3 p-3 sm:p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="inline-flex items-center gap-2 text-sm text-slate-600">
+            <SlidersHorizontal className="h-4 w-4" />
+            <span>{toDisplayDate(dateRange.startDate)} - {toDisplayDate(dateRange.endDate)}</span>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-8 rounded-xl border-white/80 bg-white/80"
+            onClick={() => setIsFiltersOpen((prev) => !prev)}
+          >
+            Tapis
+            {isFiltersOpen ? <ChevronUp className="ml-1 h-3.5 w-3.5" /> : <ChevronDown className="ml-1 h-3.5 w-3.5" />}
+          </Button>
+        </div>
+
+        {isFiltersOpen ? (
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_auto]">
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-slate-500">Tarikh Mula</label>
+              <Input
+                type="date"
+                value={dateRange.startDate}
+                onChange={(event) => setDateRange((prev) => ({ ...prev, startDate: event.target.value }))}
+                className="h-9 rounded-xl border-white/80 bg-white/80"
+              />
+            </div>
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-slate-500">Tarikh Akhir</label>
+              <Input
+                type="date"
+                value={dateRange.endDate}
+                onChange={(event) => setDateRange((prev) => ({ ...prev, endDate: event.target.value }))}
+                className="h-9 rounded-xl border-white/80 bg-white/80"
+              />
+            </div>
+            <div className="flex items-end">
+              <Button
+                variant="outline"
+                onClick={() => setDateRange(getInitialDateRange())}
+                className="h-9 w-full rounded-xl border-white/80 bg-white/80 md:w-auto"
+              >
+                Tetapkan Semula
+              </Button>
+            </div>
+          </div>
+        ) : null}
+      </CardContent>
+    </GlassCard>
+  );
+};
+
+const DashboardInsightsSidebar = ({
+  healthTone,
+  healthData,
+  healthReasons,
+  healthScorePercent,
+  deadCapitalMetrics,
+  deadCapitalTone,
+  deadCapitalSegmentCount,
+  deadCapitalFilledSegments,
+  isDeadCapitalTooltipOpen,
+  setIsDeadCapitalTooltipOpen,
+  platformBarData,
+  filteredSalesCount,
+  defaultColors,
+  isDark,
+  tickColor,
+  gridColor,
+  tooltipBg,
+  tooltipBorder,
+  tooltipTextColor,
+}) => (
+  <div className="space-y-4">
+    <h2 className="px-1 text-[17px] font-semibold text-slate-900">Insights</h2>
+
+    <InsightCard
+      title="Business Health"
+      badge={<span className={cn('inline-flex rounded-full px-2 py-0.5 text-xs font-semibold', healthTone.chipClass)}>{healthData.label}</span>}
+    >
+      <div className="space-y-2">
+        <div className="flex items-end justify-between gap-2">
+          <p className="text-xl font-semibold leading-none text-slate-900">{healthScorePercent}%</p>
+          <p className="text-xs text-slate-500">Cash cover {healthData.metrics.cashBufferDays.toFixed(1)} hari</p>
+        </div>
+        <div className={cn('relative h-2 overflow-hidden rounded-full border bg-slate-100', healthTone.batteryClass)}>
+          <div
+            className={cn('absolute inset-y-0 left-0 rounded-full transition-all duration-300', healthTone.fillClass)}
+            style={{ width: `${healthScorePercent}%` }}
+          />
+        </div>
+        <p className="line-clamp-2 text-xs text-slate-500">{healthReasons[0] || 'Tiada isu utama dikesan.'}</p>
+      </div>
+    </InsightCard>
+
+    <InsightCard
+      title="Dead Capital"
+      action={
+        <div className="flex items-center gap-1.5">
+          {deadCapitalMetrics.hasActiveStock ? (
+            <span className={cn('inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold', deadCapitalTone.chipClass)}>
+              {deadCapitalTone.label}
+            </span>
+          ) : null}
+          <UiTooltip open={isDeadCapitalTooltipOpen} onOpenChange={setIsDeadCapitalTooltipOpen}>
+            <UiTooltipTrigger asChild>
+              <button
+                type="button"
+                className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition-colors hover:bg-slate-200"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setIsDeadCapitalTooltipOpen((prev) => !prev);
+                }}
+                aria-label="Apa itu Dead Capital?"
+              >
+                <Info className="h-4 w-4" />
+              </button>
+            </UiTooltipTrigger>
+            <UiTooltipContent side="top" className="max-w-[240px] text-xs leading-relaxed">
+              <p className="font-semibold text-slate-900">Apa itu Dead Capital?</p>
+              <p className="mt-1 text-slate-600">Modal barang yang tidak terjual melebihi 60 hari.</p>
+              <p className="mt-1 text-slate-600">Barang baru masuk belum dianggap tidur.</p>
+            </UiTooltipContent>
+          </UiTooltip>
+        </div>
+      }
+    >
+      <div className="space-y-2">
+        {deadCapitalMetrics.hasActiveStock ? (
+          <>
+            <p className="text-xl font-semibold leading-none text-slate-900">{deadCapitalMetrics.deadCapitalPctRounded}%</p>
+            <div className="grid grid-cols-7 gap-1.5">
+              {Array.from({ length: deadCapitalSegmentCount }).map((_, index) => (
+                <span
+                  key={`dead-capital-segment-${index}`}
+                  className={cn(
+                    'h-2 rounded-full',
+                    index < deadCapitalFilledSegments ? deadCapitalTone.fillClass : 'bg-slate-200'
+                  )}
+                />
+              ))}
+            </div>
+            <p className="text-xs text-slate-500">
+              {formatRM(deadCapitalMetrics.deadCapital)} / {formatRM(deadCapitalMetrics.totalStockCapital)}
+            </p>
+          </>
+        ) : (
+          <p className="text-xs text-slate-500">Belum ada stok aktif.</p>
+        )}
+      </div>
+    </InsightCard>
+
+    <InsightCard
+      title="Platform Jualan"
+      action={
+        <Link to="/sales" className="text-xs font-medium text-primary hover:underline">
+          Tukar ke kategori
+        </Link>
+      }
+    >
+      <div>
+        {platformBarData.length > 0 ? (
+          <ResponsiveContainer width="100%" height={170}>
+            <BarChart data={platformBarData} margin={{ top: 8, right: 8, left: -12, bottom: 4 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke={gridColor} vertical={false} />
+              <XAxis dataKey="name" stroke={tickColor} tick={{ fill: tickColor, fontSize: 11 }} />
+              <YAxis stroke={tickColor} tick={{ fill: tickColor, fontSize: 11 }} allowDecimals={false} />
+              <Tooltip
+                cursor={{ fill: isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.02)' }}
+                contentStyle={{ backgroundColor: tooltipBg, borderColor: tooltipBorder, borderRadius: '0.5rem' }}
+                itemStyle={{ color: tooltipTextColor }}
+                labelStyle={{ color: tooltipTextColor, fontWeight: 'bold' }}
+                formatter={(value) => [`${value} jualan`]}
+              />
+              <Bar dataKey="jumlah" barSize={20} radius={[5, 5, 0, 0]}>
+                {platformBarData.map((entry, index) => (
+                  <Cell key={`platform-cell-${entry.name}-${index}`} fill={defaultColors[index % defaultColors.length]} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        ) : (
+          <EmptyStateMini message={filteredSalesCount > 0 ? 'Platform belum dapat dirumuskan.' : 'Belum ada data platform dalam tempoh ini.'} />
+        )}
+      </div>
+    </InsightCard>
+  </div>
+);
+
+const DashboardOperations = ({
+  isLoadingSales,
+  recentSales,
+  getEffectiveCostPrice,
+  revenueByInvoice,
+  invoiceFinancialById,
+  channelFeeByInvoice,
+  shippingByInvoice,
+  platformBarData,
+  filteredSalesCount,
+  defaultColors,
+  isDark,
+  tickColor,
+  gridColor,
+  tooltipBg,
+  tooltipBorder,
+  tooltipTextColor,
+  realityCheckData,
+  realityStatusPill,
+  realityRevenueChipLabel,
+  realityProfitChipLabel,
+  realityInsightText,
+  realityTopReasons,
+  getRealityReasonIcon,
+  getRealityReasonRowTone,
+  getRealityReasonImpactBadge,
+  healthTone,
+  healthData,
+  healthReasons,
+  healthScorePercent,
+  deadCapitalMetrics,
+  deadCapitalTone,
+  deadCapitalSegmentCount,
+  deadCapitalFilledSegments,
+  isDeadCapitalTooltipOpen,
+  setIsDeadCapitalTooltipOpen,
+}) => (
+  <div className="grid grid-cols-1 gap-5 xl:grid-cols-3">
+    <div className="space-y-5 xl:col-span-2">
+      <GlassCard>
+        <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
+          <div>
+            <CardTitle className="text-[17px] font-semibold text-slate-900">Aktiviti</CardTitle>
+            <p className="text-xs text-slate-500">Jualan terkini</p>
+          </div>
+          <Button asChild variant="outline" size="sm" className="h-8 rounded-xl border-white/80 bg-white/80">
+            <Link to="/sales">Lihat semua</Link>
+          </Button>
+        </CardHeader>
+        <CardContent className="p-0">
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="text-left text-xs text-slate-500">
+                  <th className="p-3 font-medium">Item</th>
+                  <th className="p-3 font-medium">Tarikh</th>
+                  <th className="p-3 font-medium">Status</th>
+                  <th className="p-3 text-right font-medium">Harga</th>
+                </tr>
+              </thead>
+              <tbody>
+                {isLoadingSales ? (
+                  <tr>
+                    <td colSpan="4" className="py-8 text-center">
+                      <Loader2 className="mx-auto h-5 w-5 animate-spin" />
+                    </td>
+                  </tr>
+                ) : recentSales.length > 0 ? (
+                  recentSales.map((sale, index) => {
+                    const quantity = sale.quantity || 1;
+                    const costPrice = getEffectiveCostPrice(sale);
+                    const totalCost = costPrice * quantity;
+                    const totalRevenue = parseFloat(sale.line_total) || 0;
+                    const invoiceId = sale?.invoices?.id;
+                    const invoiceRevenue = invoiceId ? (revenueByInvoice.get(invoiceId) || 0) : 0;
+                    const invoiceAdjustment = invoiceId ? (invoiceFinancialById.get(invoiceId)?.adjustmentTotal || 0) : 0;
+                    const invoiceChannelFee = invoiceId ? (channelFeeByInvoice.get(invoiceId) || 0) : 0;
+                    const channelFeeShare = invoiceRevenue > 0 ? (totalRevenue / invoiceRevenue) * invoiceChannelFee : 0;
+                    const shippingInvoice = invoiceId ? shippingByInvoice.get(invoiceId) : null;
+                    const shippingCharged = Math.max(parseFloat(shippingInvoice?.shippingCharged) || 0, 0);
+                    const shippingCostPaid = Math.max(parseFloat(shippingInvoice?.shippingCostPaid) || 0, 0);
+                    const shippingChargedShare = invoiceRevenue > 0 ? (totalRevenue / invoiceRevenue) * shippingCharged : 0;
+                    const shippingCostShare = invoiceRevenue > 0 ? (totalRevenue / invoiceRevenue) * shippingCostPaid : 0;
+                    const shippingProfitShare = shippingChargedShare - shippingCostShare;
+                    const adjustmentShare = invoiceRevenue > 0 ? (totalRevenue / invoiceRevenue) * invoiceAdjustment : 0;
+                    const profit = totalRevenue - totalCost - channelFeeShare + shippingProfitShare - adjustmentShare;
+                    const isLoss = profit < 0;
+
+                    return (
+                      <tr key={`${sale.id}-${index}`} className="border-t">
+                        <td className="p-3 text-sm font-semibold text-foreground">
+                          {sale.is_manual ? (sale.item_name || 'Item Manual') : (sale.items?.name || 'Item Tidak Dikenali')}
+                        </td>
+                        <td className="p-3 text-sm text-muted-foreground">
+                          {new Date(sale.invoices?.invoice_date || new Date()).toLocaleDateString()}
+                        </td>
+                        <td className="p-3">
+                          <span className={cn('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium', isLoss ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700')}>
+                            {isLoss ? <XCircle className="h-3 w-3" /> : <CheckCircle className="h-3 w-3" />}
+                            {formatRM(Math.abs(profit))}
+                          </span>
+                        </td>
+                        <td className="p-3 text-right text-sm font-semibold text-foreground">{formatRM(totalRevenue)}</td>
+                      </tr>
+                    );
+                  })
+                ) : (
+                  <tr>
+                    <td colSpan="4" className="py-2">
+                      <EmptyStateMini message="Belum ada jualan dalam tempoh ini." />
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </CardContent>
+      </GlassCard>
+
+      <GlassCard>
+        <CardHeader className="pb-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <CardTitle className="text-[17px] font-semibold text-slate-900">Reality Check - Minggu Ini</CardTitle>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-500">
+                {realityCheckData.windows.thisWeek.startDate} - {realityCheckData.windows.thisWeek.endDate}
+              </span>
+              <span className={cn("inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold", realityStatusPill.className)}>
+                {realityStatusPill.label}
+              </span>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3 pt-0">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <div className="rounded-lg border border-indigo-200/60 bg-indigo-50/60 p-2.5">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-indigo-700">Revenue</p>
+              <p className="mt-0.5 text-lg font-bold text-indigo-900">RM {realityCheckData.thisWeek.revenueTotal.toFixed(2)}</p>
+              <span className={cn("mt-1 inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold", getRevenueChipTone(realityCheckData.revenueChangePct))}>
+                {realityRevenueChipLabel}
+              </span>
+            </div>
+            <div className="rounded-lg border border-emerald-200/60 bg-emerald-50/60 p-2.5">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-700">Profit</p>
+              <p className="mt-0.5 text-lg font-bold text-emerald-900">RM {realityCheckData.thisWeek.profitTotal.toFixed(2)}</p>
+              <span className={cn("mt-1 inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold", getProfitChipTone(realityCheckData.profitChangePct))}>
+                {realityProfitChipLabel}
+              </span>
+            </div>
+          </div>
+
+          {!realityCheckData.hasComparison ? (
+            <span className="inline-flex rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-xs text-slate-700">
+              Tiada data minggu lepas untuk banding
+            </span>
+          ) : null}
+
+          <div className={cn("flex items-start gap-2 rounded-lg border px-3 py-2 text-sm", getRealityGapChipTone(realityCheckData.gapIndicator.tone))}>
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <p className="leading-snug font-medium">{realityInsightText}</p>
+          </div>
+
+          <div className="space-y-1.5">
+            {realityTopReasons.slice(0, 2).map((reason) => {
+              const Icon = getRealityReasonIcon(reason.type);
+              const tone = getRealityReasonRowTone(reason.severity);
+              const impactBadge = getRealityReasonImpactBadge(reason);
+              return (
+                <div key={reason.key} className={cn("flex items-start gap-2 rounded-lg border px-2.5 py-2", tone.row)}>
+                  <span className={cn("mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md", tone.iconWrap)}>
+                    <Icon className="h-3.5 w-3.5" />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-semibold text-slate-900">{reason.label}</p>
+                    <p className="line-clamp-1 text-xs text-slate-500">{reason.explanation}</p>
+                  </div>
+                  <span className={cn("inline-flex shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-semibold", impactBadge.className)}>
+                    {impactBadge.label}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </CardContent>
+      </GlassCard>
+    </div>
+
+    <DashboardInsightsSidebar
+      healthTone={healthTone}
+      healthData={healthData}
+      healthReasons={healthReasons}
+      healthScorePercent={healthScorePercent}
+      deadCapitalMetrics={deadCapitalMetrics}
+      deadCapitalTone={deadCapitalTone}
+      deadCapitalSegmentCount={deadCapitalSegmentCount}
+      deadCapitalFilledSegments={deadCapitalFilledSegments}
+      isDeadCapitalTooltipOpen={isDeadCapitalTooltipOpen}
+      setIsDeadCapitalTooltipOpen={setIsDeadCapitalTooltipOpen}
+      platformBarData={platformBarData}
+      filteredSalesCount={filteredSalesCount}
+      defaultColors={defaultColors}
+      isDark={isDark}
+      tickColor={tickColor}
+      gridColor={gridColor}
+      tooltipBg={tooltipBg}
+      tooltipBorder={tooltipBorder}
+      tooltipTextColor={tooltipTextColor}
+    />
+  </div>
+);
+
+const Dashboard = ({ items }) => {
   const { theme } = useTheme();
   const [dateRange, setDateRange] = useState(getInitialDateRange());
+  const [isFiltersOpen, setIsFiltersOpen] = useState(false);
   const [userId, setUserId] = useState(null);
+  const [userDisplayName, setUserDisplayName] = useState('Pengguna');
   const [isDeadCapitalTooltipOpen, setIsDeadCapitalTooltipOpen] = useState(false);
 
   // Get current user ID
@@ -464,6 +931,11 @@ const Dashboard = ({ items, categories }) => {
     const getUser = async () => {
       const { data: { user } } = await supabase.auth.getUser();
       setUserId(user?.id);
+      const metadataName = user?.user_metadata?.username
+        || user?.user_metadata?.full_name
+        || user?.user_metadata?.name;
+      const emailName = user?.email ? user.email.split('@')[0] : null;
+      setUserDisplayName(metadataName || emailName || 'Pengguna');
     };
     getUser();
   }, []);
@@ -1052,19 +1524,6 @@ const Dashboard = ({ items, categories }) => {
     : 0;
   const netProfitPercentText = `${netProfitPercentage >= 0 ? 'Untung' : 'Rugi'} ${Math.abs(netProfitPercentage).toFixed(1)}%`;
 
-  const globalStats = {
-    totalItems: items.length,
-    availableItems: items.filter(item => ['tersedia', 'reserved'].includes(item.status)).length,
-    soldItems: items.filter(item => item.status === 'terjual').length,
-  };
-
-  const categoryStats = filteredSales.reduce((acc, sale) => {
-    if (getNetSoldQuantityForSale(sale) <= 0) return acc;
-    const category = sale.is_manual ? 'Manual' : (sale.items?.category || 'Lain-lain');
-    acc[category] = (acc[category] || 0) + 1;
-    return acc;
-  }, {});
-
   // Calculate platform stats from invoice platform field
   const platformStats = filteredSales.reduce((acc, sale) => {
     if (getNetSoldQuantityForSale(sale) <= 0) return acc;
@@ -1079,13 +1538,7 @@ const Dashboard = ({ items, categories }) => {
     platformBarData: Object.entries(platformStats).map(([name, value]) => ({ name, jumlah: value }))
   });
 
-  const categoryPieData = Object.entries(categoryStats).map(([name, value]) => ({ name, value }));
   const platformBarData = Object.entries(platformStats).map(([name, value]) => ({ name, jumlah: value }));
-  
-  const categoryColorMap = categories.reduce((acc, cat) => {
-    acc[cat.name] = cat.color;
-    return acc;
-  }, {});
   
   const defaultColors = ['#3b82f6', '#10b981', '#f97316', '#a855f7', '#ef4444', '#6366f1', '#f43f5e'];
 
@@ -1098,6 +1551,67 @@ const Dashboard = ({ items, categories }) => {
     })
     .slice(0, 5);
 
+  const stockSignals = useMemo(() => {
+    const now = new Date();
+    return items.reduce((acc, item) => {
+      const availableQty = getItemAvailableQuantity(item);
+      if (availableQty <= 0) return acc;
+
+      const createdDate = item?.created_at ? new Date(item.created_at) : null;
+      if (!createdDate || Number.isNaN(createdDate.getTime())) return acc;
+
+      const agingDays = Math.max(0, Math.floor((now - createdDate) / (1000 * 60 * 60 * 24)));
+      if (agingDays >= 60) acc.riskCount += 1;
+      return acc;
+    }, { riskCount: 0 });
+  }, [items]);
+
+  const hasNoSalesInRange = filteredSales.length === 0;
+
+  const heroSummaryText = useMemo(() => {
+    if (hasNoSalesInRange) {
+      return 'Tiada jualan dalam tempoh ini - cuba longgarkan tarikh atau semak stok aktif.';
+    }
+
+    if (pendingShippingCount > 0 || stockSignals.riskCount > 0) {
+      return `Anda ada ${pendingShippingCount} pesanan perlu dihantar dan ${stockSignals.riskCount} stok berisiko.`;
+    }
+
+    return `Revenue tempoh ini ${formatRM(filteredStats.totalRevenue)} dan profit ${formatRM(filteredStats.totalProfit)}.`;
+  }, [filteredStats.totalProfit, filteredStats.totalRevenue, hasNoSalesInRange, pendingShippingCount, stockSignals.riskCount]);
+
+  const priorityLine = useMemo(
+    () => `Hari ini: ${filteredStats.soldItemsCount} jualan | ${pendingShippingCount || 0} perlu pos | ${stockSignals.riskCount || 0} stok risiko`,
+    [filteredStats.soldItemsCount, pendingShippingCount, stockSignals.riskCount]
+  );
+
+  const dashboardSteps = useMemo(() => ([
+    {
+      label: 'Buat Invois',
+      description: 'Terus rekod jualan baru.',
+      to: '/invoices/create',
+      value: 'Go',
+    },
+    {
+      label: 'Semak Stok Risiko',
+      description: 'Item aging 60+ hari.',
+      to: '/inventory?filter=risk',
+      value: stockSignals.riskCount || 0,
+    },
+    {
+      label: 'Cipta Katalog',
+      description: 'Susun item untuk jualan cepat.',
+      to: '/catalogs/create',
+      value: 'Go',
+    },
+    {
+      label: 'Semak Penghantaran',
+      description: 'Lihat order yang belum dipos.',
+      to: '/invoices?status=paid&shipping_state=pending',
+      value: pendingShippingCount || 0,
+    },
+  ]), [pendingShippingCount, stockSignals.riskCount]);
+
   const isDark = theme === 'dark';
   const tickColor = isDark ? '#9ca3af' : '#6b7281';
   const gridColor = isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.05)';
@@ -1107,506 +1621,75 @@ const Dashboard = ({ items, categories }) => {
 
   return (
     <UiTooltipProvider delayDuration={120}>
-      <div className="space-y-5">
-      <h1 className="page-title">Papan Pemuka</h1>
-      
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg font-semibold">Tapis Tarikh Jualan</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="flex flex-col sm:flex-row gap-4 w-full">
-            <div className="flex-1">
-              <label className="block text-xs font-medium text-muted-foreground mb-2">Tarikh Mula</label>
-              <Input 
-                type="date" 
-                value={dateRange.startDate} 
-                onChange={(e) => setDateRange(prev => ({ ...prev, startDate: e.target.value }))} 
-                className="w-full h-10"
-              />
-            </div>
-            <div className="flex-1">
-              <label className="block text-xs font-medium text-muted-foreground mb-2">Tarikh Akhir</label>
-              <Input 
-                type="date" 
-                value={dateRange.endDate} 
-                onChange={(e) => setDateRange(prev => ({ ...prev, endDate: e.target.value }))} 
-                className="w-full h-10"
-              />
-            </div>
-            <div className="flex items-end">
-              <Button 
-                variant="outline"
-                size="default"
-                onClick={() => setDateRange(getInitialDateRange())} 
-                className="whitespace-nowrap w-full sm:w-auto h-10"
-              >
-                Tetapkan Semula
-              </Button>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-      
-      {pendingShippingCount > 0 ? (
-        <motion.div
-          initial={{ opacity: 0, y: 14 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.32 }}
-        >
-          <Card className="border-amber-400/80 bg-gradient-to-r from-amber-100 to-orange-100 shadow-md ring-1 ring-amber-300/70">
-            <CardContent className="flex flex-col gap-3 py-5 sm:flex-row sm:items-center sm:justify-between">
-              <div className="space-y-1">
-                <p className="inline-flex items-center gap-2 text-base font-bold text-amber-950 md:text-lg">
-                  <Package className="h-5 w-5" />
-                  Perlu Dihantar
-                </p>
-                <p className="text-sm font-medium text-amber-900 md:text-base">{pendingShippingCount} pesanan menunggu penghantaran</p>
-              </div>
-              <Button asChild size="sm" className="w-full bg-amber-700 text-white hover:bg-amber-800 sm:w-auto">
-                <Link to="/invoices?status=paid&shipping_state=pending">Lihat Senarai</Link>
-              </Button>
+      <div className="space-y-6">
+        <DashboardHero
+          userDisplayName={userDisplayName}
+          summaryText={heroSummaryText}
+          priorityLine={priorityLine}
+        />
+
+        <DashboardKpiGrid
+          filteredStats={filteredStats}
+          netProfitPercentText={netProfitPercentText}
+          businessWalletBalance={businessWalletBalance}
+          totalUnitStock={totalUnitStock}
+          soldUnitMovementPercent={soldUnitMovementPercent}
+        />
+
+        {hasNoSalesInRange ? (
+          <GlassCard className="border-indigo-100/80">
+            <CardContent className="p-2">
+              <EmptyStateMini message="Tiada data untuk tempoh ini. Cuba longgarkan tarikh atau tambah jualan pertama." />
             </CardContent>
-          </Card>
-        </motion.div>
-      ) : null}
+          </GlassCard>
+        ) : null}
 
-      <section className="space-y-2">
-        <h2 className="px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Performance</h2>
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-          <StatCard
-            title="Jualan Barang"
-            value={`RM ${filteredStats.totalRevenue.toFixed(2)}`}
-            icon={<Wallet />}
-            subtext={`Daripada ${filteredStats.soldItemsCount} jualan`}
-            delay={0.2}
-            tone="emerald"
-            size="hero"
-          />
-          <StatCard
-            title="Untung Sebenar"
-            value={`RM ${filteredStats.totalProfit.toFixed(2)}`}
-            icon={<TrendingUp />}
-            subtext={netProfitPercentText}
-            delay={0.25}
-            isHighlighted={true}
-            tone="lime"
-            size="hero"
-            helperText="Untung selepas semua kos termasuk caj platform dan penghantaran."
-          />
-          <StatCard
-            title="Baki Duit Semasa"
-            value={`RM ${parseFloat(businessWalletBalance?.balance || 0).toFixed(2)}`}
-            icon={<Wallet />}
-            subtext={businessWalletBalance?.name ? `${businessWalletBalance.name} (live)` : 'Belum ada wallet Business'}
-            delay={0.3}
-            tone="indigo"
-            size="hero"
-          />
-        </div>
-      </section>
+        <DashboardNextSteps steps={dashboardSteps} />
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <section className="space-y-2 lg:col-span-2">
-          <h2 className="px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Operations</h2>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <StatCard
-              title="Unit Terjual"
-              value={filteredStats.totalQuantitySold}
-              icon={<CheckCircle />}
-              subtext={`${filteredStats.totalQuantitySold} / ${totalUnitStock} unit`}
-              subtextSecondary={`${soldUnitMovementPercent.toFixed(1)}% stok telah bergerak`}
-              delay={0.42}
-              tone="amber"
-              size="hero"
-            />
-            <StatCard
-              title="Jumlah Item"
-              value={globalStats.totalItems}
-              icon={<Package />}
-              subtext={`${globalStats.availableItems} tersedia`}
-              delay={0.46}
-              tone="sky"
-              size="hero"
-            />
-          </div>
-        </section>
+        <DashboardFiltersBar
+          dateRange={dateRange}
+          setDateRange={setDateRange}
+          isFiltersOpen={isFiltersOpen}
+          setIsFiltersOpen={setIsFiltersOpen}
+        />
 
-        <section className="space-y-2">
-          <h2 className="px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Cash</h2>
-          <div className="grid grid-cols-1 gap-4">
-            <StatCard
-              title="Kos Operasi"
-              value={`RM ${filteredStats.totalExpenses.toFixed(2)}`}
-              icon={<TrendingDown />}
-              subtext="Perbelanjaan perniagaan"
-              delay={0.5}
-              tone="fuchsia"
-            />
-          </div>
-        </section>
-      </div>
-
-      <section className="space-y-2">
-        <h2 className="px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Insights</h2>
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4">
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.34 }}
-          >
-            <Card className="rounded-3xl border border-slate-200/80 bg-card shadow-sm">
-              <CardHeader className="pb-3">
-                <div className="flex items-center justify-between gap-3">
-                  <CardTitle className="text-base font-semibold">Business Health</CardTitle>
-                  <span className={cn("inline-flex rounded-full px-2.5 py-1 text-xs font-semibold", healthTone.chipClass)}>
-                    {healthData.label}
-                  </span>
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-3 pt-0">
-                <div className="flex items-end justify-between gap-3">
-                  <p className="text-2xl font-bold leading-none">{healthScorePercent}%</p>
-                  <p className="text-sm font-medium text-muted-foreground">
-                    Cash cover {healthData.metrics.cashBufferDays.toFixed(1)} hari
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className={cn("relative h-3 flex-1 overflow-hidden rounded-full border bg-muted", healthTone.batteryClass)}>
-                    <div
-                      className={cn("absolute inset-y-0 left-0 rounded-full transition-all duration-300", healthTone.fillClass)}
-                      style={{ width: `${healthScorePercent}%` }}
-                    />
-                  </div>
-                  <span className={cn("h-2 w-1.5 rounded-sm border", healthTone.batteryClass)} />
-                </div>
-                <div className="space-y-1.5">
-                  <p className="text-sm font-semibold text-muted-foreground">Masalah utama:</p>
-                  {healthReasons.length > 0 ? (
-                    healthReasons.map((reason, index) => (
-                      <p key={`health-reason-${index}`} className="text-sm text-foreground">
-                        {`\u2022 ${reason}`}
-                      </p>
-                    ))
-                  ) : (
-                    <p className="text-sm text-muted-foreground">Tiada isu utama dikesan.</p>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-          </motion.div>
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.38 }}
-          >
-            <Card className="rounded-3xl border border-slate-200/80 bg-card shadow-sm">
-              <CardHeader className="pb-2">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-1.5">
-                    <CardTitle className="text-base font-semibold">Dead Capital</CardTitle>
-                    <UiTooltip open={isDeadCapitalTooltipOpen} onOpenChange={setIsDeadCapitalTooltipOpen}>
-                      <UiTooltipTrigger asChild>
-                        <button
-                          type="button"
-                          className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition-colors hover:bg-slate-200"
-                          onClick={(event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            setIsDeadCapitalTooltipOpen((prev) => !prev);
-                          }}
-                          aria-label="Apa itu Dead Capital?"
-                        >
-                          <Info className="h-5 w-5" />
-                        </button>
-                      </UiTooltipTrigger>
-                      <UiTooltipContent side="top" className="max-w-[240px] text-xs leading-relaxed">
-                        <p className="font-semibold text-foreground">Apa itu Dead Capital?</p>
-                        <p className="mt-1 text-muted-foreground">
-                          Dead Capital ialah modal barang yang tidak terjual melebihi 60 hari.
-                        </p>
-                        <p className="mt-1 text-muted-foreground">
-                          Barang yang baru masuk atau masih aktif dijual belum dianggap "tidur".
-                        </p>
-                        <p className="mt-1 text-muted-foreground">
-                          Ia akan mula dikira selepas 60 hari tanpa jualan.
-                        </p>
-                      </UiTooltipContent>
-                    </UiTooltip>
-                  </div>
-                  {deadCapitalMetrics.hasActiveStock ? (
-                    <span className={cn("inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold", deadCapitalTone.chipClass)}>
-                      {deadCapitalTone.label}
-                    </span>
-                  ) : null}
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-3 pt-0">
-                {deadCapitalMetrics.hasActiveStock ? (
-                  <>
-                    <div className="flex items-baseline gap-1.5">
-                      <p className="text-2xl font-bold leading-none text-foreground">
-                        {deadCapitalMetrics.deadCapitalPctRounded}%
-                      </p>
-                      <p className="text-sm font-medium text-muted-foreground">modal tidur</p>
-                    </div>
-                    <div className="space-y-1.5">
-                      <div className="rounded-full border border-slate-200 bg-slate-50 p-1">
-                        <div className="grid grid-cols-7 gap-2">
-                          {Array.from({ length: deadCapitalSegmentCount }).map((_, index) => (
-                            <span
-                              key={`dead-capital-segment-${index}`}
-                              className={cn(
-                                "h-3 rounded-full transition-colors duration-300",
-                                index < deadCapitalFilledSegments ? deadCapitalTone.fillClass : "bg-slate-200"
-                              )}
-                            />
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">
-                        Target sihat: &lt;10%
-                      </span>
-                      <span className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">
-                        RM {deadCapitalMetrics.deadCapital.toFixed(2)} daripada RM {deadCapitalMetrics.totalStockCapital.toFixed(2)}
-                      </span>
-                    </div>
-                  </>
-                ) : (
-                  <div className="space-y-1">
-                    <p className="text-base font-semibold text-muted-foreground">Tiada stok aktif</p>
-                    <p className="text-sm text-muted-foreground">Dead capital akan muncul bila ada stok tersedia.</p>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </motion.div>
-        </div>
-      </section>
-
-      <motion.div
-        initial={{ opacity: 0, y: 14 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.34 }}
-      >
-        <Card className="overflow-hidden border-slate-200/80 bg-card shadow-sm">
-          <CardHeader className="p-4 pb-2">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <CardTitle className="text-lg font-semibold">Reality Check - Minggu Ini</CardTitle>
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-muted-foreground">
-                  {realityCheckData.windows.thisWeek.startDate} - {realityCheckData.windows.thisWeek.endDate}
-                </span>
-                <span className={cn("inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold", realityStatusPill.className)}>
-                  {realityStatusPill.label}
-                </span>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-3 p-4 pt-0">
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              <div className="rounded-xl border border-indigo-200/70 bg-indigo-50/60 p-3">
-                <p className="text-xs font-semibold uppercase tracking-wide text-indigo-700">Revenue</p>
-                <p className="mt-1 text-2xl font-bold leading-none text-indigo-900">RM {realityCheckData.thisWeek.revenueTotal.toFixed(2)}</p>
-                <span className={cn("mt-2 inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold", getRevenueChipTone(realityCheckData.revenueChangePct))}>
-                  {realityRevenueChipLabel}
-                </span>
-              </div>
-              <div className="rounded-xl border border-emerald-200/70 bg-emerald-50/60 p-3">
-                <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">Profit</p>
-                <p className="mt-1 text-2xl font-bold leading-none text-emerald-900">RM {realityCheckData.thisWeek.profitTotal.toFixed(2)}</p>
-                <span className={cn("mt-2 inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold", getProfitChipTone(realityCheckData.profitChangePct))}>
-                  {realityProfitChipLabel}
-                </span>
-              </div>
-            </div>
-
-            <div className={cn("flex items-start gap-2 rounded-lg border px-3 py-2 text-sm", getRealityGapChipTone(realityCheckData.gapIndicator.tone))}>
-              <AlertTriangle className="h-4 w-4 shrink-0" />
-              <p className="min-w-0 whitespace-normal leading-snug font-medium">{realityInsightText}</p>
-            </div>
-
-            <div className="h-px w-full bg-slate-200" />
-
-            <div className="space-y-2">
-              {realityTopReasons.length > 0 ? (
-                <div className="space-y-2">
-                  {realityTopReasons.map((reason) => {
-                    const Icon = getRealityReasonIcon(reason.type);
-                    const tone = getRealityReasonRowTone(reason.severity);
-                    const impactBadge = getRealityReasonImpactBadge(reason);
-                    return (
-                      <div key={reason.key} className={cn("flex items-start gap-2.5 rounded-lg border px-2.5 py-2", tone.row)}>
-                        <span className={cn("mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md", tone.iconWrap)}>
-                          <Icon className="h-3.5 w-3.5" />
-                        </span>
-                        <div className="min-w-0 flex-1 space-y-0.5">
-                          <p className="text-sm font-semibold leading-tight text-foreground">{reason.label}</p>
-                          <p className="text-sm leading-snug text-muted-foreground sm:truncate">{reason.explanation}</p>
-                        </div>
-                        <span className={cn("inline-flex shrink-0 rounded-full border px-2 py-0.5 text-xs font-semibold", impactBadge.className)}>
-                          {impactBadge.label}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <p className="text-sm text-muted-foreground">Tiada kebocoran margin utama dikesan minggu ini.</p>
-              )}
-            </div>
-          </CardContent>
-        </Card>
-      </motion.div>
-      <Card>
-        <CardHeader className="flex flex-col items-start gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="w-full">
-            <CardTitle className="text-lg font-semibold">Jualan Terkini</CardTitle>
-            <p className="text-sm text-muted-foreground">Senarai Jualan Semua Platform</p>
-          </div>
-          {filteredSales.length > 5 && (
-            <div className="w-full sm:w-auto flex justify-start sm:justify-end">
-              <Button asChild variant="secondary" size="default" className="h-10 gap-2 whitespace-nowrap bg-foreground text-background hover:bg-foreground/90">
-                <Link to="/sales">Lihat Semua</Link>
-              </Button>
-            </div>
-          )}
-        </CardHeader>
-        <CardContent className="p-0">
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="text-left text-sm text-muted-foreground">
-                  <th className="p-4 font-medium">Item</th>
-                  <th className="p-4 font-medium">Tarikh</th>
-                  <th className="p-4 font-medium">Status</th>
-                  <th className="p-4 font-medium text-right">Harga Jualan</th>
-                </tr>
-              </thead>
-              <tbody>
-                {isLoadingSales ? (
-                  <tr>
-                    <td colSpan="4" className="text-center py-8">
-                      <Loader2 className="w-6 h-6 animate-spin mx-auto" />
-                    </td>
-                  </tr>
-                ) : recentSales.length > 0 ? (
-                  recentSales.map((sale, index) => {
-                    const quantity = sale.quantity || 1;
-                    const costPrice = getEffectiveCostPrice(sale);
-                    const totalCost = costPrice * quantity;
-                    const totalRevenue = parseFloat(sale.line_total) || 0;
-                    const invoiceId = sale?.invoices?.id;
-                    const invoiceRevenue = invoiceId ? (revenueByInvoice.get(invoiceId) || 0) : 0;
-                    const invoiceAdjustment = invoiceId
-                      ? (invoiceFinancialById.get(invoiceId)?.adjustmentTotal || 0)
-                      : 0;
-                    const invoiceChannelFee = invoiceId ? (channelFeeByInvoice.get(invoiceId) || 0) : 0;
-                    const channelFeeShare = invoiceRevenue > 0
-                      ? (totalRevenue / invoiceRevenue) * invoiceChannelFee
-                      : 0;
-                    const shippingInvoice = invoiceId ? shippingByInvoice.get(invoiceId) : null;
-                    const shippingCharged = Math.max(parseFloat(shippingInvoice?.shippingCharged) || 0, 0);
-                    const shippingCostPaid = Math.max(parseFloat(shippingInvoice?.shippingCostPaid) || 0, 0);
-                    const shippingChargedShare = invoiceRevenue > 0
-                      ? (totalRevenue / invoiceRevenue) * shippingCharged
-                      : 0;
-                    const shippingCostShare = invoiceRevenue > 0
-                      ? (totalRevenue / invoiceRevenue) * shippingCostPaid
-                      : 0;
-                    const shippingProfitShare = shippingChargedShare - shippingCostShare;
-                    const adjustmentShare = invoiceRevenue > 0
-                      ? (totalRevenue / invoiceRevenue) * invoiceAdjustment
-                      : 0;
-                    const profit = totalRevenue - totalCost - channelFeeShare + shippingProfitShare - adjustmentShare;
-                    const isLoss = profit < 0;
-                    return (
-                      <tr key={`${sale.id}-${index}`} className="border-t relative group overflow-hidden">
-                        <td className="p-4 font-semibold text-foreground flex items-center gap-3">
-                          <div className="absolute left-0 top-0 h-full w-1 bg-primary scale-y-0 group-hover:scale-y-100 transition-transform origin-center duration-300" />
-                          <div className="transition-transform duration-300 group-hover:translate-x-2">
-                            {sale.is_manual ? (sale.item_name || 'Item Manual') : (sale.items?.name || 'Item Tidak Dikenali')}
-                          </div>
-                        </td>
-                        <td className="p-4 text-muted-foreground">{new Date(sale.invoices?.invoice_date || new Date()).toLocaleDateString()}</td>
-                        <td className="p-4">
-                          <div className={cn("inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium", isLoss ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700")}>
-                            {isLoss ? <XCircle className="w-3 h-3" /> : <CheckCircle className="w-3 h-3" />}
-                            RM {Math.abs(profit).toFixed(2)}
-                          </div>
-                        </td>
-                        <td className="p-4 text-right font-semibold text-foreground">RM{totalRevenue.toFixed(2)}</td>
-                      </tr>
-                    );
-                  })
-                ) : (
-                  <tr>
-                    <td colSpan="4" className="text-muted-foreground text-center py-8">Tiada jualan lagi.</td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </CardContent>
-      </Card>
-
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6"> {/* Corrected for side-by-side on lg screens */}
-        <motion.div className="lg:col-span-2" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.7 }}>
-          <Card className="h-full flex flex-col">
-            <CardHeader>
-              <CardTitle className="text-lg font-semibold">Pecahan Kategori</CardTitle>
-            </CardHeader>
-            <CardContent className="flex-1 flex items-center justify-center">
-              {categoryPieData.length > 0 ? (
-                <ResponsiveContainer width="100%" height={250}>
-                  <PieChart>
-                    <Pie data={categoryPieData} cx="50%" cy="50%" innerRadius={60} outerRadius={90} fill="#8884d8" paddingAngle={2} dataKey="value" nameKey="name">
-                      {categoryPieData.map((entry, index) => <Cell key={`cell-${index}`} fill={categoryColorMap[entry.name] || defaultColors[index % defaultColors.length]} />)}
-                    </Pie>
-                    <Tooltip 
-                      contentStyle={{ backgroundColor: tooltipBg, borderColor: tooltipBorder, borderRadius: '0.5rem' }} 
-                      itemStyle={{ color: tooltipTextColor }}
-                      labelStyle={{ color: tooltipTextColor, fontWeight: 'bold' }}
-                      formatter={(value, name) => [`${value} item`, name]} 
-                    />
-                    <Legend iconType="circle" wrapperStyle={{ color: tickColor, fontSize: '12px' }} />
-                  </PieChart>
-                </ResponsiveContainer>
-              ) : <p className="text-muted-foreground text-center py-4">Tiada data.</p>}
-            </CardContent>
-          </Card>
-        </motion.div>
-        <motion.div className="lg:col-span-3" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.8 }}>
-          <Card className="h-full flex flex-col">
-            <CardHeader>
-              <CardTitle className="text-lg font-semibold">Platform Jualan Teratas</CardTitle>
-            </CardHeader>
-            <CardContent className="flex-1 flex items-center justify-center">
-              {platformBarData.length > 0 ? (
-                <ResponsiveContainer width="100%" height={250}>
-                   <BarChart data={platformBarData} margin={{ top: 5, right: 20, left: -10, bottom: 5 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke={gridColor} vertical={false} />
-                    <XAxis dataKey="name" stroke={tickColor} tick={{ fill: tickColor, fontSize: 12 }} />
-                    <YAxis stroke={tickColor} tick={{ fill: tickColor, fontSize: 12 }} allowDecimals={false} />
-                    <Tooltip 
-                      cursor={{ fill: isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.02)' }}
-                      contentStyle={{ backgroundColor: tooltipBg, borderColor: tooltipBorder, borderRadius: '0.5rem' }}
-                      itemStyle={{ color: tooltipTextColor }}
-                      labelStyle={{ color: tooltipTextColor, fontWeight: 'bold' }}
-                      formatter={(value) => [`${value} jualan`]}
-                    />
-                    <Bar dataKey="jumlah" barSize={30} radius={[4, 4, 0, 0]}>
-                       {platformBarData.map((entry, index) => <Cell key={`cell-${index}`} fill={defaultColors[index % defaultColors.length]} />)}
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
-              ) : <p className="text-muted-foreground text-center py-4">Tiada data platform untuk dipaparkan.</p>}
-            </CardContent>
-          </Card>
-        </motion.div>
-      </div>
+        <DashboardOperations
+          isLoadingSales={isLoadingSales}
+          recentSales={recentSales}
+          getEffectiveCostPrice={getEffectiveCostPrice}
+          revenueByInvoice={revenueByInvoice}
+          invoiceFinancialById={invoiceFinancialById}
+          channelFeeByInvoice={channelFeeByInvoice}
+          shippingByInvoice={shippingByInvoice}
+          platformBarData={platformBarData}
+          filteredSalesCount={filteredSales.length}
+          defaultColors={defaultColors}
+          isDark={isDark}
+          tickColor={tickColor}
+          gridColor={gridColor}
+          tooltipBg={tooltipBg}
+          tooltipBorder={tooltipBorder}
+          tooltipTextColor={tooltipTextColor}
+          realityCheckData={realityCheckData}
+          realityStatusPill={realityStatusPill}
+          realityRevenueChipLabel={realityRevenueChipLabel}
+          realityProfitChipLabel={realityProfitChipLabel}
+          realityInsightText={realityInsightText}
+          realityTopReasons={realityTopReasons}
+          getRealityReasonIcon={getRealityReasonIcon}
+          getRealityReasonRowTone={getRealityReasonRowTone}
+          getRealityReasonImpactBadge={getRealityReasonImpactBadge}
+          healthTone={healthTone}
+          healthData={healthData}
+          healthReasons={healthReasons}
+          healthScorePercent={healthScorePercent}
+          deadCapitalMetrics={deadCapitalMetrics}
+          deadCapitalTone={deadCapitalTone}
+          deadCapitalSegmentCount={deadCapitalSegmentCount}
+          deadCapitalFilledSegments={deadCapitalFilledSegments}
+          isDeadCapitalTooltipOpen={isDeadCapitalTooltipOpen}
+          setIsDeadCapitalTooltipOpen={setIsDeadCapitalTooltipOpen}
+        />
       </div>
     </UiTooltipProvider>
   );
