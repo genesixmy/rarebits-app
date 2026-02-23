@@ -4,7 +4,6 @@ import { useQuery } from '@tanstack/react-query';
 import { useInvoices } from '@/hooks/useInvoices';
 import { supabase } from '@/lib/customSupabaseClient';
 import { formatCurrency } from '@/lib/utils';
-import { isDeliveryRequiredForInvoice } from '@/lib/shipping';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ChevronRight, Plus, Search, ChevronDown, AlertCircle } from 'lucide-react';
@@ -12,13 +11,27 @@ import { format } from 'date-fns';
 import { ms } from 'date-fns/locale';
 
 const ALLOWED_STATUS_FILTERS = new Set(['draft', 'finalized', 'paid', 'partially_returned', 'returned', 'cancelled']);
-const EMPTY_SHIPMENT_STATUS_MAP = new Map();
+const EMPTY_SHIPMENT_META_MAP = new Map();
+const COMPLETED_DELIVERY_STATUSES = new Set(['delivered', 'completed']);
 
 const normalizeStatusFilter = (value) => (ALLOWED_STATUS_FILTERS.has(value) ? value : '');
 const normalizeShippingStateFilter = (value) => (value === 'pending' ? 'pending' : '');
+const normalizeRangeFilter = (value) => (value === 'this_week' ? 'this_week' : '');
+const normalizeHasRefundFilter = (value) => (value === '1' ? '1' : '');
+const normalizeText = (value) => (typeof value === 'string' ? value.trim() : '');
+const normalizeDeliveryStatus = (value) => normalizeText(value).toLowerCase();
 const toTimestamp = (value) => {
   const timestamp = new Date(value).getTime();
   return Number.isFinite(timestamp) ? timestamp : 0;
+};
+
+const getCurrentWeekDateWindow = () => {
+  const end = new Date();
+  end.setHours(23, 59, 59, 999);
+  const start = new Date(end);
+  start.setDate(end.getDate() - 6);
+  start.setHours(0, 0, 0, 0);
+  return { start, end };
 };
 
 const getDisplayInvoiceTotal = (invoice) => {
@@ -39,6 +52,16 @@ const getDisplayInvoiceTotal = (invoice) => {
   return Math.max(totalAmount - adjustmentTotal - returnedTotal, 0);
 };
 
+const isPendingShippingInvoice = (invoice, shipmentMetaById) => {
+  if (!Boolean(invoice?.shipping_required)) return false;
+
+  const shipmentMeta = invoice?.shipment_id ? shipmentMetaById.get(invoice.shipment_id) : null;
+  const trackingNo = normalizeText(shipmentMeta?.trackingNo);
+  const deliveryStatus = normalizeDeliveryStatus(shipmentMeta?.deliveryStatus);
+
+  return trackingNo.length === 0 && !COMPLETED_DELIVERY_STATUSES.has(deliveryStatus);
+};
+
 const InvoiceListPage = () => {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -49,6 +72,9 @@ const InvoiceListPage = () => {
   const [showStatusDropdown, setShowStatusDropdown] = useState(false);
   const statusFilter = normalizeStatusFilter(searchParams.get('status'));
   const shippingStateFilter = normalizeShippingStateFilter(searchParams.get('shipping_state'));
+  const rangeFilter = normalizeRangeFilter(searchParams.get('range'));
+  const hasRefundFilter = normalizeHasRefundFilter(searchParams.get('has_refund'));
+  const thisWeekWindow = useMemo(() => getCurrentWeekDateWindow(), []);
 
   // Get current user
   const { data: authData } = useQuery({
@@ -71,20 +97,28 @@ const InvoiceListPage = () => {
     [invoices]
   );
 
-  const { data: shipmentStatusById = EMPTY_SHIPMENT_STATUS_MAP, isLoading: isLoadingShipmentStatuses } = useQuery({
+  const { data: shipmentMetaById = EMPTY_SHIPMENT_META_MAP, isLoading: isLoadingShipmentMeta } = useQuery({
     queryKey: ['invoice-list-shipment-statuses', userId, shipmentIds],
     queryFn: async () => {
       if (!userId || shipmentIds.length === 0) return new Map();
 
       const { data, error: shipmentError } = await supabase
         .from('shipments')
-        .select('id, ship_status')
+        .select('id, tracking_no, ship_status')
         .eq('user_id', userId)
         .in('id', shipmentIds);
 
       if (shipmentError) throw shipmentError;
 
-      return new Map((data || []).map((shipment) => [shipment.id, shipment.ship_status]));
+      return new Map(
+        (data || []).map((shipment) => [
+          shipment.id,
+          {
+            trackingNo: shipment.tracking_no || '',
+            deliveryStatus: shipment.ship_status || '',
+          },
+        ])
+      );
     },
     enabled: !!userId && shippingStateFilter === 'pending' && shipmentIds.length > 0,
     staleTime: 30 * 1000,
@@ -122,21 +156,25 @@ const InvoiceListPage = () => {
 
       const invoiceDate = new Date(invoice.invoice_date);
       const matchesDateRange =
-        (!dateRange.start || invoiceDate >= new Date(dateRange.start)) &&
-        (!dateRange.end || invoiceDate <= new Date(dateRange.end));
+        rangeFilter === 'this_week'
+          ? (invoiceDate >= thisWeekWindow.start && invoiceDate <= thisWeekWindow.end)
+          : (
+            (!dateRange.start || invoiceDate >= new Date(dateRange.start)) &&
+            (!dateRange.end || invoiceDate <= new Date(dateRange.end))
+          );
+
+      const adjustmentTotal = parseFloat(invoice?.adjustment_total) || 0;
+      const returnedTotal = parseFloat(invoice?.returned_total) || 0;
+      const matchesRefundFilter = hasRefundFilter !== '1'
+        ? true
+        : (adjustmentTotal > 0 || returnedTotal > 0);
 
       const matchesShippingState =
         shippingStateFilter !== 'pending'
           ? true
-          : (() => {
-              if (invoice.status !== 'paid') return false;
-              if (!isDeliveryRequiredForInvoice(invoice)) return false;
-              if (!invoice.shipment_id) return true;
-              const shipStatus = shipmentStatusById.get(invoice.shipment_id);
-              return !shipStatus || shipStatus === 'pending';
-            })();
+          : isPendingShippingInvoice(invoice, shipmentMetaById);
 
-      return matchesSearch && matchesStatus && matchesDateRange && matchesShippingState;
+      return matchesSearch && matchesStatus && matchesDateRange && matchesShippingState && matchesRefundFilter;
     });
 
     // Sort
@@ -166,7 +204,22 @@ const InvoiceListPage = () => {
     });
 
     return filtered;
-  }, [invoices, searchTerm, statusFilter, sortBy, dateRange, shippingStateFilter, shipmentStatusById]);
+  }, [
+    invoices,
+    searchTerm,
+    statusFilter,
+    sortBy,
+    dateRange,
+    shippingStateFilter,
+    shipmentMetaById,
+    rangeFilter,
+    hasRefundFilter,
+    thisWeekWindow,
+  ]);
+
+  const clearShippingStateFilter = () => {
+    updateUrlFilters({ nextStatus: statusFilter, nextShippingState: '' });
+  };
 
   const handleCreateInvoice = () => {
     navigate('/invoices/create');
@@ -190,7 +243,7 @@ const InvoiceListPage = () => {
 
   if (
     isLoading ||
-    (shippingStateFilter === 'pending' && shipmentIds.length > 0 && isLoadingShipmentStatuses)
+    (shippingStateFilter === 'pending' && shipmentIds.length > 0 && isLoadingShipmentMeta)
   ) {
     return (
       <div className="p-6">
@@ -215,6 +268,22 @@ const InvoiceListPage = () => {
           <span>Buat Invois</span>
         </Button>
       </div>
+
+      {shippingStateFilter === 'pending' && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="inline-flex items-center rounded-full border border-amber-300 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800">
+            Penghantaran: Pending
+          </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-xs text-amber-800 hover:bg-amber-100 hover:text-amber-900"
+            onClick={clearShippingStateFilter}
+          >
+            Clear
+          </Button>
+        </div>
+      )}
 
       {/* Filters */}
       <div className="space-y-4 rounded-lg border bg-white p-4">
@@ -354,21 +423,29 @@ const InvoiceListPage = () => {
           </Button>
         </div>
 
-        {shippingStateFilter === 'pending' && (
-          <div className="flex flex-col gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
-            <p className="text-xs text-amber-800">
-              Penapis aktif: invois dibayar yang masih menunggu penghantaran.
+        {(rangeFilter === 'this_week' || hasRefundFilter === '1') && (
+          <div className="flex flex-col gap-2 rounded-md border border-indigo-200 bg-indigo-50 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-xs text-indigo-800">
+              Penapis aktif:
+              {rangeFilter === 'this_week' ? ' Minggu ini.' : ''}
+              {hasRefundFilter === '1' ? ' Ada refund/adjustment.' : ''}
             </p>
             <Button
-              variant="ghost"
+              variant="outline"
               size="sm"
-              className="h-8 px-2 text-amber-800 hover:bg-amber-100 hover:text-amber-900"
-              onClick={() => updateUrlFilters({ nextStatus: statusFilter, nextShippingState: '' })}
+              className="h-8 border-indigo-300 bg-white text-indigo-700 hover:bg-indigo-100"
+              onClick={() => {
+                const nextParams = new URLSearchParams(searchParams);
+                nextParams.delete('range');
+                nextParams.delete('has_refund');
+                setSearchParams(nextParams, { replace: true });
+              }}
             >
-              Buang Penapis Penghantaran
+              Buang Penapis Ini
             </Button>
           </div>
         )}
+
       </div>
 
       {/* Results Info */}
@@ -379,7 +456,11 @@ const InvoiceListPage = () => {
       {/* Invoices List */}
       {filteredInvoices.length === 0 ? (
         <div className="rounded-lg border border-dashed bg-white p-8 text-center">
-          <p className="mb-4 text-gray-600">Tiada invois ditemui</p>
+          <p className="mb-4 text-gray-600">
+            {shippingStateFilter === 'pending'
+              ? 'Tiada invois yang perlu dipos untuk tempoh ini.'
+              : 'Tiada invois ditemui'}
+          </p>
           <Button 
             onClick={handleCreateInvoice} 
             variant="default"

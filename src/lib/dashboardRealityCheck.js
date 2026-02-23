@@ -46,6 +46,13 @@ const parseInvoiceDate = (invoiceDate) => {
   return startOfLocalDay(parsed);
 };
 
+const parseItemDate = (dateValue) => {
+  if (!dateValue) return null;
+  const parsed = new Date(dateValue);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return startOfLocalDay(parsed);
+};
+
 const isDateInWindow = (dateValue, window) => (
   dateValue >= window.start && dateValue <= window.end
 );
@@ -119,38 +126,7 @@ const getPctChange = (currentValue, previousValue) => {
 };
 
 const formatRM = (amount) => `RM${toNonNegativeNumber(amount, 0).toFixed(2)}`;
-
-const resolveSeverity = (impactAmount, revenueBase) => {
-  const impact = toNonNegativeNumber(impactAmount, 0);
-  const denominator = Math.max(toNonNegativeNumber(revenueBase, 0), 1);
-  const ratio = impact / denominator;
-
-  if (ratio >= 0.2 || impact >= 200) return 'danger';
-  if (ratio >= 0.08 || impact >= 80) return 'warn';
-  return 'info';
-};
-
-const createReason = ({
-  key,
-  type,
-  label,
-  deltaAmount = null,
-  impactAmount = 0,
-  explanation,
-  effect,
-  revenueBase = 0,
-}) => ({
-  key,
-  type,
-  label,
-  delta_amount: deltaAmount,
-  deltaAmount,
-  impact_amount: impactAmount,
-  impactAmount,
-  explanation,
-  effect,
-  severity: resolveSeverity(impactAmount, revenueBase),
-});
+const formatPct = (value) => `${Math.abs(Number.parseFloat(value) || 0).toFixed(1)}%`;
 
 const aggregateWindowMetrics = (rows, window) => {
   const selectedRows = rows.filter((row) => isDateInWindow(row.invoiceDateObj, window));
@@ -236,6 +212,9 @@ const aggregateWindowMetrics = (rows, window) => {
   const shippingProfitTotal = shippingChargedTotal - shippingCostTotal;
   const profitTotal = (itemRevenueTotal - costTotal - platformFeeTotal) + shippingProfitTotal - adjustmentTotal;
   const revenueTotal = (itemRevenueTotal + shippingChargedTotal) - adjustmentTotal;
+  const shippingCoverageRatio = shippingChargedTotal > 0
+    ? (shippingCostTotal / shippingChargedTotal)
+    : null;
 
   return {
     revenueTotal,
@@ -247,6 +226,7 @@ const aggregateWindowMetrics = (rows, window) => {
     shippingCostTotal,
     shippingLossTotal,
     shippingProfitTotal,
+    shippingCoverageRatio,
     adjustmentTotal,
     returnedTotal,
     marginPct: revenueTotal > 0 ? (profitTotal / revenueTotal) * 100 : 0,
@@ -255,184 +235,210 @@ const aggregateWindowMetrics = (rows, window) => {
   };
 };
 
-const buildLeakReasons = ({ thisWeek, prevWeek, hasPreviousData }) => {
-  const revenueBase = Math.max(thisWeek.revenueTotal, 1);
-  const deltaShippingLoss = thisWeek.shippingLossTotal - prevWeek.shippingLossTotal;
-  const deltaShippingCost = thisWeek.shippingCostTotal - prevWeek.shippingCostTotal;
-  const deltaPlatformFee = thisWeek.platformFeeTotal - prevWeek.platformFeeTotal;
-  const deltaCostTotal = thisWeek.costTotal - prevWeek.costTotal;
-  const deltaAdjustmentTotal = thisWeek.adjustmentTotal - prevWeek.adjustmentTotal;
-  const deltaReturnedTotal = thisWeek.returnedTotal - prevWeek.returnedTotal;
-  const reasons = [];
-
-  if (hasPreviousData) {
-    if (deltaShippingLoss > 0 || (thisWeek.shippingLossTotal > 0 && prevWeek.shippingLossTotal === 0)) {
-      const lossDelta = Math.max(deltaShippingLoss, 0);
-      reasons.push(createReason({
-        key: 'shipping_loss',
-        type: 'shipping',
-        label: 'Shipping rugi',
-        deltaAmount: lossDelta > 0 ? lossDelta : null,
-        impactAmount: lossDelta > 0 ? lossDelta : thisWeek.shippingLossTotal,
-        explanation: `Courier minggu ini ${formatRM(thisWeek.shippingCostTotal)} tetapi caj pos dikutip ${formatRM(thisWeek.shippingChargedTotal)}.`,
-        effect: `Kesan: -${formatRM(thisWeek.shippingLossTotal)} pada profit minggu ini.`,
-        revenueBase,
-      }));
-    } else if (deltaShippingCost > 0) {
-      reasons.push(createReason({
-        key: 'shipping_cost',
-        type: 'shipping',
-        label: 'Kos shipping meningkat',
-        deltaAmount: deltaShippingCost,
-        impactAmount: deltaShippingCost,
-        explanation: `Kos courier naik ${formatRM(deltaShippingCost)} berbanding minggu lepas.`,
-        effect: 'Kesan: margin tertekan jika caj pos tidak naik seiring.',
-        revenueBase,
-      }));
-    }
-
-    if (deltaPlatformFee > 0) {
-      reasons.push(createReason({
-        key: 'platform_fee',
-        type: 'platform',
-        label: 'Fi platform meningkat',
-        deltaAmount: deltaPlatformFee,
-        impactAmount: deltaPlatformFee,
-        explanation: `Fi platform minggu ini ${formatRM(thisWeek.platformFeeTotal)}, naik ${formatRM(deltaPlatformFee)}.`,
-        effect: `Kesan: -${formatRM(deltaPlatformFee)} pada profit berbanding minggu lepas.`,
-        revenueBase,
-      }));
-    }
-
-    if (deltaCostTotal > 0) {
-      reasons.push(createReason({
-        key: 'cost_up',
-        type: 'cost',
-        label: 'Modal barang naik',
-        deltaAmount: deltaCostTotal,
-        impactAmount: deltaCostTotal,
-        explanation: `Modal barang minggu ini ${formatRM(thisWeek.costTotal)}, naik ${formatRM(deltaCostTotal)}.`,
-        effect: 'Kesan: margin jadi lebih nipis walaupun jualan naik.',
-        revenueBase,
-      }));
-    }
-
-    if (deltaAdjustmentTotal > 0 || (thisWeek.adjustmentTotal > 0 && prevWeek.adjustmentTotal === 0)) {
-      const adjustmentImpact = Math.max(deltaAdjustmentTotal, 0) || thisWeek.adjustmentTotal;
-      reasons.push(createReason({
-        key: 'adjustment_up',
-        type: 'adjustment',
-        label: 'Pelarasan refund meningkat',
-        deltaAmount: deltaAdjustmentTotal > 0 ? deltaAdjustmentTotal : null,
-        impactAmount: adjustmentImpact,
-        explanation: `Pelarasan refund/goodwill minggu ini ${formatRM(thisWeek.adjustmentTotal)}.`,
-        effect: `Kesan: revenue dan profit turun ${formatRM(adjustmentImpact)} berbanding baseline asal.`,
-        revenueBase,
-      }));
-    }
-
-    if (deltaReturnedTotal > 0 || (thisWeek.returnedTotal > 0 && prevWeek.returnedTotal === 0)) {
-      const returnImpact = Math.max(deltaReturnedTotal, 0) || thisWeek.returnedTotal;
-      reasons.push(createReason({
-        key: 'return_up',
-        type: 'return',
-        label: 'Return item meningkat',
-        deltaAmount: deltaReturnedTotal > 0 ? deltaReturnedTotal : null,
-        impactAmount: returnImpact,
-        explanation: `Nilai return item minggu ini ${formatRM(thisWeek.returnedTotal)}.`,
-        effect: `Kesan: revenue dan profit turun ${formatRM(returnImpact)} berbanding minggu lepas.`,
-        revenueBase,
-      }));
-    }
-  } else {
-    if (thisWeek.shippingLossTotal > 0) {
-      reasons.push(createReason({
-        key: 'shipping_loss_now',
-        type: 'shipping',
-        label: 'Shipping rugi',
-        impactAmount: thisWeek.shippingLossTotal,
-        explanation: `Courier ${formatRM(thisWeek.shippingCostTotal)} lebih tinggi dari caj pos ${formatRM(thisWeek.shippingChargedTotal)} minggu ini.`,
-        effect: `Kesan: -${formatRM(thisWeek.shippingLossTotal)} pada profit minggu ini.`,
-        revenueBase,
-      }));
-    }
-
-    if (thisWeek.costTotal > 0) {
-      reasons.push(createReason({
-        key: 'cost_now',
-        type: 'cost',
-        label: 'Modal barang tinggi',
-        impactAmount: thisWeek.costTotal,
-        explanation: `Modal barang minggu ini ${formatRM(thisWeek.costTotal)}.`,
-        effect: 'Kesan: margin mengecil bila jualan banyak item modal tinggi.',
-        revenueBase,
-      }));
-    }
-
-    if (thisWeek.platformFeeTotal > 0) {
-      reasons.push(createReason({
-        key: 'platform_now',
-        type: 'platform',
-        label: 'Fi platform ditolak',
-        impactAmount: thisWeek.platformFeeTotal,
-        explanation: `Fi platform minggu ini ${formatRM(thisWeek.platformFeeTotal)}.`,
-        effect: `Kesan: -${formatRM(thisWeek.platformFeeTotal)} pada profit.`,
-        revenueBase,
-      }));
-    }
-
-    if (thisWeek.adjustmentTotal > 0) {
-      reasons.push(createReason({
-        key: 'adjustment_now',
-        type: 'adjustment',
-        label: 'Pelarasan refund direkod',
-        impactAmount: thisWeek.adjustmentTotal,
-        explanation: `Pelarasan refund/goodwill minggu ini ${formatRM(thisWeek.adjustmentTotal)}.`,
-        effect: `Kesan: nilai jualan bersih minggu ini berkurang ${formatRM(thisWeek.adjustmentTotal)}.`,
-        revenueBase,
-      }));
-    }
-
-    if (thisWeek.returnedTotal > 0) {
-      reasons.push(createReason({
-        key: 'return_now',
-        type: 'return',
-        label: 'Return item direkod',
-        impactAmount: thisWeek.returnedTotal,
-        explanation: `Nilai return item minggu ini ${formatRM(thisWeek.returnedTotal)}.`,
-        effect: `Kesan: jualan bersih minggu ini berkurang ${formatRM(thisWeek.returnedTotal)}.`,
-        revenueBase,
-      }));
-    }
+const getItemReservedQuantity = (item) => {
+  const reservations = Array.isArray(item?.inventory_reservations) ? item.inventory_reservations : [];
+  if (reservations.length > 0) {
+    return reservations.reduce((sum, reservation) => (
+      sum + toQuantity(reservation?.quantity_reserved)
+    ), 0);
   }
-
-  return reasons
-    .sort((left, right) => right.impactAmount - left.impactAmount)
-    .slice(0, 2);
+  return toQuantity(item?.quantity_reserved);
 };
 
-const resolveGapIndicator = ({ hasPreviousData, revenueChangePct, profitChangePct }) => {
-  if (!hasPreviousData || !Number.isFinite(revenueChangePct) || !Number.isFinite(profitChangePct)) {
-    return { label: 'Belum ada data perbandingan', tone: 'neutral' };
+const getItemTotalStockQuantity = (item) => {
+  const totalQty = toQuantity(item?.quantity);
+  if (totalQty > 0) return totalQty;
+  return toQuantity(item?.available_quantity) + getItemReservedQuantity(item);
+};
+
+const aggregateInventoryRestock = (inventoryItems, window) => {
+  const rows = Array.isArray(inventoryItems) ? inventoryItems : [];
+  return rows.reduce((sum, item) => {
+    const createdDate = parseItemDate(item?.created_at);
+    if (!createdDate || !isDateInWindow(createdDate, window)) return sum;
+
+    const qty = getItemTotalStockQuantity(item);
+    if (qty <= 0) return sum;
+
+    const unitCost = toNonNegativeNumber(item?.cost_price, 0);
+    return sum + (unitCost * qty);
+  }, 0);
+};
+
+const createInsight = ({
+  key,
+  title,
+  severity,
+  observation,
+  impact,
+  suggestion,
+  impactAmount = 0,
+  priority,
+}) => ({
+  key,
+  title,
+  severity,
+  observation,
+  impact,
+  suggestion,
+  impactAmount: Math.max(toNonNegativeNumber(impactAmount, 0), 0),
+  priority,
+});
+
+const getInsightActions = (insightKey) => {
+  if (insightKey === 'revenue_profit_gap') {
+    return [
+      { label: 'Semak Item Margin Rendah', href: '/inventory?filter=low_margin', variant: 'default' },
+      { label: 'Semak Caj Platform/Pos', href: '/wallet?tab=expenses', variant: 'outline' },
+    ];
   }
 
-  if (revenueChangePct > 0 && profitChangePct < (revenueChangePct - 3)) {
-    const gap = revenueChangePct - profitChangePct;
-    if (gap >= 15 || profitChangePct <= 0) {
-      return { label: 'Revenue naik, Profit tak ikut', tone: 'danger' };
-    }
-    return { label: 'Revenue naik, Profit tak ikut', tone: 'warn' };
+  if (insightKey === 'profit_drop_with_sales') {
+    return [
+      { label: 'Lihat Invois Minggu Ini', href: '/invoices?range=this_week&status=paid', variant: 'default' },
+      { label: 'Semak Refund/Adjustment', href: '/invoices?range=this_week&has_refund=1', variant: 'outline' },
+    ];
   }
 
-  if (profitChangePct > (revenueChangePct + 3)) {
-    return { label: 'Profit lebih laju dari revenue', tone: 'success' };
+  if (insightKey === 'shipping_margin_pressure') {
+    return [
+      { label: 'Semak Penghantaran', href: '/invoices?range=this_week&status=paid&shipping_state=pending', variant: 'default' },
+      { label: 'Ubah Caj Pos Default', href: '/settings', variant: 'outline' },
+    ];
   }
 
-  if (revenueChangePct < 0 && profitChangePct < 0) {
-    return { label: 'Revenue & profit sama-sama menurun', tone: 'warn' };
+  if (insightKey === 'restock_spike_low_sales') {
+    return [
+      { label: 'Lihat Stok Baru', href: '/inventory?filter=new_stock', variant: 'default' },
+      { label: 'Cipta Katalog Clearance', href: '/catalogs/create?mode=clearance', variant: 'outline' },
+    ];
   }
 
-  return { label: 'Revenue dan profit bergerak seimbang', tone: 'info' };
+  if (insightKey === 'no_sales') {
+    return [
+      { label: 'Cipta Katalog', href: '/catalogs/create', variant: 'default' },
+      { label: 'Semak Stok Aging', href: '/inventory?filter=aging_60', variant: 'outline' },
+    ];
+  }
+
+  return [];
+};
+
+export const generateRealityInsight = ({
+  thisWeek,
+  prevWeek,
+  hasPreviousData,
+  revenueChangePct,
+  profitChangePct,
+  inventoryCostAddedThisWeek,
+}) => {
+  if (!hasPreviousData) {
+    return {
+      onboardingMessage: 'Ini minggu pertama data direkod. Reality Check akan mula memberi analisis selepas cukup sejarah jualan.',
+      insights: [],
+    };
+  }
+
+  const insights = [];
+  const revenueGrowth = Number.isFinite(revenueChangePct) ? revenueChangePct : null;
+  const profitGrowth = Number.isFinite(profitChangePct) ? profitChangePct : null;
+  const profitDelta = thisWeek.profitTotal - prevWeek.profitTotal;
+  const shippingRatio = thisWeek.shippingCoverageRatio;
+  const salesLowThreshold = Math.max(200, inventoryCostAddedThisWeek * 0.6);
+  const hasRestockSpike = inventoryCostAddedThisWeek >= 300 && thisWeek.revenueTotal <= salesLowThreshold;
+
+  if (thisWeek.revenueTotal <= 0) {
+    insights.push(createInsight({
+      key: 'no_sales',
+      title: 'Jualan Tiada',
+      severity: 'ALERT',
+      observation: 'Tiada jualan direkod minggu ini.',
+      impact: 'Stok sedang diam tanpa menjana pulangan dan cashflow boleh jadi perlahan.',
+      suggestion: 'Pertimbangkan promosi ringan atau listing semula item.',
+      impactAmount: thisWeek.revenueTotal,
+      priority: 100,
+    }));
+  }
+
+  if (revenueGrowth !== null && profitGrowth !== null && revenueGrowth > 0 && profitGrowth < revenueGrowth) {
+    insights.push(createInsight({
+      key: 'revenue_profit_gap',
+      title: 'Margin Tidak Ikut Jualan',
+      severity: 'ALERT',
+      observation: `Jualan meningkat ${formatPct(revenueGrowth)}, tetapi keuntungan hanya ${formatPct(profitGrowth)}.`,
+      impact: 'Jualan meningkat, tetapi keuntungan tidak berkembang seiring. Ini biasanya tanda kos meningkat atau harga terlalu rendah.',
+      suggestion: 'Semak kos modal atau naikkan sedikit harga untuk lindungi margin.',
+      impactAmount: Math.abs(thisWeek.revenueTotal - thisWeek.profitTotal),
+      priority: 90,
+    }));
+  }
+
+  if (thisWeek.revenueTotal > 0 && profitDelta < 0) {
+    insights.push(createInsight({
+      key: 'profit_drop_with_sales',
+      title: 'Keuntungan Menurun',
+      severity: 'ALERT',
+      observation: `Minggu ini masih ada jualan ${formatRM(thisWeek.revenueTotal)}, tetapi keuntungan turun ${formatRM(Math.abs(profitDelta))} berbanding minggu lepas.`,
+      impact: 'Walaupun ada jualan, keuntungan sebenar menurun. Kemungkinan disebabkan diskaun, kos modal tinggi, atau caj platform.',
+      suggestion: 'Kenal pasti item margin rendah dan elakkan ulang stok tersebut.',
+      impactAmount: Math.abs(profitDelta),
+      priority: 85,
+    }));
+  }
+
+  if (shippingRatio !== null && shippingRatio > 0.7) {
+    insights.push(createInsight({
+      key: 'shipping_margin_pressure',
+      title: 'Caj Pos Terlalu Ketat',
+      severity: 'ALERT',
+      observation: `Kos courier menggunakan ${formatPct(shippingRatio * 100)} daripada caj pos minggu ini (${formatRM(thisWeek.shippingCostTotal)} / ${formatRM(thisWeek.shippingChargedTotal)}).`,
+      impact: 'Sebahagian besar caj pos digunakan untuk bayar courier. Penghantaran hampir tidak memberi keuntungan.',
+      suggestion: 'Pertimbang markup kecil pada caj penghantaran.',
+      impactAmount: Math.abs(thisWeek.shippingCostTotal - thisWeek.shippingChargedTotal),
+      priority: 80,
+    }));
+  }
+
+  if (hasRestockSpike) {
+    insights.push(createInsight({
+      key: 'restock_spike_low_sales',
+      title: 'Modal Baru Belum Bergerak',
+      severity: 'INFO',
+      observation: `Modal stok baru sekitar ${formatRM(inventoryCostAddedThisWeek)} masuk minggu ini, tetapi jualan semasa ${formatRM(thisWeek.revenueTotal)}.`,
+      impact: 'Modal baru dimasukkan tetapi stok belum bergerak. Cashflow mungkin akan ketat sementara.',
+      suggestion: 'Fokus jual stok baru sebelum tambah pembelian lain.',
+      impactAmount: inventoryCostAddedThisWeek,
+      priority: 70,
+    }));
+  }
+
+  if (insights.length === 0) {
+    insights.push(createInsight({
+      key: 'healthy_movement',
+      title: 'Pergerakan Sihat',
+      severity: 'GOOD',
+      observation: 'Jualan dan keuntungan minggu ini bergerak dengan stabil.',
+      impact: 'Margin lebih terjaga dan aliran tunai lebih mudah dikawal.',
+      suggestion: 'Teruskan item yang paling cepat pusing dan kekalkan disiplin kos semasa restock.',
+      impactAmount: 0,
+      priority: 10,
+    }));
+  }
+
+  const withActions = insights.map((insight) => {
+    const allowActions = !(insight.severity === 'INFO' && insight.impactAmount < 5);
+    return {
+      ...insight,
+      actions: allowActions ? getInsightActions(insight.key).slice(0, 2) : [],
+    };
+  });
+
+  return {
+    onboardingMessage: null,
+    insights: withActions
+      .sort((left, right) => right.priority - left.priority)
+      .slice(0, 2),
+  };
 };
 
 export const getRollingWeekWindows = (nowDate = new Date()) => {
@@ -459,6 +465,7 @@ export const getRollingWeekWindows = (nowDate = new Date()) => {
 
 export const calculateRealityCheck = ({
   invoiceItems = [],
+  inventoryItems = [],
   nowDate = new Date(),
 }) => {
   const windows = getRollingWeekWindows(nowDate);
@@ -478,27 +485,23 @@ export const calculateRealityCheck = ({
 
   const thisWeek = aggregateWindowMetrics(rows, windows.thisWeek);
   const prevWeek = aggregateWindowMetrics(rows, windows.prevWeek);
+  const inventoryCostAddedThisWeek = aggregateInventoryRestock(inventoryItems, windows.thisWeek);
 
   const revenueChangePct = getPctChange(thisWeek.revenueTotal, prevWeek.revenueTotal);
   const profitChangePct = getPctChange(thisWeek.profitTotal, prevWeek.profitTotal);
-  const hasPreviousData = prevWeek.revenueTotal > 0 || prevWeek.profitTotal !== 0;
-  const reasons = buildLeakReasons({ thisWeek, prevWeek, hasPreviousData });
-  const gapIndicator = resolveGapIndicator({ hasPreviousData, revenueChangePct, profitChangePct });
-  const isProfitLagging = (
-    Number.isFinite(revenueChangePct)
-    && Number.isFinite(profitChangePct)
-    && revenueChangePct > 0
-    && profitChangePct < (revenueChangePct - 3)
-  );
+  const hasPreviousData = prevWeek.rowCount > 0 || prevWeek.invoiceCount > 0;
+  const insightState = generateRealityInsight({
+    thisWeek,
+    prevWeek,
+    hasPreviousData,
+    revenueChangePct,
+    profitChangePct,
+    inventoryCostAddedThisWeek,
+  });
 
-  const isSlowWeek = hasPreviousData
-    ? (
-      Number.isFinite(revenueChangePct)
-      && Number.isFinite(profitChangePct)
-      && revenueChangePct < 0
-      && profitChangePct < 0
-    )
-    : (thisWeek.revenueTotal < 200 && thisWeek.profitTotal < 80);
+  const insights = insightState.insights;
+  const hasAlert = insights.some((insight) => insight.severity === 'ALERT');
+  const hasGood = insights.some((insight) => insight.severity === 'GOOD');
 
   return {
     windows,
@@ -507,10 +510,10 @@ export const calculateRealityCheck = ({
     hasPreviousData,
     revenueChangePct,
     profitChangePct,
-    reasons,
-    gapIndicator,
-    isProfitLagging,
-    isSlowWeek,
+    inventoryCostAddedThisWeek,
+    insights,
+    onboardingMessage: insightState.onboardingMessage,
+    overallSeverity: hasAlert ? 'ALERT' : (hasGood ? 'GOOD' : 'INFO'),
     generatedAt: startOfLocalDay(nowDate).getTime() / DAY_MS,
   };
 };

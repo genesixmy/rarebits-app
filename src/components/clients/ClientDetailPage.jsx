@@ -496,12 +496,12 @@ const ClientDetailPage = () => {
                            )}
                            {(parseFloat(purchase.adjustment_total) || 0) > 0 && (
                              <p className="mt-1 text-xs font-medium text-red-600">
-                               Price Adjustment (-RM{(parseFloat(purchase.adjustment_total) || 0).toFixed(2)})
+                              Refund (Goodwill) (-RM{(parseFloat(purchase.adjustment_total) || 0).toFixed(2)})
                              </p>
                            )}
                            {(parseFloat(purchase.returned_total) || 0) > 0 && (
                              <p className="mt-1 text-xs font-medium text-rose-600">
-                               Item Returned ({Math.round(parseFloat(purchase.returned_qty) || 0)} unit) -RM{(parseFloat(purchase.returned_total) || 0).toFixed(2)}
+                              Return/Cancel ({Math.round(parseFloat(purchase.returned_qty) || 0)} unit) -RM{(parseFloat(purchase.returned_total) || 0).toFixed(2)}
                              </p>
                            )}
                          </td>

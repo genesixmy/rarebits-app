@@ -13,14 +13,12 @@ import {
 import { Loader2,
   Package, 
   Truck,
-  Tag,
   TrendingUp, 
   TrendingDown,
   BarChart3,
   Wallet,
   CheckCircle,
   XCircle,
-  AlertTriangle,
   Info,
   Plus,
   Receipt,
@@ -33,13 +31,18 @@ import { Cell, Tooltip, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Cartes
 import { cn } from '@/lib/utils';
 import {
   COURIER_PAYMENT_MODES,
-  isDeliveryRequiredForInvoice,
   resolveCourierPaymentModeForInvoice,
 } from '@/lib/shipping';
 import { useTheme } from '@/contexts/ThemeProvider';
 import { supabase } from '@/lib/customSupabaseClient';
 import { resolveTransactionClassification, TRANSACTION_CLASSIFICATIONS } from '@/components/wallet/transactionClassification';
-import { calculateBusinessHealth, getItemAvailableQuantity } from '@/lib/dashboardHealth';
+import {
+  calculateBusinessHealth,
+  calculateDeadCapitalMetrics,
+  DEAD_CAPITAL_THRESHOLD_DAYS,
+  getItemAgingDays,
+  getItemAvailableQuantity,
+} from '@/lib/dashboardHealth';
 import { calculateRealityCheck } from '@/lib/dashboardRealityCheck';
 
 const getInitialDateRange = () => {
@@ -65,6 +68,88 @@ const getInitialDateRange = () => {
 };
 
 const SETTLED_INVOICE_STATUSES = new Set(['paid', 'partially_returned', 'returned']);
+const NEXT_STEP_PENDING_COMPLETED_STATUSES = new Set(['delivered', 'completed']);
+
+const normalizeLowerText = (value) => (typeof value === 'string' ? value.trim().toLowerCase() : '');
+const normalizeText = (value) => (typeof value === 'string' ? value.trim() : '');
+const parsePositiveNumber = (value) => {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+};
+
+const getInvoiceRecordFromRow = (row) => (row?.invoices && typeof row.invoices === 'object' ? row.invoices : row);
+
+export const computeNextSteps = ({ invoices, inventory }) => {
+  const invoiceRows = Array.isArray(invoices) ? invoices : [];
+  const inventoryRows = Array.isArray(inventory) ? inventory : [];
+
+  const uniqueInvoicesById = invoiceRows.reduce((acc, row) => {
+    const invoice = getInvoiceRecordFromRow(row);
+    const invoiceId = invoice?.id;
+    if (!invoiceId) return acc;
+    if (!acc.has(invoiceId)) acc.set(invoiceId, invoice);
+    return acc;
+  }, new Map());
+
+  const pendingShippingCount = Array.from(uniqueInvoicesById.values()).reduce((count, invoice) => {
+    if (normalizeLowerText(invoice?.status) !== 'paid') return count;
+    if (invoice?.shipping_required !== true) return count;
+
+    const shipmentMeta = invoice?.shipment && typeof invoice.shipment === 'object'
+      ? invoice.shipment
+      : null;
+    const trackingNo = normalizeText(shipmentMeta?.tracking_no || invoice?.tracking_no);
+    const deliveryStatus = normalizeLowerText(
+      shipmentMeta?.delivery_status
+      || shipmentMeta?.ship_status
+      || invoice?.delivery_status
+      || invoice?.ship_status
+    );
+    const isCompleted = NEXT_STEP_PENDING_COMPLETED_STATUSES.has(deliveryStatus);
+
+    return (trackingNo.length === 0 && !isCompleted) ? count + 1 : count;
+  }, 0);
+
+  const soldQtyByItemId = new Map();
+  let hasSoldData = false;
+
+  invoiceRows.forEach((row) => {
+    const itemId = row?.item_id || row?.item?.id;
+    if (!itemId) return;
+    hasSoldData = true;
+
+    const baseQty = parsePositiveNumber(row?.quantity);
+    const returnedQty = Array.isArray(row?.invoice_item_returns)
+      ? row.invoice_item_returns.reduce((sum, returnedRow) => sum + parsePositiveNumber(returnedRow?.returned_quantity), 0)
+      : 0;
+    const netSoldQty = Math.max(baseQty - returnedQty, 0);
+    if (netSoldQty <= 0) return;
+
+    soldQtyByItemId.set(itemId, (soldQtyByItemId.get(itemId) || 0) + netSoldQty);
+  });
+
+  const thresholdDays = DEAD_CAPITAL_THRESHOLD_DAYS;
+  const nowDate = new Date();
+  const riskItems = inventoryRows.filter((item) => {
+    const qtyAvailable = getItemAvailableQuantity(item);
+    if (qtyAvailable <= 0) return false;
+    const ageDays = getItemAgingDays(item?.created_at, nowDate);
+    return ageDays !== null && ageDays >= thresholdDays;
+  });
+
+  const riskStockCount = riskItems.length;
+  const clearanceCount = riskItems.reduce((count, item) => {
+    if (!hasSoldData) return count + 1;
+    const soldQty = soldQtyByItemId.get(item?.id) || 0;
+    return soldQty <= 1 ? count + 1 : count;
+  }, 0);
+
+  return {
+    pendingShippingCount,
+    riskStockCount,
+    clearanceCount,
+  };
+};
 
 const getInvoiceFinancialSummary = (invoice, fallbackOriginal = 0) => {
   const fallback = Math.max(parseFloat(fallbackOriginal) || 0, 0);
@@ -128,19 +213,19 @@ const getHealthTone = (label) => {
 const getDeadCapitalTone = (deadCapitalPct) => {
   if (deadCapitalPct > 20) {
     return {
-      label: 'Berisiko',
+      label: 'Tinggi',
       chipClass: 'border-rose-200 bg-rose-100 text-rose-700',
       fillClass: 'bg-rose-500',
-      trackClass: 'border-rose-200 bg-rose-50/70',
+      batteryClass: 'border-rose-300',
     };
   }
 
   if (deadCapitalPct >= 10) {
     return {
-      label: 'Perlu perhatian',
+      label: 'Waspada',
       chipClass: 'border-amber-200 bg-amber-100 text-amber-700',
       fillClass: 'bg-amber-500',
-      trackClass: 'border-amber-200 bg-amber-50/70',
+      batteryClass: 'border-amber-300',
     };
   }
 
@@ -148,7 +233,7 @@ const getDeadCapitalTone = (deadCapitalPct) => {
     label: 'Sihat',
     chipClass: 'border-emerald-200 bg-emerald-100 text-emerald-700',
     fillClass: 'bg-emerald-500',
-    trackClass: 'border-emerald-200 bg-emerald-50/70',
+    batteryClass: 'border-emerald-300',
   };
 };
 
@@ -169,151 +254,53 @@ const getProfitChipTone = (value) => {
   return 'bg-rose-100 text-rose-700 border-rose-200';
 };
 
-const getRealityGapChipTone = (tone) => {
-  if (tone === 'danger') return 'bg-rose-100 text-rose-700 border-rose-200';
-  if (tone === 'warn') return 'bg-amber-100 text-amber-700 border-amber-200';
-  if (tone === 'success') return 'bg-emerald-100 text-emerald-700 border-emerald-200';
-  if (tone === 'info') return 'bg-sky-100 text-sky-700 border-sky-200';
-  return 'bg-slate-100 text-slate-700 border-slate-200';
-};
-
-const getRealityReasonRowTone = (severity) => {
-  if (severity === 'danger') {
+const getRealityOverallBadge = (severity) => {
+  if (severity === 'ALERT') {
     return {
-      row: 'border-rose-200 bg-rose-50/70',
-      iconWrap: 'bg-rose-100 text-rose-700',
+      label: 'ALERT',
+      className: 'bg-rose-100 text-rose-700 border-rose-200',
     };
   }
-  if (severity === 'warn') {
+  if (severity === 'GOOD') {
     return {
-      row: 'border-amber-200 bg-amber-50/70',
-      iconWrap: 'bg-amber-100 text-amber-700',
+      label: 'GOOD',
+      className: 'bg-emerald-100 text-emerald-700 border-emerald-200',
     };
   }
   return {
-    row: 'border-slate-200 bg-slate-50/70',
-    iconWrap: 'bg-slate-100 text-slate-700',
-  };
-};
-
-const getRealityReasonIcon = (type) => {
-  if (type === 'shipping') return Truck;
-  if (type === 'platform') return Tag;
-  if (type === 'cost') return Package;
-  if (type === 'adjustment') return TrendingDown;
-  return Info;
-};
-
-const getRealityReasonImpactBadge = (reason) => {
-  const impactAmount = Number.parseFloat(reason?.impactAmount) || 0;
-
-  if (reason?.type === 'cost') {
-    return {
-      label: 'Margin ↓',
-      className: 'bg-amber-100 text-amber-700 border-amber-200',
-    };
-  }
-
-  if (reason?.type === 'shipping') {
-    if (impactAmount > 0) {
-      return {
-        label: `-RM${impactAmount.toFixed(2)}`,
-        className: 'bg-rose-100 text-rose-700 border-rose-200',
-      };
-    }
-    return {
-      label: 'Kos ↑',
-      className: 'bg-amber-100 text-amber-700 border-amber-200',
-    };
-  }
-
-  if (reason?.type === 'platform') {
-    if (impactAmount > 0) {
-      return {
-        label: `-RM${impactAmount.toFixed(2)}`,
-        className: 'bg-amber-100 text-amber-700 border-amber-200',
-      };
-    }
-    return {
-      label: 'Fi ↑',
-      className: 'bg-slate-100 text-slate-700 border-slate-200',
-    };
-  }
-
-  if (reason?.type === 'adjustment') {
-    if (impactAmount > 0) {
-      return {
-        label: `-RM${impactAmount.toFixed(2)}`,
-        className: 'bg-rose-100 text-rose-700 border-rose-200',
-      };
-    }
-    return {
-      label: 'Pelarasan',
-      className: 'bg-slate-100 text-slate-700 border-slate-200',
-    };
-  }
-
-  return {
-    label: 'Info',
+    label: 'INFO',
     className: 'bg-slate-100 text-slate-700 border-slate-200',
   };
 };
 
-const getRealityStatusPill = ({ hasComparison, reasons = [] }) => {
-  if (!hasComparison) {
+const getRealityInsightTone = (severity) => {
+  if (severity === 'ALERT') {
     return {
-      label: 'Info',
-      className: 'bg-slate-100 text-slate-700 border-slate-200',
+      card: 'border-rose-200 bg-rose-50/75',
+      iconWrap: 'bg-rose-100 text-rose-700',
+      suggestionWrap: 'border-rose-200 bg-white/85 text-rose-700',
     };
   }
-
-  if (reasons.some((reason) => reason.severity === 'danger')) {
+  if (severity === 'GOOD') {
     return {
-      label: 'Alert',
-      className: 'bg-rose-100 text-rose-700 border-rose-200',
+      card: 'border-emerald-200 bg-emerald-50/75',
+      iconWrap: 'bg-emerald-100 text-emerald-700',
+      suggestionWrap: 'border-emerald-200 bg-white/85 text-emerald-700',
     };
   }
-
-  if (reasons.some((reason) => reason.severity === 'warn')) {
-    return {
-      label: 'Alert',
-      className: 'bg-amber-100 text-amber-700 border-amber-200',
-    };
-  }
-
   return {
-    label: 'Stable',
-    className: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+    card: 'border-amber-200 bg-amber-50/75',
+    iconWrap: 'bg-amber-100 text-amber-700',
+    suggestionWrap: 'border-amber-200 bg-white/85 text-amber-700',
   };
 };
 
-const getRealityInsightText = ({
-  hasComparison,
-  revenueChangePct,
-  profitChangePct,
-  isSlowWeek,
-}) => {
-  if (!hasComparison) {
-    return 'Ringkasan awal minggu ini - trend akan lebih jelas bila ada bandingan.';
-  }
-
-  if (revenueChangePct > 0 && profitChangePct > -5 && profitChangePct < (revenueChangePct - 3)) {
-    return 'Busy tapi margin ketat - profit tak ikut revenue.';
-  }
-
-  if (profitChangePct > (revenueChangePct + 3)) {
-    return 'Profit lebih laju dari revenue.';
-  }
-
-  if (isSlowWeek) {
-    return 'Minggu ini perlahan - fokus pada item fast sell.';
-  }
-
-  if (revenueChangePct < 0) {
-    return 'Jualan perlahan minggu ini, kawal kos supaya margin kekal sihat.';
-  }
-
-  return 'Revenue dan profit bergerak seimbang minggu ini.';
+const getRealityInsightIcon = (insight) => {
+  if (insight?.key === 'shipping_margin_pressure') return Truck;
+  if (insight?.key === 'restock_spike_low_sales') return Package;
+  if (insight?.key === 'healthy_movement') return TrendingUp;
+  if (insight?.severity === 'ALERT') return TrendingDown;
+  return Info;
 };
 
 const formatRM = (value) => `RM ${Number.parseFloat(value || 0).toFixed(2)}`;
@@ -341,17 +328,46 @@ const KpiCard = ({ title, value, subtext, icon: Icon, toneClass = 'bg-slate-100 
   </GlassCard>
 );
 
-const ActionRow = ({ label, description, value, to }) => (
+const getActionBadgeClasses = (tone) => {
+  if (tone === 'warning') {
+    return 'border-amber-200 bg-amber-100 text-amber-800';
+  }
+  if (tone === 'primary') {
+    return 'border-indigo-200 bg-indigo-100 text-indigo-700';
+  }
+  return 'border-slate-200 bg-slate-100 text-slate-600';
+};
+
+const ActionRow = ({ label, description, value, valueTone = 'neutral', to, tooltip }) => (
   <Link
     to={to}
     className="group flex items-center justify-between gap-3 rounded-xl px-2 py-2.5 transition-colors hover:bg-slate-100/70"
   >
     <div className="min-w-0">
-      <p className="text-sm font-semibold text-slate-900">{label}</p>
+      <div className="flex items-center gap-1.5">
+        <p className="text-sm font-semibold text-slate-900">{label}</p>
+        {tooltip ? (
+          <UiTooltip>
+            <UiTooltipTrigger asChild>
+              <button
+                type="button"
+                className="inline-flex h-4 w-4 items-center justify-center rounded-full text-slate-400 hover:text-slate-500"
+                onClick={(event) => event.preventDefault()}
+                aria-label={`Info ${label}`}
+              >
+                <Info className="h-3.5 w-3.5" />
+              </button>
+            </UiTooltipTrigger>
+            <UiTooltipContent side="top" className="max-w-[220px] text-xs">
+              {tooltip}
+            </UiTooltipContent>
+          </UiTooltip>
+        ) : null}
+      </div>
       <p className="truncate text-xs text-slate-500">{description}</p>
     </div>
     <div className="inline-flex shrink-0 items-center gap-1.5">
-      <span className="rounded-full border border-white/80 bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-600 shadow-sm">
+      <span className={cn('rounded-full border px-2 py-0.5 text-[11px] font-semibold shadow-sm', getActionBadgeClasses(valueTone))}>
         {value}
       </span>
       <ArrowRight className="h-3.5 w-3.5 text-slate-400 transition-transform group-hover:translate-x-0.5" />
@@ -434,7 +450,9 @@ const DashboardNextSteps = ({ steps }) => (
             label={step.label}
             description={step.description}
             value={step.value}
+            valueTone={step.valueTone}
             to={step.to}
+            tooltip={step.tooltip}
           />
         ))}
       </div>
@@ -576,8 +594,6 @@ const DashboardInsightsSidebar = ({
   healthScorePercent,
   deadCapitalMetrics,
   deadCapitalTone,
-  deadCapitalSegmentCount,
-  deadCapitalFilledSegments,
   isDeadCapitalTooltipOpen,
   setIsDeadCapitalTooltipOpen,
   platformBarData,
@@ -589,7 +605,14 @@ const DashboardInsightsSidebar = ({
   tooltipBg,
   tooltipBorder,
   tooltipTextColor,
-}) => (
+}) => {
+  const [showDeadItems, setShowDeadItems] = useState(false);
+  // Mirror Business Health style: fuller bar means healthier stock mix.
+  const deadCapitalProgressWidth = deadCapitalMetrics.hasStockValue
+    ? Math.max(0, Math.min(100 - (deadCapitalMetrics.deadPercent || 0), 100))
+    : 0;
+
+  return (
   <div className="space-y-4">
     <h2 className="px-1 text-[17px] font-semibold text-slate-900">Insights</h2>
 
@@ -616,7 +639,7 @@ const DashboardInsightsSidebar = ({
       title="Dead Capital"
       action={
         <div className="flex items-center gap-1.5">
-          {deadCapitalMetrics.hasActiveStock ? (
+          {deadCapitalMetrics.hasStockValue ? (
             <span className={cn('inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold', deadCapitalTone.chipClass)}>
               {deadCapitalTone.label}
             </span>
@@ -636,37 +659,91 @@ const DashboardInsightsSidebar = ({
                 <Info className="h-4 w-4" />
               </button>
             </UiTooltipTrigger>
-            <UiTooltipContent side="top" className="max-w-[240px] text-xs leading-relaxed">
-              <p className="font-semibold text-slate-900">Apa itu Dead Capital?</p>
-              <p className="mt-1 text-slate-600">Modal barang yang tidak terjual melebihi 60 hari.</p>
-              <p className="mt-1 text-slate-600">Barang baru masuk belum dianggap tidur.</p>
+            <UiTooltipContent side="top" className="z-[80] max-w-[280px] text-xs leading-relaxed">
+              <p className="font-semibold text-slate-900">Dead Capital</p>
+              <p className="mt-1 text-slate-600">Dead capital = modal terkunci dalam stok yang tidak terjual &gt;= {deadCapitalMetrics.thresholdDays} hari.</p>
+              <p className="mt-1 text-slate-600">Kiraan: (Cost x Kuantiti tersedia) untuk item lama &gt;= {deadCapitalMetrics.thresholdDays} hari.</p>
+              <p className="mt-1 text-slate-600">Termasuk unit reserved kerana modal masih terkunci.</p>
+              <p className="mt-1 text-slate-600">Kenapa ini penting: modal beku -&gt; susah pusing stok &amp; cashflow.</p>
             </UiTooltipContent>
           </UiTooltip>
         </div>
       }
     >
-      <div className="space-y-2">
-        {deadCapitalMetrics.hasActiveStock ? (
+      <div className="space-y-2.5">
+        {deadCapitalMetrics.hasStockValue ? (
           <>
-            <p className="text-xl font-semibold leading-none text-slate-900">{deadCapitalMetrics.deadCapitalPctRounded}%</p>
-            <div className="grid grid-cols-7 gap-1.5">
-              {Array.from({ length: deadCapitalSegmentCount }).map((_, index) => (
-                <span
-                  key={`dead-capital-segment-${index}`}
-                  className={cn(
-                    'h-2 rounded-full',
-                    index < deadCapitalFilledSegments ? deadCapitalTone.fillClass : 'bg-slate-200'
-                  )}
-                />
-              ))}
+            <p className="text-sm text-slate-900">
+              <span className="text-xl font-semibold leading-none text-slate-900">{deadCapitalMetrics.deadPercentRounded}%</span>{' '}
+              modal sedang tidur
+            </p>
+            <p className="text-xs text-slate-600">
+              {formatRM(deadCapitalMetrics.deadValue)} / {formatRM(deadCapitalMetrics.totalStockValue)}
+            </p>
+            <div className="relative h-2 overflow-hidden rounded-full border border-emerald-300 bg-slate-100">
+              <div
+                className="absolute inset-y-0 left-0 rounded-full bg-emerald-500 transition-all duration-300"
+                style={{ width: `${deadCapitalProgressWidth}%` }}
+              />
             </div>
-            <p className="text-xs text-slate-500">
-              {formatRM(deadCapitalMetrics.deadCapital)} / {formatRM(deadCapitalMetrics.totalStockCapital)}
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <div className="rounded-lg border border-rose-100 bg-rose-50/70 px-2 py-1.5">
+                <p className="font-semibold text-rose-700">Dead</p>
+                <p className="text-rose-800">{formatRM(deadCapitalMetrics.deadValue)}</p>
+              </div>
+              <div className="rounded-lg border border-emerald-100 bg-emerald-50/70 px-2 py-1.5">
+                <p className="font-semibold text-emerald-700">Active</p>
+                <p className="text-emerald-800">{formatRM(deadCapitalMetrics.activeValue)}</p>
+              </div>
+            </div>
+            <p className="text-[11px] text-slate-500">
+              &gt;= {deadCapitalMetrics.thresholdDays} hari tanpa bergerak
             </p>
           </>
         ) : (
-          <p className="text-xs text-slate-500">Belum ada stok aktif.</p>
+          <div className="space-y-1">
+            <p className="text-sm font-semibold text-slate-700">Tiada stok aktif</p>
+            <p className="text-xs text-slate-500">
+              {deadCapitalMetrics.hasStockUnits
+                ? 'Stok ada tetapi nilai kos belum lengkap.'
+                : 'Tambah stok untuk mula ukur modal yang terkunci.'}
+            </p>
+          </div>
         )}
+
+        {deadCapitalMetrics.missingCostItemsCount > 0 ? (
+          <p className="text-[11px] text-amber-700">
+            {deadCapitalMetrics.missingCostItemsCount} item tanpa kos (dikira RM0).
+          </p>
+        ) : null}
+
+        {deadCapitalMetrics.topDeadItems.length > 0 ? (
+          <div className="space-y-1.5">
+            <button
+              type="button"
+              className="inline-flex items-center rounded-md border border-slate-200 bg-white/80 px-2 py-1 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+              onClick={() => setShowDeadItems((prev) => !prev)}
+            >
+              {showDeadItems ? 'Sembunyi item' : 'Lihat item'}
+            </button>
+
+            {showDeadItems ? (
+              <div className="space-y-1.5">
+                {deadCapitalMetrics.topDeadItems.map((item) => (
+                  <div key={item.id || `${item.name}-${item.ageDays}`} className="rounded-lg border border-slate-200 bg-white/80 px-2.5 py-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="line-clamp-1 text-xs font-semibold text-slate-800">{item.name}</p>
+                      <p className="text-xs font-semibold text-slate-900">{formatRM(item.deadValue)}</p>
+                    </div>
+                    <p className="mt-0.5 text-[11px] text-slate-500">
+                      {item.ageDays || 0} hari | Qty {item.qtyStuck}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </InsightCard>
 
@@ -705,7 +782,8 @@ const DashboardInsightsSidebar = ({
       </div>
     </InsightCard>
   </div>
-);
+  );
+};
 
 const DashboardOperations = ({
   isLoadingSales,
@@ -725,25 +803,33 @@ const DashboardOperations = ({
   tooltipBorder,
   tooltipTextColor,
   realityCheckData,
-  realityStatusPill,
+  realityOverallBadge,
   realityRevenueChipLabel,
   realityProfitChipLabel,
-  realityInsightText,
-  realityTopReasons,
-  getRealityReasonIcon,
-  getRealityReasonRowTone,
-  getRealityReasonImpactBadge,
+  realityInsights,
+  realityOnboardingMessage,
   healthTone,
   healthData,
   healthReasons,
   healthScorePercent,
   deadCapitalMetrics,
   deadCapitalTone,
-  deadCapitalSegmentCount,
-  deadCapitalFilledSegments,
   isDeadCapitalTooltipOpen,
   setIsDeadCapitalTooltipOpen,
-}) => (
+}) => {
+  let remainingActionSlots = 3;
+  const realityInsightsWithActions = (realityInsights || []).slice(0, 2).map((insight) => {
+    const insightActions = Array.isArray(insight?.actions) ? insight.actions.slice(0, 2) : [];
+    const allowedActions = insightActions.slice(0, Math.max(remainingActionSlots, 0));
+    remainingActionSlots -= allowedActions.length;
+
+    return {
+      ...insight,
+      actions: allowedActions,
+    };
+  });
+
+  return (
   <div className="grid grid-cols-1 gap-5 xl:grid-cols-3">
     <div className="space-y-5 xl:col-span-2">
       <GlassCard>
@@ -834,8 +920,8 @@ const DashboardOperations = ({
               <span className="text-xs text-slate-500">
                 {realityCheckData.windows.thisWeek.startDate} - {realityCheckData.windows.thisWeek.endDate}
               </span>
-              <span className={cn("inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold", realityStatusPill.className)}>
-                {realityStatusPill.label}
+              <span className={cn("inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold", realityOverallBadge.className)}>
+                {realityOverallBadge.label}
               </span>
             </div>
           </div>
@@ -858,37 +944,71 @@ const DashboardOperations = ({
             </div>
           </div>
 
-          {!realityCheckData.hasComparison ? (
-            <span className="inline-flex rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-xs text-slate-700">
-              Tiada data minggu lepas untuk banding
-            </span>
+          {realityOnboardingMessage ? (
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+              {realityOnboardingMessage}
+            </div>
           ) : null}
 
-          <div className={cn("flex items-start gap-2 rounded-lg border px-3 py-2 text-sm", getRealityGapChipTone(realityCheckData.gapIndicator.tone))}>
-            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-            <p className="leading-snug font-medium">{realityInsightText}</p>
-          </div>
-
-          <div className="space-y-1.5">
-            {realityTopReasons.slice(0, 2).map((reason) => {
-              const Icon = getRealityReasonIcon(reason.type);
-              const tone = getRealityReasonRowTone(reason.severity);
-              const impactBadge = getRealityReasonImpactBadge(reason);
+          <div className="space-y-2">
+            {realityInsightsWithActions.map((insight) => {
+              const Icon = getRealityInsightIcon(insight);
+              const tone = getRealityInsightTone(insight.severity);
+              const severityBadge = getRealityOverallBadge(insight.severity);
               return (
-                <div key={reason.key} className={cn("flex items-start gap-2 rounded-lg border px-2.5 py-2", tone.row)}>
-                  <span className={cn("mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md", tone.iconWrap)}>
-                    <Icon className="h-3.5 w-3.5" />
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-xs font-semibold text-slate-900">{reason.label}</p>
-                    <p className="line-clamp-1 text-xs text-slate-500">{reason.explanation}</p>
+                <div key={insight.key} className={cn("rounded-xl border px-3 py-3", tone.card)}>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex min-w-0 items-start gap-2.5">
+                      <span className={cn("mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md", tone.iconWrap)}>
+                        <Icon className="h-4 w-4" />
+                      </span>
+                      <div className="space-y-1.5">
+                        <p className="text-sm font-semibold text-slate-900">{insight.title}</p>
+                        <p className="text-sm leading-snug text-slate-700">
+                          <span className="font-semibold">Apa berlaku:</span> {insight.observation}
+                        </p>
+                        <p className="text-sm leading-snug text-slate-700">
+                          <span className="font-semibold">Kesan:</span> {insight.impact}
+                        </p>
+                      </div>
+                    </div>
+                    <span className={cn("inline-flex shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-semibold", severityBadge.className)}>
+                      {severityBadge.label}
+                    </span>
                   </div>
-                  <span className={cn("inline-flex shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-semibold", impactBadge.className)}>
-                    {impactBadge.label}
-                  </span>
+                  <div className={cn("mt-2 rounded-lg border px-2.5 py-2 text-sm", tone.suggestionWrap)}>
+                    <span className="font-semibold">Cadangan:</span> {insight.suggestion}
+                  </div>
+
+                  {insight.actions.length > 0 ? (
+                    <div className="mt-2.5 space-y-1.5">
+                      <p className="text-xs font-semibold text-slate-700">Apa anda boleh buat:</p>
+                      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+                        {insight.actions.map((action, actionIndex) => (
+                          <Button
+                            key={`${insight.key}-action-${actionIndex}`}
+                            asChild
+                            size="sm"
+                            variant={action.variant === 'outline' ? 'outline' : 'default'}
+                            className="h-8 justify-start sm:justify-center"
+                          >
+                            <Link to={action.href}>{action.label}</Link>
+                          </Button>
+                        ))}
+                      </div>
+                      <p className="text-[11px] text-slate-500">
+                        Tip: fokus 1 tindakan dulu - perubahan kecil pun beri kesan.
+                      </p>
+                    </div>
+                  ) : null}
                 </div>
               );
             })}
+            {!realityOnboardingMessage && realityInsights.length === 0 ? (
+              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+                Tiada perubahan besar minggu ini. Teruskan pantau jualan dan margin.
+              </div>
+            ) : null}
           </div>
         </CardContent>
       </GlassCard>
@@ -901,8 +1021,6 @@ const DashboardOperations = ({
       healthScorePercent={healthScorePercent}
       deadCapitalMetrics={deadCapitalMetrics}
       deadCapitalTone={deadCapitalTone}
-      deadCapitalSegmentCount={deadCapitalSegmentCount}
-      deadCapitalFilledSegments={deadCapitalFilledSegments}
       isDeadCapitalTooltipOpen={isDeadCapitalTooltipOpen}
       setIsDeadCapitalTooltipOpen={setIsDeadCapitalTooltipOpen}
       platformBarData={platformBarData}
@@ -916,9 +1034,10 @@ const DashboardOperations = ({
       tooltipTextColor={tooltipTextColor}
     />
   </div>
-);
+  );
+};
 
-const Dashboard = ({ items }) => {
+const Dashboard = ({ items, isInventoryLoading = false }) => {
   const { theme } = useTheme();
   const [dateRange, setDateRange] = useState(getInitialDateRange());
   const [isFiltersOpen, setIsFiltersOpen] = useState(false);
@@ -984,7 +1103,7 @@ const Dashboard = ({ items }) => {
       if (shipmentIds.length > 0) {
         const { data: shipmentRows, error: shipmentError } = await supabase
           .from('shipments')
-          .select('id, user_id, shipping_cost, courier_paid')
+          .select('id, user_id, shipping_cost, courier_paid, tracking_no, ship_status')
           .eq('user_id', userId)
           .in('id', shipmentIds);
 
@@ -1008,59 +1127,6 @@ const Dashboard = ({ items }) => {
       }));
     },
     enabled: !!userId
-  });
-
-  const { data: pendingShippingCount = 0 } = useQuery({
-    queryKey: ['dashboard-pending-shipping', userId],
-    queryFn: async () => {
-      if (!userId) return 0;
-
-      const { data: paidInvoices, error: invoiceError } = await supabase
-        .from('invoices')
-        .select('id, status, shipment_id, shipping_method, shipping_charged')
-        .eq('user_id', userId)
-        .in('status', Array.from(SETTLED_INVOICE_STATUSES));
-
-      if (invoiceError) {
-        console.error('[Dashboard] Error fetching paid invoices for shipping reminder:', invoiceError);
-        return 0;
-      }
-
-      const shipmentIds = [...new Set((paidInvoices || []).map((invoice) => invoice?.shipment_id).filter(Boolean))];
-      const shipmentStatusById = new Map();
-
-      if (shipmentIds.length > 0) {
-        const { data: shipmentRows, error: shipmentError } = await supabase
-          .from('shipments')
-          .select('id, ship_status')
-          .eq('user_id', userId)
-          .in('id', shipmentIds);
-
-        if (shipmentError) {
-          console.error('[Dashboard] Error fetching shipment statuses for reminder:', shipmentError);
-        } else {
-          (shipmentRows || []).forEach((row) => {
-            shipmentStatusById.set(row.id, row.ship_status);
-          });
-        }
-      }
-
-      return (paidInvoices || []).reduce((count, invoice) => {
-        if (invoice?.status === 'returned') return count;
-        if (!isDeliveryRequiredForInvoice(invoice)) return count;
-
-        const shipmentId = invoice?.shipment_id;
-        if (!shipmentId) return count + 1;
-
-        const shipStatus = shipmentStatusById.get(shipmentId);
-        if (!shipStatus || shipStatus === 'pending') return count + 1;
-
-        return count;
-      }, 0);
-    },
-    enabled: !!userId,
-    staleTime: 30 * 1000,
-    refetchOnWindowFocus: true,
   });
 
   // Fetch Business wallet IDs
@@ -1159,8 +1225,7 @@ const Dashboard = ({ items }) => {
     enabled: !!userId && businessWalletIds.length > 0 && !!dateRange.startDate && !!dateRange.endDate
   });
 
-  // Fetch refunds (implicitly Business-only since refunds come from invoices)
-  // RLS policies handle user filtering automatically - no need for explicit user_id check
+  // Fetch all invoice refund adjustments (goodwill + return)
   const { data: totalRefunds = 0 } = useQuery({
     queryKey: ['dashboard-refunds', userId, dateRange.startDate, dateRange.endDate],
     queryFn: async () => {
@@ -1174,9 +1239,9 @@ const Dashboard = ({ items }) => {
       const endDateISO = endDate.toISOString();
       
       const { data, error } = await supabase
-        .from('refunds')
+        .from('invoice_refunds')
         .select('amount')
-        // RLS security: user can only see refunds from their own invoices
+        .eq('user_id', userId)
         .gte('created_at', dateRange.startDate)
         .lte('created_at', endDateISO);
       
@@ -1285,36 +1350,18 @@ const Dashboard = ({ items }) => {
   const healthScorePercent = Math.max(0, Math.min(healthData.score || 0, 100));
   const healthTone = getHealthTone(healthData.label);
   const deadCapitalMetrics = useMemo(() => {
-    const deadCapital = Number.parseFloat(healthData?.metrics?.stuckCapital60d) || 0;
-    const totalStockCapital = Number.parseFloat(healthData?.metrics?.totalStockCostValue) || 0;
-    const hasActiveStock = totalStockCapital > 0;
-    const deadCapitalPctRaw = hasActiveStock ? (deadCapital / totalStockCapital) * 100 : 0;
-    const deadCapitalPct = Math.max(0, Math.min(deadCapitalPctRaw, 100));
-
-    return {
-      deadCapital,
-      totalStockCapital,
-      deadCapitalPct,
-      deadCapitalPctRounded: Math.round(deadCapitalPct),
-      hasActiveStock,
-    };
-  }, [healthData?.metrics?.stuckCapital60d, healthData?.metrics?.totalStockCostValue]);
-  const deadCapitalTone = getDeadCapitalTone(deadCapitalMetrics.deadCapitalPct);
-  const deadCapitalSegmentCount = 7;
-  const deadCapitalFilledSegments = deadCapitalMetrics.hasActiveStock
-    ? Math.max(
-      1,
-      Math.min(
-        deadCapitalSegmentCount,
-        Math.ceil((deadCapitalMetrics.deadCapitalPct / 100) * deadCapitalSegmentCount)
-      )
-    )
-    : 0;
+    return calculateDeadCapitalMetrics({
+      items,
+      thresholdDays: DEAD_CAPITAL_THRESHOLD_DAYS,
+    });
+  }, [items]);
+  const deadCapitalTone = getDeadCapitalTone(deadCapitalMetrics.deadPercent);
   const realityCheckData = useMemo(() => (
     calculateRealityCheck({
       invoiceItems,
+      inventoryItems: items,
     })
-  ), [invoiceItems]);
+  ), [invoiceItems, items]);
   const hasRealityComparison = (
     realityCheckData.hasPreviousData
     && Number.isFinite(realityCheckData.revenueChangePct)
@@ -1328,17 +1375,9 @@ const Dashboard = ({ items }) => {
   const realityProfitChipLabel = hasRealityComparison
     ? `${realityProfitChangeText} vs minggu lepas`
     : 'Tiada bandingan';
-  const realityStatusPill = getRealityStatusPill({
-    hasComparison: hasRealityComparison,
-    reasons: realityCheckData.reasons,
-  });
-  const realityInsightText = getRealityInsightText({
-    hasComparison: hasRealityComparison,
-    revenueChangePct: realityCheckData.revenueChangePct,
-    profitChangePct: realityCheckData.profitChangePct,
-    isSlowWeek: realityCheckData.isSlowWeek,
-  });
-  const realityTopReasons = (realityCheckData.reasons || []).slice(0, 2);
+  const realityOverallBadge = getRealityOverallBadge(realityCheckData.overallSeverity);
+  const realityInsights = (realityCheckData.insights || []).slice(0, 2);
+  const realityOnboardingMessage = realityCheckData.onboardingMessage || null;
 
   // Filter by date range
   const getFilteredSales = () => {
@@ -1551,20 +1590,13 @@ const Dashboard = ({ items }) => {
     })
     .slice(0, 5);
 
-  const stockSignals = useMemo(() => {
-    const now = new Date();
-    return items.reduce((acc, item) => {
-      const availableQty = getItemAvailableQuantity(item);
-      if (availableQty <= 0) return acc;
-
-      const createdDate = item?.created_at ? new Date(item.created_at) : null;
-      if (!createdDate || Number.isNaN(createdDate.getTime())) return acc;
-
-      const agingDays = Math.max(0, Math.floor((now - createdDate) / (1000 * 60 * 60 * 24)));
-      if (agingDays >= 60) acc.riskCount += 1;
-      return acc;
-    }, { riskCount: 0 });
-  }, [items]);
+  const nextStepMetrics = useMemo(
+    () => computeNextSteps({ invoices: invoiceItems, inventory: items }),
+    [invoiceItems, items]
+  );
+  const pendingShippingCount = nextStepMetrics.pendingShippingCount || 0;
+  const riskStockCount = nextStepMetrics.riskStockCount || 0;
+  const clearanceCount = nextStepMetrics.clearanceCount || 0;
 
   const hasNoSalesInRange = filteredSales.length === 0;
 
@@ -1573,17 +1605,20 @@ const Dashboard = ({ items }) => {
       return 'Tiada jualan dalam tempoh ini - cuba longgarkan tarikh atau semak stok aktif.';
     }
 
-    if (pendingShippingCount > 0 || stockSignals.riskCount > 0) {
-      return `Anda ada ${pendingShippingCount} pesanan perlu dihantar dan ${stockSignals.riskCount} stok berisiko.`;
+    if (pendingShippingCount > 0 || riskStockCount > 0) {
+      return `Anda ada ${pendingShippingCount} pesanan perlu dihantar dan ${riskStockCount} stok berisiko.`;
     }
 
     return `Revenue tempoh ini ${formatRM(filteredStats.totalRevenue)} dan profit ${formatRM(filteredStats.totalProfit)}.`;
-  }, [filteredStats.totalProfit, filteredStats.totalRevenue, hasNoSalesInRange, pendingShippingCount, stockSignals.riskCount]);
+  }, [filteredStats.totalProfit, filteredStats.totalRevenue, hasNoSalesInRange, pendingShippingCount, riskStockCount]);
 
   const priorityLine = useMemo(
-    () => `Hari ini: ${filteredStats.soldItemsCount} jualan | ${pendingShippingCount || 0} perlu pos | ${stockSignals.riskCount || 0} stok risiko`,
-    [filteredStats.soldItemsCount, pendingShippingCount, stockSignals.riskCount]
+    () => `Hari ini: ${filteredStats.soldItemsCount} jualan | ${pendingShippingCount || 0} perlu pos | ${riskStockCount || 0} stok risiko`,
+    [filteredStats.soldItemsCount, pendingShippingCount, riskStockCount]
   );
+
+  const riskCountDisplay = isInventoryLoading ? '—' : `${riskStockCount}`;
+  const clearanceCountDisplay = isInventoryLoading ? '—' : `${clearanceCount}`;
 
   const dashboardSteps = useMemo(() => ([
     {
@@ -1591,26 +1626,31 @@ const Dashboard = ({ items }) => {
       description: 'Terus rekod jualan baru.',
       to: '/invoices/create',
       value: 'Go',
+      valueTone: 'primary',
     },
     {
       label: 'Semak Stok Risiko',
       description: 'Item aging 60+ hari.',
       to: '/inventory?filter=risk',
-      value: stockSignals.riskCount || 0,
+      value: riskCountDisplay,
+      valueTone: !isInventoryLoading && riskStockCount > 0 ? 'warning' : 'neutral',
+      tooltip: 'Stok melebihi 60 hari tanpa jualan.',
     },
     {
-      label: 'Cipta Katalog',
-      description: 'Susun item untuk jualan cepat.',
-      to: '/catalogs/create',
-      value: 'Go',
+      label: 'Cadang Clearance',
+      description: 'Calon item untuk jualan pelepasan.',
+      to: '/inventory?filter=aging_60',
+      value: clearanceCountDisplay,
+      valueTone: !isInventoryLoading && clearanceCount > 0 ? 'warning' : 'neutral',
     },
     {
       label: 'Semak Penghantaran',
       description: 'Lihat order yang belum dipos.',
       to: '/invoices?status=paid&shipping_state=pending',
-      value: pendingShippingCount || 0,
+      value: pendingShippingCount > 0 ? `${pendingShippingCount}` : 'Tiada',
+      valueTone: pendingShippingCount > 0 ? 'warning' : 'neutral',
     },
-  ]), [pendingShippingCount, stockSignals.riskCount]);
+  ]), [clearanceCount, clearanceCountDisplay, isInventoryLoading, pendingShippingCount, riskCountDisplay, riskStockCount]);
 
   const isDark = theme === 'dark';
   const tickColor = isDark ? '#9ca3af' : '#6b7281';
@@ -1671,22 +1711,17 @@ const Dashboard = ({ items }) => {
           tooltipBorder={tooltipBorder}
           tooltipTextColor={tooltipTextColor}
           realityCheckData={realityCheckData}
-          realityStatusPill={realityStatusPill}
+          realityOverallBadge={realityOverallBadge}
           realityRevenueChipLabel={realityRevenueChipLabel}
           realityProfitChipLabel={realityProfitChipLabel}
-          realityInsightText={realityInsightText}
-          realityTopReasons={realityTopReasons}
-          getRealityReasonIcon={getRealityReasonIcon}
-          getRealityReasonRowTone={getRealityReasonRowTone}
-          getRealityReasonImpactBadge={getRealityReasonImpactBadge}
+          realityInsights={realityInsights}
+          realityOnboardingMessage={realityOnboardingMessage}
           healthTone={healthTone}
           healthData={healthData}
           healthReasons={healthReasons}
           healthScorePercent={healthScorePercent}
           deadCapitalMetrics={deadCapitalMetrics}
           deadCapitalTone={deadCapitalTone}
-          deadCapitalSegmentCount={deadCapitalSegmentCount}
-          deadCapitalFilledSegments={deadCapitalFilledSegments}
           isDeadCapitalTooltipOpen={isDeadCapitalTooltipOpen}
           setIsDeadCapitalTooltipOpen={setIsDeadCapitalTooltipOpen}
         />

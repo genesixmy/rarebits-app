@@ -112,6 +112,18 @@ export const useInvoices = (filters = {}) => {
             item:items(id, name, category)
           ),
           refunds(id, amount, reason, notes, issued_at, created_at),
+          invoice_refunds(
+            id,
+            refund_type,
+            amount,
+            reason,
+            note,
+            affects_inventory,
+            inventory_restocked,
+            legacy_refund_id,
+            legacy_return_id,
+            created_at
+          ),
           invoice_item_returns(
             id,
             invoice_item_id,
@@ -188,6 +200,18 @@ export const useInvoiceDetail = (invoiceId) => {
             item:items(id, name, category, image_url)
           ),
           refunds(id, amount, reason, notes, issued_at, created_at),
+          invoice_refunds(
+            id,
+            refund_type,
+            amount,
+            reason,
+            note,
+            affects_inventory,
+            inventory_restocked,
+            legacy_refund_id,
+            legacy_return_id,
+            created_at
+          ),
           invoice_item_returns(
             id,
             invoice_item_id,

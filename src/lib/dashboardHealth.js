@@ -1,4 +1,5 @@
 const DAY_MS = 24 * 60 * 60 * 1000;
+export const DEAD_CAPITAL_THRESHOLD_DAYS = 60;
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
@@ -26,7 +27,7 @@ export const getItemReservedQuantity = (item) => {
 };
 
 export const getItemAvailableQuantity = (item) => {
-  const totalQuantity = parseNonNegativeInteger(item?.quantity, 1);
+  const totalQuantity = parseNonNegativeInteger(item?.quantity, 0);
   const reservedQuantity = getItemReservedQuantity(item);
   return Math.max(totalQuantity - reservedQuantity, 0);
 };
@@ -47,6 +48,94 @@ export const getItemAgingDays = (createdAt, nowDate = new Date()) => {
     nowDate.getUTCDate()
   );
   return Math.max(Math.floor((nowUtc - createdUtc) / DAY_MS), 0);
+};
+
+export const getItemStuckQuantity = (item) => {
+  // Include reserved units because modal is still locked even when inventory is reserved.
+  const availableQty = getItemAvailableQuantity(item);
+  const reservedQty = getItemReservedQuantity(item);
+  return Math.max(availableQty + reservedQty, 0);
+};
+
+export const calculateDeadCapitalMetrics = ({
+  items = [],
+  thresholdDays = DEAD_CAPITAL_THRESHOLD_DAYS,
+  nowDate = new Date(),
+} = {}) => {
+  const normalizedThresholdDays = Math.max(parseNonNegativeInteger(thresholdDays, DEAD_CAPITAL_THRESHOLD_DAYS), 1);
+  const now = nowDate instanceof Date ? nowDate : new Date(nowDate);
+
+  const rows = (Array.isArray(items) ? items : []).map((item) => {
+    const status = String(item?.status || '').trim().toLowerCase();
+    const qtyStuck = getItemStuckQuantity(item);
+    const ageDays = getItemAgingDays(item?.created_at, now);
+    const rawCost = Number.parseFloat(item?.cost_price);
+    const hasMissingCost = !Number.isFinite(rawCost) || rawCost < 0;
+    const costPerUnit = hasMissingCost ? 0 : Math.max(rawCost, 0);
+    const stockValue = costPerUnit * qtyStuck;
+    const isDead = ageDays !== null && ageDays >= normalizedThresholdDays;
+
+    return {
+      id: item?.id || null,
+      name: (item?.name || item?.item_name || 'Item').toString(),
+      status,
+      qtyStuck,
+      ageDays,
+      hasMissingCost,
+      costPerUnit,
+      stockValue,
+      isDead,
+    };
+  }).filter((row) => row.qtyStuck > 0 && row.status !== 'terjual');
+
+  const deadRows = rows.filter((row) => row.isDead);
+  const activeRows = rows.filter((row) => !row.isDead);
+
+  const deadValue = deadRows.reduce((sum, row) => sum + row.stockValue, 0);
+  const activeValue = activeRows.reduce((sum, row) => sum + row.stockValue, 0);
+  const totalStockValue = deadValue + activeValue;
+  const deadPercent = totalStockValue > 0 ? (deadValue / totalStockValue) * 100 : 0;
+
+  const topDeadItems = deadRows
+    .map((row) => ({
+      id: row.id,
+      name: row.name,
+      ageDays: row.ageDays,
+      qtyStuck: row.qtyStuck,
+      deadValue: row.stockValue,
+    }))
+    .sort((a, b) => {
+      if (b.deadValue !== a.deadValue) return b.deadValue - a.deadValue;
+      return (b.ageDays || 0) - (a.ageDays || 0);
+    })
+    .slice(0, 5);
+
+  const missingCostItemsCount = rows.filter((row) => row.hasMissingCost).length;
+  const deadQty = deadRows.reduce((sum, row) => sum + row.qtyStuck, 0);
+  const activeQty = activeRows.reduce((sum, row) => sum + row.qtyStuck, 0);
+  const totalQty = deadQty + activeQty;
+
+  /*
+    Dev test notes:
+    1) cost=200, qty available=2, age=70d => deadValue=400, deadPercent=100 (if only stock).
+    2) totalStockValue=200, deadValue=0 => deadPercent=0.
+    3) age=70d, qty available=2, reserved=1, cost=50 => deadValue=150 (include reserved).
+  */
+  return {
+    thresholdDays: normalizedThresholdDays,
+    deadValue,
+    activeValue,
+    totalStockValue,
+    deadPercent,
+    deadPercentRounded: Math.round(Math.max(0, Math.min(deadPercent, 100))),
+    hasStockValue: totalStockValue > 0,
+    hasStockUnits: totalQty > 0,
+    deadQty,
+    activeQty,
+    totalQty,
+    missingCostItemsCount,
+    topDeadItems,
+  };
 };
 
 const resolveHealthLabel = (score) => {
@@ -94,6 +183,11 @@ export const calculateBusinessHealth = ({
   nowDate = new Date(),
 }) => {
   const now = nowDate instanceof Date ? nowDate : new Date(nowDate);
+  const deadCapitalMetrics = calculateDeadCapitalMetrics({
+    items,
+    thresholdDays: DEAD_CAPITAL_THRESHOLD_DAYS,
+    nowDate: now,
+  });
 
   const activeItemRows = (Array.isArray(items) ? items : []).map((item) => {
     const availableQty = getItemAvailableQuantity(item);
@@ -114,10 +208,8 @@ export const calculateBusinessHealth = ({
   }).filter((row) => row.availableQty > 0 && row.status !== 'terjual');
 
   const activeStockQty = activeItemRows.reduce((sum, row) => sum + row.availableQty, 0);
-  const totalStockCostValue = activeItemRows.reduce((sum, row) => sum + row.stockCostValue, 0);
-  const stuckCapital60d = activeItemRows.reduce((sum, row) => (
-    sum + ((row.agingDays !== null && row.agingDays >= 60) ? row.stockCostValue : 0)
-  ), 0);
+  const totalStockCostValue = deadCapitalMetrics.totalStockValue;
+  const stuckCapital60d = deadCapitalMetrics.deadValue;
 
   const categoryStockValueMap = activeItemRows.reduce((acc, row) => {
     acc[row.categoryName] = (acc[row.categoryName] || 0) + row.stockCostValue;

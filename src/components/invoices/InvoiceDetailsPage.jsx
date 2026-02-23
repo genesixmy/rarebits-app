@@ -989,13 +989,13 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                 ` : ''}
                 ${financialSummary.adjustmentTotal > 0 ? `
                   <div class="totals-row">
-                    <span>Pelarasan</span>
+                    <span>Refund (Goodwill)</span>
                     <span>- ${escapeHtml(formatCurrency(financialSummary.adjustmentTotal))}</span>
                   </div>
                 ` : ''}
                 ${financialSummary.returnedTotal > 0 ? `
                   <div class="totals-row">
-                    <span>Return</span>
+                    <span>Return/Cancel</span>
                     <span>- ${escapeHtml(formatCurrency(financialSummary.returnedTotal))}</span>
                   </div>
                 ` : ''}
@@ -1164,8 +1164,8 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
             <div class="totals">
               <div class="row"><span>Subtotal</span><span>${escapeHtml(formatCurrency(invoiceData.subtotal || 0))}</span></div>
               ${showShippingLine ? `<div class="row"><span>Caj Pos</span><span>${escapeHtml(formatCurrency(shippingCharged))}</span></div>` : ''}
-              ${financialSummary.adjustmentTotal > 0 ? `<div class="row"><span>Pelarasan</span><span>- ${escapeHtml(formatCurrency(financialSummary.adjustmentTotal))}</span></div>` : ''}
-              ${financialSummary.returnedTotal > 0 ? `<div class="row"><span>Return</span><span>- ${escapeHtml(formatCurrency(financialSummary.returnedTotal))}</span></div>` : ''}
+              ${financialSummary.adjustmentTotal > 0 ? `<div class="row"><span>Refund (Goodwill)</span><span>- ${escapeHtml(formatCurrency(financialSummary.adjustmentTotal))}</span></div>` : ''}
+              ${financialSummary.returnedTotal > 0 ? `<div class="row"><span>Return/Cancel</span><span>- ${escapeHtml(formatCurrency(financialSummary.returnedTotal))}</span></div>` : ''}
               <div class="row grand"><span>Final Dibayar</span><span>${escapeHtml(formatCurrency(financialSummary.finalTotal || 0))}</span></div>
             </div>
             ${showQr ? `
@@ -1317,8 +1317,8 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
         <div class="totals">
           <div class="row"><span>Subtotal</span><span>${escapeHtml(formatCurrency(invoiceData.subtotal || 0))}</span></div>
           ${showShippingLine ? `<div class="row"><span>Caj Pos</span><span>${escapeHtml(formatCurrency(shippingCharged))}</span></div>` : ''}
-          ${financialSummary.adjustmentTotal > 0 ? `<div class="row"><span>Pelarasan</span><span>- ${escapeHtml(formatCurrency(financialSummary.adjustmentTotal))}</span></div>` : ''}
-          ${financialSummary.returnedTotal > 0 ? `<div class="row"><span>Return</span><span>- ${escapeHtml(formatCurrency(financialSummary.returnedTotal))}</span></div>` : ''}
+          ${financialSummary.adjustmentTotal > 0 ? `<div class="row"><span>Refund (Goodwill)</span><span>- ${escapeHtml(formatCurrency(financialSummary.adjustmentTotal))}</span></div>` : ''}
+          ${financialSummary.returnedTotal > 0 ? `<div class="row"><span>Return/Cancel</span><span>- ${escapeHtml(formatCurrency(financialSummary.returnedTotal))}</span></div>` : ''}
           <div class="row grand"><span>Final Dibayar</span><span>${escapeHtml(formatCurrency(financialSummary.finalTotal || 0))}</span></div>
         </div>
         ${showQr ? `
@@ -1491,10 +1491,10 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
         addRow('Caj Pos', formatCurrency(shippingCharged));
       }
       if (financialSummary.adjustmentTotal > 0) {
-        addRow('Pelarasan', `- ${formatCurrency(financialSummary.adjustmentTotal)}`);
+        addRow('Refund (Goodwill)', `- ${formatCurrency(financialSummary.adjustmentTotal)}`);
       }
       if (financialSummary.returnedTotal > 0) {
-        addRow('Return', `- ${formatCurrency(financialSummary.returnedTotal)}`);
+        addRow('Return/Cancel', `- ${formatCurrency(financialSummary.returnedTotal)}`);
       }
       addRow('Final Dibayar', formatCurrency(financialSummary.finalTotal || 0), { size: 27, weight: 700, lineHeight: 36 });
 
@@ -1975,7 +1975,7 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
         notes: refundNotes || '',
       });
 
-      toast.success(`Pelarasan harga RM${amount.toFixed(2)} berjaya direkod`);
+      toast.success('Invois telah diselaraskan');
       
       // Reset modal
       setShowRefundModal(false);
@@ -2068,7 +2068,7 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
         notes: returnNotes || '',
       });
 
-      toast.success(`Pulangan ${quantity} unit berjaya diproses`);
+      toast.success('Invois telah diselaraskan');
       setShowReturnModal(false);
       setSelectedReturnItemId('');
       setReturnQuantity('1');
@@ -2175,6 +2175,22 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
   const financialSummary = getInvoiceFinancialSummary(invoice);
   const netAfterChannelFee = financialSummary.finalTotal - channelFeeAmount;
   const hasTrackingNumber = normalizeWhitespaceText(shipment?.tracking_no || deliveryForm.trackingNo || '').length > 0;
+  const invoiceRefunds = Array.isArray(invoice?.invoice_refunds)
+    ? [...invoice.invoice_refunds].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
+    : [];
+  const goodwillRefundHistory = invoiceRefunds.filter((entry) => (entry?.refund_type || '').toLowerCase() === 'goodwill');
+  const legacyGoodwillRefundHistory = Array.isArray(invoice?.refunds)
+    ? [...invoice.refunds].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
+    : [];
+  const goodwillLegacyRefundIds = new Set(
+    goodwillRefundHistory
+      .map((entry) => entry?.legacy_refund_id)
+      .filter(Boolean)
+  );
+  const combinedGoodwillRefundHistory = [
+    ...goodwillRefundHistory,
+    ...legacyGoodwillRefundHistory.filter((entry) => !goodwillLegacyRefundIds.has(entry.id)),
+  ].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
   const invoiceItemReturns = Array.isArray(invoice?.invoice_item_returns) ? invoice.invoice_item_returns : [];
   const returnedQtyByInvoiceItemId = invoiceItemReturns.reduce((acc, entry) => {
     const key = entry?.invoice_item_id;
@@ -2533,7 +2549,7 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                 </div>
                 {financialSummary.adjustmentTotal > 0 && (
                   <div className="flex justify-between text-sm text-red-600">
-                    <span>Adjustment:</span>
+                    <span>Refund (Goodwill):</span>
                     <span className="font-medium">
                       - {formatCurrency(financialSummary.adjustmentTotal)}
                     </span>
@@ -2541,7 +2557,7 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                 )}
                 {financialSummary.returnedTotal > 0 && (
                   <div className="flex justify-between text-sm text-rose-600">
-                    <span>Return:</span>
+                    <span>Return/Cancel:</span>
                     <span className="font-medium">
                       - {formatCurrency(financialSummary.returnedTotal)}
                     </span>
@@ -2618,19 +2634,19 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                     </p>
                   </div>
 
-                  {/* Adjustment history */}
-                  {invoice?.refunds && invoice.refunds.length > 0 && (
+                  {/* Goodwill refund history */}
+                  {combinedGoodwillRefundHistory.length > 0 && (
                     <div className="space-y-2 mt-3">
                       <p className="text-xs font-semibold uppercase tracking-wide text-red-700 dark:text-red-300">
-                        Sejarah Pelarasan Harga
+                        Sejarah Refund Goodwill
                       </p>
-                      {invoice.refunds.map((refund) => (
+                      {combinedGoodwillRefundHistory.map((refund) => (
                         <div key={refund.id} className="flex items-start justify-between p-3 rounded-lg bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900">
                           <div className="flex-1">
                             <p className="font-semibold text-red-700 dark:text-red-300">RM {parseFloat(refund.amount).toFixed(2)}</p>
-                            <p className="text-sm text-red-600 dark:text-red-400 mt-0.5">{refund.reason || 'Price Adjustment'}</p>
-                            {refund.notes && <p className="text-xs text-red-500 dark:text-red-400 mt-1">Catatan: {refund.notes}</p>}
-                            <p className="text-xs text-red-500 dark:text-red-600 mt-1">{new Date(refund.created_at).toLocaleDateString()} · {new Date(refund.created_at).toLocaleTimeString()}</p>
+                            <p className="text-sm text-red-600 dark:text-red-400 mt-0.5">{refund.reason || 'Refund (Goodwill)'}</p>
+                            {(refund.note || refund.notes) && <p className="text-xs text-red-500 dark:text-red-400 mt-1">Catatan: {refund.note || refund.notes}</p>}
+                            <p className="text-xs text-red-500 dark:text-red-600 mt-1">{new Date(refund.created_at).toLocaleDateString()} - {new Date(refund.created_at).toLocaleTimeString()}</p>
                           </div>
                         </div>
                       ))}
@@ -2646,7 +2662,7 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                         <div key={entry.id} className="flex items-start justify-between rounded-lg border border-rose-200 bg-rose-50 p-3 dark:border-rose-900 dark:bg-rose-950/30">
                           <div className="flex-1">
                             <p className="font-semibold text-rose-700 dark:text-rose-300">
-                              {(parseInt(entry.returned_quantity, 10) || 0)} unit • RM {(parseFloat(entry.refund_amount) || 0).toFixed(2)}
+                              {(parseInt(entry.returned_quantity, 10) || 0)} unit - RM {(parseFloat(entry.refund_amount) || 0).toFixed(2)}
                             </p>
                             <p className="mt-0.5 text-sm text-rose-600 dark:text-rose-400">
                               {entry.return_item_name || 'Item Returned'}
@@ -2656,7 +2672,7 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                             </p>
                             {entry.notes && <p className="mt-1 text-xs text-rose-500 dark:text-rose-400">Catatan: {entry.notes}</p>}
                             <p className="mt-1 text-xs text-rose-500 dark:text-rose-600">
-                              {new Date(entry.created_at).toLocaleDateString()} · {new Date(entry.created_at).toLocaleTimeString()}
+                              {new Date(entry.created_at).toLocaleDateString()} - {new Date(entry.created_at).toLocaleTimeString()}
                             </p>
                           </div>
                         </div>

@@ -138,6 +138,18 @@ const getItemAgingMeta = (item, todayUtcMs) => {
   };
 };
 
+const INVENTORY_QUICK_FILTERS = new Set(['risk', 'aging_60', 'new_stock', 'low_margin']);
+const LOW_MARGIN_THRESHOLD_PCT = 20;
+const NEW_STOCK_MAX_AGE_DAYS = 14;
+
+const normalizeInventoryQuickFilter = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return '';
+  if (normalized === 'aging') return 'aging_60';
+  if (INVENTORY_QUICK_FILTERS.has(normalized)) return normalized;
+  return '';
+};
+
 const EMPTY_FAST_SELL_SUGGESTIONS = Object.freeze([]);
 
 const areSetsEqual = (left, right) => {
@@ -1146,6 +1158,11 @@ function App() {
     }));
   }, [items]);
 
+  const inventoryQuickFilter = useMemo(() => {
+    const params = new URLSearchParams(location.search);
+    return normalizeInventoryQuickFilter(params.get('filter'));
+  }, [location.search]);
+
   const normalizedSearchTerm = searchTerm.trim().toLowerCase();
   const filteredItems = useMemo(() => {
     const filtered = itemsWithAging.filter((item) => {
@@ -1154,6 +1171,9 @@ function App() {
       const itemSku = (item.sku || '').toLowerCase();
       const itemDescription = (item.description || '').toLowerCase();
       const itemRackLocation = (item.rack_location || '').toLowerCase();
+      const itemAvailableQty = Number.isFinite(item.available_quantity)
+        ? Math.max(item.available_quantity, 0)
+        : getAvailableQuantityForItem(item);
       const matchesKeyword = !normalizedSearchTerm
         || itemName.includes(normalizedSearchTerm)
         || itemCategory.includes(normalizedSearchTerm)
@@ -1162,11 +1182,38 @@ function App() {
         || itemRackLocation.includes(normalizedSearchTerm);
       const matchesAgingStatus = filterAgingStatus === 'all'
         || item.aging_status === filterAgingStatus;
+      const matchesQuickFilter = (() => {
+        if (!inventoryQuickFilter) return true;
+
+        if (inventoryQuickFilter === 'risk' || inventoryQuickFilter === 'aging_60') {
+          return itemAvailableQty > 0 && Number.isInteger(item.aging_days) && item.aging_days >= 60;
+        }
+
+        if (inventoryQuickFilter === 'new_stock') {
+          return itemAvailableQty > 0
+            && Number.isInteger(item.aging_days)
+            && item.aging_days >= 0
+            && item.aging_days <= NEW_STOCK_MAX_AGE_DAYS;
+        }
+
+        if (inventoryQuickFilter === 'low_margin') {
+          if (itemAvailableQty <= 0) return false;
+          const sellingPrice = parseFloat(item?.selling_price);
+          const costPrice = parseFloat(item?.cost_price);
+          if (!Number.isFinite(sellingPrice) || sellingPrice <= 0) return false;
+          if (!Number.isFinite(costPrice) || costPrice < 0) return false;
+          const marginPct = ((sellingPrice - costPrice) / sellingPrice) * 100;
+          return Number.isFinite(marginPct) && marginPct <= LOW_MARGIN_THRESHOLD_PCT;
+        }
+
+        return true;
+      })();
 
       return matchesKeyword
         && (filterCategory === 'all' || item.category === filterCategory)
         && (filterStatus === 'all' || item.status === filterStatus)
-        && matchesAgingStatus;
+        && matchesAgingStatus
+        && matchesQuickFilter;
     });
 
     if (inventorySort === 'aging_desc') {
@@ -1186,6 +1233,7 @@ function App() {
     filterStatus,
     filterAgingStatus,
     inventorySort,
+    inventoryQuickFilter,
   ]);
   const suggestedNonFavoriteCount = useMemo(
     () => (fastSellSuggestions || []).filter((suggestion) => !suggestion.is_favorite).length,
@@ -1241,7 +1289,7 @@ function App() {
             transition={{ duration: 0.2 }}
           >
             <Routes>
-              <Route path="/" element={<Dashboard items={items} categories={categories} />} />
+              <Route path="/" element={<Dashboard items={items} categories={categories} isInventoryLoading={isLoadingItems} />} />
               <Route path="/inventory" element={
                 <div className="space-y-6">
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1303,6 +1351,17 @@ function App() {
                       </div>
                     </CardContent>
                   </Card>
+                  {inventoryQuickFilter ? (
+                    <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm text-indigo-800">
+                      Filter pantas aktif:{' '}
+                      <span className="font-semibold">
+                        {inventoryQuickFilter === 'risk' && 'Stok Risiko 60+ hari'}
+                        {inventoryQuickFilter === 'aging_60' && 'Stok Aging 60+ hari'}
+                        {inventoryQuickFilter === 'new_stock' && 'Stok Baru (14 hari)'}
+                        {inventoryQuickFilter === 'low_margin' && `Margin Rendah (<= ${LOW_MARGIN_THRESHOLD_PCT}%)`}
+                      </span>
+                    </div>
+                  ) : null}
                   {isLoadingItems || itemMutation.isPending || deleteItemMutation.isPending ? <div className="flex justify-center py-12"><Loader2 className="w-8 h-8 animate-spin" /></div> : <ItemList items={filteredItems} categories={categories} clients={clients} onEdit={(item) => { setEditingItem(item); setShowAddForm(true); }} onDelete={deleteItemMutation.mutate} onToggleFavorite={handleToggleFavorite} favoriteUpdatingIds={favoriteUpdatingIds} onBulkDelete={async (itemIds) => {
                     console.log('[App] Bulk deleting items:', itemIds);
                     for (const itemId of itemIds) {

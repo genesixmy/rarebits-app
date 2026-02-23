@@ -8,7 +8,7 @@ import { Loader2, Plus, MoreVertical, Edit, Trash2, Wallet as WalletIcon, ArrowR
 import { useToast } from '@/components/ui/use-toast';
 import { supabase } from '@/lib/customSupabaseClient';
 import { useAuth } from '@/contexts/SupabaseAuthContext';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import WalletFormModal from '@/components/wallet/WalletFormModal';
 import TransactionFormModal from '@/components/wallet/TransactionFormModal';
 import TransferFormModal from '@/components/wallet/TransferFormModal';
@@ -18,6 +18,8 @@ import {
   isTransferLegacyType,
   isTransferOutLegacyType,
   manualTypeToLegacyType,
+  resolveTransactionClassification,
+  TRANSACTION_CLASSIFICATIONS,
 } from '@/components/wallet/transactionClassification';
 import {
   DropdownMenu,
@@ -93,6 +95,7 @@ const WalletPage = () => {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [isWalletModalOpen, setIsWalletModalOpen] = useState(false);
   const [isTransactionModalOpen, setIsTransactionModalOpen] = useState(false);
@@ -103,6 +106,7 @@ const WalletPage = () => {
   const [deletingTransaction, setDeletingTransaction] = useState(null);
   const [accountTypeFilter, setAccountTypeFilter] = useState('Business');
   const [displayLimit, setDisplayLimit] = useState(20);
+  const tabFilter = searchParams.get('tab') === 'expenses' ? 'expenses' : '';
 
   const { data: allWallets = [], isLoading: isLoadingWallets, isError: isWalletsError, refetch: refetchWallets, isRefetching: isRefetchingWallets } = useQuery({
     queryKey: ['wallets', user?.id],
@@ -215,28 +219,36 @@ const WalletPage = () => {
   const filteredWalletIds = useMemo(() => new Set(filteredWallets.map(w => w.id)), [filteredWallets]);
 
   const filteredTransactions = useMemo(() => {
-    if (accountTypeFilter === 'All') {
-        return allTransactions;
-    }
-    
     const walletIdToTypeMap = new Map(allWallets.map(w => [w.id, w.account_type]));
 
-    return allTransactions.filter(tx => {
-        const txWalletType = walletIdToTypeMap.get(tx.wallet_id);
+    const accountScopedTransactions = accountTypeFilter === 'All'
+      ? allTransactions
+      : allTransactions.filter(tx => {
+          const txWalletType = walletIdToTypeMap.get(tx.wallet_id);
 
-        if (isTransferLegacyType(tx.type)) {
-            const relatedTransferTx = allTransactions.find(otherTx => otherTx.transfer_id === tx.transfer_id && otherTx.id !== tx.id);
-            if (!relatedTransferTx) return false; // Incomplete transfer data
+          if (isTransferLegacyType(tx.type)) {
+              const relatedTransferTx = allTransactions.find(otherTx => otherTx.transfer_id === tx.transfer_id && otherTx.id !== tx.id);
+              if (!relatedTransferTx) return false; // Incomplete transfer data
 
-            const sourceWalletType = walletIdToTypeMap.get(isTransferOutLegacyType(tx.type) ? tx.wallet_id : relatedTransferTx.wallet_id);
-            const destWalletType = walletIdToTypeMap.get(isTransferOutLegacyType(tx.type) ? relatedTransferTx.wallet_id : tx.wallet_id);
-            
-            return sourceWalletType === accountTypeFilter || destWalletType === accountTypeFilter;
-        }
-        
-        return txWalletType === accountTypeFilter;
+              const sourceWalletType = walletIdToTypeMap.get(isTransferOutLegacyType(tx.type) ? tx.wallet_id : relatedTransferTx.wallet_id);
+              const destWalletType = walletIdToTypeMap.get(isTransferOutLegacyType(tx.type) ? relatedTransferTx.wallet_id : tx.wallet_id);
+              
+              return sourceWalletType === accountTypeFilter || destWalletType === accountTypeFilter;
+          }
+          
+          return txWalletType === accountTypeFilter;
+      });
+
+    if (tabFilter !== 'expenses') {
+      return accountScopedTransactions;
+    }
+
+    return accountScopedTransactions.filter((tx) => {
+      const classification = resolveTransactionClassification(tx);
+      if (classification === TRANSACTION_CLASSIFICATIONS.EXPENSE) return true;
+      return tx.type === 'sales_return' || tx.type === 'refund' || tx.type === 'refund_adjustment' || tx.type === 'goodwill_adjustment';
     });
-  }, [allTransactions, allWallets, accountTypeFilter]);
+  }, [allTransactions, allWallets, accountTypeFilter, tabFilter]);
   
   const transactionsToDisplay = useMemo(() => filteredTransactions.slice(0, displayLimit), [filteredTransactions, displayLimit]);
 
@@ -507,6 +519,26 @@ const WalletPage = () => {
         </div>
 
         <AccountTypeFilter filter={accountTypeFilter} setFilter={setAccountTypeFilter} />
+
+        {tabFilter === 'expenses' && (
+          <div className="flex flex-col gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-xs text-amber-800">
+              Penapis aktif: paparan transaksi perbelanjaan dan refund.
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 border-amber-300 bg-white text-amber-700 hover:bg-amber-100"
+              onClick={() => {
+                const nextParams = new URLSearchParams(searchParams);
+                nextParams.delete('tab');
+                setSearchParams(nextParams, { replace: true });
+              }}
+            >
+              Buang Penapis Ini
+            </Button>
+          </div>
+        )}
 
         <Card className="overflow-hidden rounded-3xl border border-transparent bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white shadow-[0_20px_45px_-22px_rgba(124,58,237,0.8)]">
           <CardHeader className="pb-3">

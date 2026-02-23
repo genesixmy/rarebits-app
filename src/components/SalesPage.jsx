@@ -74,7 +74,7 @@ const SalesPage = ({ items }) => {
           item_name,
           invoice_item_returns(returned_quantity, refund_amount),
           item:items(id, name, category, cost_price),
-          invoice:invoices(id, invoice_date, status, user_id, shipping_charged, shipment_id, channel_fee_amount, courier_payment_mode)
+          invoice:invoices(id, invoice_date, status, user_id, shipping_charged, shipment_id, channel_fee_amount, courier_payment_mode, adjustment_total)
         `)
         .order('created_at', { ascending: false });
 
@@ -177,6 +177,7 @@ const SalesPage = ({ items }) => {
           invoice_shipping_cost_recorded: Boolean(invItem.invoice?.shipment?.courier_paid),
           invoice_channel_fee: Math.max(parseFloat(invItem.invoice?.channel_fee_amount) || 0, 0),
           invoice_courier_payment_mode: resolveCourierPaymentModeForInvoice(invItem.invoice),
+          invoice_adjustment_total: Math.max(parseFloat(invItem.invoice?.adjustment_total) || 0, 0),
         });
       })
       .filter((row) => row.quantity_sold > 0 || Math.abs(row.actual_sold_amount) > 0.0001);
@@ -211,6 +212,7 @@ const SalesPage = ({ items }) => {
   const salesSummary = useMemo(() => {
     const shippingByInvoice = new Map();
     const channelFeeByInvoice = new Map();
+    const adjustmentByInvoice = new Map();
     let revenueItem = 0;
     let itemProfit = 0;
 
@@ -237,6 +239,10 @@ const SalesPage = ({ items }) => {
       if (item.invoice_id && !channelFeeByInvoice.has(item.invoice_id)) {
         channelFeeByInvoice.set(item.invoice_id, Math.max(parseFloat(item.invoice_channel_fee) || 0, 0));
       }
+
+      if (item.invoice_id && !adjustmentByInvoice.has(item.invoice_id)) {
+        adjustmentByInvoice.set(item.invoice_id, Math.max(parseFloat(item.invoice_adjustment_total) || 0, 0));
+      }
     });
 
     const shippingCollected = Array.from(shippingByInvoice.values()).reduce((sum, value) => sum + value.charged, 0);
@@ -249,14 +255,16 @@ const SalesPage = ({ items }) => {
       (value) => value.charged > 0 && !value.costRecorded
     ).length;
     const totalChannelFees = Array.from(channelFeeByInvoice.values()).reduce((sum, fee) => sum + fee, 0);
+    const totalAdjustments = Array.from(adjustmentByInvoice.values()).reduce((sum, amount) => sum + amount, 0);
 
     return {
-      revenueItem,
+      revenueItem: Math.max(revenueItem - totalAdjustments, 0),
       shippingCollected,
       shippingCost,
       shippingProfit,
       totalChannelFees,
-      netProfit: itemProfit - totalChannelFees + shippingProfit,
+      totalAdjustments,
+      netProfit: itemProfit - totalChannelFees + shippingProfit - totalAdjustments,
       shippingPending,
       itemProfit,
     };
@@ -409,7 +417,7 @@ const SalesPage = ({ items }) => {
                 <p className="text-xs font-medium text-muted-foreground">Untung Bersih</p>
                 <p className="text-lg font-semibold">RM{salesSummary.netProfit.toFixed(2)}</p>
                 <p className="text-[11px] text-muted-foreground">
-                  Item RM{salesSummary.itemProfit.toFixed(2)} | Fee RM{salesSummary.totalChannelFees.toFixed(2)} | Pos RM{salesSummary.shippingProfit.toFixed(2)}
+                  Item RM{salesSummary.itemProfit.toFixed(2)} | Fee RM{salesSummary.totalChannelFees.toFixed(2)} | Pelarasan RM{salesSummary.totalAdjustments.toFixed(2)} | Pos RM{salesSummary.shippingProfit.toFixed(2)}
                 </p>
               </div>
             </div>
@@ -460,6 +468,7 @@ const SalesPage = ({ items }) => {
                       const totalRevenue = item.actual_sold_amount ? parseFloat(item.actual_sold_amount) : (parseFloat(item.selling_price) || 0) * quantitySold;
                       const invoiceRevenue = item.invoice_id ? (revenueByInvoice.get(item.invoice_id) || 0) : 0;
                       const invoiceChannelFee = Math.max(parseFloat(item.invoice_channel_fee) || 0, 0);
+                      const invoiceAdjustment = Math.max(parseFloat(item.invoice_adjustment_total) || 0, 0);
                       const channelFeeShare = invoiceRevenue > 0
                         ? (totalRevenue / invoiceRevenue) * invoiceChannelFee
                         : 0;
@@ -477,7 +486,11 @@ const SalesPage = ({ items }) => {
                         ? (totalRevenue / invoiceRevenue) * effectiveShippingCostPaid
                         : 0;
                       const shippingProfitShare = shippingChargedShare - shippingCostShare;
-                      const profit = totalRevenue - totalCost - channelFeeShare + shippingProfitShare;
+                      const adjustmentShare = invoiceRevenue > 0
+                        ? (totalRevenue / invoiceRevenue) * invoiceAdjustment
+                        : 0;
+                      const netRevenueAfterAdjustment = totalRevenue - adjustmentShare;
+                      const profit = netRevenueAfterAdjustment - totalCost - channelFeeShare + shippingProfitShare;
                       const isLoss = profit < 0;
                       return (
                         <tr key={item.id} className="border-t relative group overflow-hidden">
@@ -509,7 +522,7 @@ const SalesPage = ({ items }) => {
                                <span className="text-muted-foreground text-xs">-</span>
                              )}
                            </td>
-                           <td className="p-4 text-right font-semibold text-foreground">RM{totalRevenue.toFixed(2)}</td>
+                          <td className="p-4 text-right font-semibold text-foreground">RM{netRevenueAfterAdjustment.toFixed(2)}</td>
                            <td className="p-4 text-right text-xs text-muted-foreground">
                              <div>Caj RM{effectiveShippingCharged.toFixed(2)}</div>
                              <div>Kos RM{effectiveShippingCostPaid.toFixed(2)}</div>
