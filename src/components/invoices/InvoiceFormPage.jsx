@@ -625,8 +625,7 @@ const InvoiceFormPage = () => {
     shippingMethod,
     shippingCharged,
   });
-  const tax = 0;
-  const total = subtotal + tax + shippingCharged;
+  const total = subtotal + shippingCharged;
 
   const selectedSalesChannel = useMemo(
     () => salesChannels.find((channel) => channel.id === selectedSalesChannelId) || null,
@@ -1785,10 +1784,12 @@ const InvoiceFormPage = () => {
                   <span>Caj Platform:</span>
                   <span className="font-medium">- {formatCurrency(channelFeePreview)}</span>
                 </div>
-                <div className="flex justify-between text-sm">
-                  <span>Cukai:</span>
-                  <span className="font-medium">{formatCurrency(tax)}</span>
-                </div>
+                {shippingCharged > 0 ? (
+                  <div className="flex justify-between text-sm">
+                    <span>Caj Pos Dikutip:</span>
+                    <span className="font-medium">{formatCurrency(shippingCharged)}</span>
+                  </div>
+                ) : null}
                 <div className="flex justify-between text-sm">
                   <span>Kos Anggaran:</span>
                   <span className="font-medium">{formatCurrency(totalCostPreview)}</span>

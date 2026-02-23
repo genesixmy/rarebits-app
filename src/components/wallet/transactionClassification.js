@@ -16,7 +16,10 @@ const LEGACY_TYPE_MAP = {
   item_manual: TRANSACTION_CLASSIFICATIONS.SALE,
   expense: TRANSACTION_CLASSIFICATIONS.EXPENSE,
   perbelanjaan: TRANSACTION_CLASSIFICATIONS.EXPENSE,
-  refund: TRANSACTION_CLASSIFICATIONS.EXPENSE,
+  refund: TRANSACTION_CLASSIFICATIONS.ADJUSTMENT,
+  refund_adjustment: TRANSACTION_CLASSIFICATIONS.ADJUSTMENT,
+  goodwill_adjustment: TRANSACTION_CLASSIFICATIONS.ADJUSTMENT,
+  sales_return: TRANSACTION_CLASSIFICATIONS.ADJUSTMENT,
   topup: TRANSACTION_CLASSIFICATIONS.TOPUP,
   pendapatan: TRANSACTION_CLASSIFICATIONS.TOPUP,
   transfer_in: TRANSACTION_CLASSIFICATIONS.TRANSFER_IN,
@@ -87,6 +90,9 @@ export const getTransactionDirection = (tx) => {
   if (legacyType === 'pelarasan_manual_tambah') {
     return 1;
   }
+  if (legacyType === 'goodwill_adjustment' || legacyType === 'refund_adjustment' || legacyType === 'refund' || legacyType === 'sales_return') {
+    return -1;
+  }
 
   const parsedAmount = Number(tx?.amount);
   return Number.isFinite(parsedAmount) && parsedAmount < 0 ? -1 : 1;
@@ -146,4 +152,3 @@ export const manualTypeToLegacyType = (manualType, adjustmentDirection = 'increa
   }
   return 'perbelanjaan';
 };
-

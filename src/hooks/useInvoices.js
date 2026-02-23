@@ -111,7 +111,18 @@ export const useInvoices = (filters = {}) => {
             line_total,
             item:items(id, name, category)
           ),
-          refunds(id, amount, reason, notes, issued_at, created_at)
+          refunds(id, amount, reason, notes, issued_at, created_at),
+          invoice_item_returns(
+            id,
+            invoice_item_id,
+            item_id,
+            return_item_name,
+            returned_quantity,
+            refund_amount,
+            reason,
+            notes,
+            created_at
+          )
         `
         )
         .eq('user_id', userId)
@@ -176,7 +187,18 @@ export const useInvoiceDetail = (invoiceId) => {
             item_name,
             item:items(id, name, category, image_url)
           ),
-          refunds(id, amount, reason, notes, issued_at, created_at)
+          refunds(id, amount, reason, notes, issued_at, created_at),
+          invoice_item_returns(
+            id,
+            invoice_item_id,
+            item_id,
+            return_item_name,
+            returned_quantity,
+            refund_amount,
+            reason,
+            notes,
+            created_at
+          )
         `
         )
         .eq('id', invoiceId)
@@ -1210,8 +1232,8 @@ export const useReverseInvoicePayment = () => {
 };
 
 /**
- * Mutation to process refund for a paid invoice
- * Pattern B: Non-destructive refund that keeps invoice as paid
+ * Mutation to process goodwill adjustment for a paid invoice
+ * Pattern B: Non-destructive adjustment that keeps invoice as paid
  */
 export const useProcessRefund = () => {
   const queryClient = useQueryClient();
@@ -1250,7 +1272,7 @@ export const useProcessRefund = () => {
 
       const response = data[0];
       if (!response.success) {
-        throw new Error(response.message || 'Failed to process refund');
+        throw new Error(response.message || 'Failed to process adjustment');
       }
 
       console.log('[useProcessRefund] Success:', response);
@@ -1265,6 +1287,10 @@ export const useProcessRefund = () => {
       queryClient.invalidateQueries({ queryKey: ['invoice', invoiceId] });
       queryClient.invalidateQueries({ queryKey: ['invoices'] });
       queryClient.invalidateQueries({ queryKey: ['items', userId] });
+      queryClient.invalidateQueries({ queryKey: ['clients'] });
+      queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[0] === 'client'
+      });
       queryClient.invalidateQueries({ queryKey: ['wallets', userId] });
       queryClient.invalidateQueries({ queryKey: ['transactions', userId, 'all'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard-sales', userId] });
@@ -1316,6 +1342,20 @@ export const useProcessRefund = () => {
           predicate: (query) => query.queryKey[0] === 'business-wallets' && query.queryKey[1] === userId
         });
         console.log('[useProcessRefund] Business wallets refetched');
+        console.log('[useProcessRefund] Refetching wallet analytics...');
+        await queryClient.refetchQueries({
+          predicate: (query) => query.queryKey[0] === 'wallet-cashflow-trend' && query.queryKey[1] === userId
+        });
+        await queryClient.refetchQueries({
+          predicate: (query) => query.queryKey[0] === 'wallet-cashflow-breakdown' && query.queryKey[1] === userId
+        });
+        await queryClient.refetchQueries({
+          predicate: (query) => query.queryKey[0] === 'wallet-monthly-summary' && query.queryKey[1] === userId
+        });
+        await queryClient.refetchQueries({
+          predicate: (query) => query.queryKey[0] === 'wallet-monthly-transactions-export' && query.queryKey[1] === userId
+        });
+        console.log('[useProcessRefund] Wallet analytics refetched');
 
         console.log('[useProcessRefund] ✅ Critical refetches complete');
       } catch (e) {
@@ -1327,6 +1367,123 @@ export const useProcessRefund = () => {
     },
     onError: (error) => {
       console.error('[useProcessRefund] Error:', error);
+    },
+  });
+};
+
+/**
+ * Mutation to process physical item return (restore stock + reverse sale value)
+ */
+export const useProcessInvoiceReturn = () => {
+  const queryClient = useQueryClient();
+  const { data: authData } = useQuery({
+    queryKey: ['auth'],
+    queryFn: async () => {
+      const { data } = await supabase.auth.getSession();
+      return data;
+    },
+  });
+
+  const userId = authData?.session?.user?.id;
+
+  return useMutation({
+    mutationFn: async ({
+      invoiceId,
+      invoiceItemId,
+      returnQuantity,
+      refundAmount,
+      reason,
+      notes,
+    }) => {
+      if (!userId) throw new Error('User not authenticated');
+
+      console.log('[useProcessInvoiceReturn] Processing return:', {
+        invoiceId,
+        invoiceItemId,
+        returnQuantity,
+        refundAmount,
+        reason,
+        notes,
+      });
+
+      const { data, error } = await supabase.rpc('process_invoice_return', {
+        p_invoice_id: invoiceId,
+        p_user_id: userId,
+        p_invoice_item_id: invoiceItemId,
+        p_return_quantity: returnQuantity,
+        p_refund_amount: refundAmount,
+        p_reason: reason,
+        p_notes: notes,
+      });
+
+      if (error) {
+        console.error('[useProcessInvoiceReturn] RPC error:', error);
+        throw error;
+      }
+
+      if (!data || data.length === 0) {
+        throw new Error('No response from server');
+      }
+
+      const response = data[0];
+      if (!response.success) {
+        throw new Error(response.message || 'Failed to process return');
+      }
+
+      console.log('[useProcessInvoiceReturn] Success:', response);
+      return response;
+    },
+    onSuccess: async (_response, { invoiceId }) => {
+      // Broad invalidation (same pattern as payment/refund flows)
+      queryClient.invalidateQueries({ queryKey: ['invoice', invoiceId] });
+      queryClient.invalidateQueries({ queryKey: ['invoices'] });
+      queryClient.invalidateQueries({ queryKey: ['items', userId] });
+      queryClient.invalidateQueries({ queryKey: ['clients'] });
+      queryClient.invalidateQueries({ queryKey: ['wallets', userId] });
+      queryClient.invalidateQueries({ queryKey: ['transactions', userId, 'all'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-sales', userId] });
+      queryClient.invalidateQueries({ queryKey: ['invoice-items', userId] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['sales'] });
+      queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[0] === 'client'
+      });
+      queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[0] === 'dashboard-refunds' && query.queryKey[1] === userId
+      });
+      queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[0] === 'dashboard-expenses' && query.queryKey[1] === userId
+      });
+      queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[0] === 'business-wallets' && query.queryKey[1] === userId
+      });
+      queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[0] === 'wallet-cashflow-trend' && query.queryKey[1] === userId
+      });
+      queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[0] === 'wallet-cashflow-breakdown' && query.queryKey[1] === userId
+      });
+      queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[0] === 'wallet-monthly-summary' && query.queryKey[1] === userId
+      });
+      queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[0] === 'wallet-monthly-transactions-export' && query.queryKey[1] === userId
+      });
+
+      try {
+        await queryClient.refetchQueries({ queryKey: ['invoice', invoiceId] });
+        await queryClient.refetchQueries({ queryKey: ['items', userId] });
+        await queryClient.refetchQueries({ queryKey: ['wallets', userId] });
+        await queryClient.refetchQueries({ queryKey: ['transactions', userId, 'all'] });
+        await queryClient.refetchQueries({ queryKey: ['dashboard-sales', userId] });
+      } catch (e) {
+        console.error('[useProcessInvoiceReturn] Error during critical refetch:', e);
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    },
+    onError: (error) => {
+      console.error('[useProcessInvoiceReturn] Error:', error);
     },
   });
 };
@@ -1785,6 +1942,18 @@ export const useMarkShipmentCourierPaid = () => {
       queryClient.invalidateQueries({
         predicate: (query) => query.queryKey[0] === 'business-wallets' && query.queryKey[1] === userId
       });
+      queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[0] === 'wallet-cashflow-trend' && query.queryKey[1] === userId
+      });
+      queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[0] === 'wallet-cashflow-breakdown' && query.queryKey[1] === userId
+      });
+      queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[0] === 'wallet-monthly-summary' && query.queryKey[1] === userId
+      });
+      queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[0] === 'wallet-monthly-transactions-export' && query.queryKey[1] === userId
+      });
     },
   });
 };
@@ -1802,6 +1971,7 @@ export default {
   useMarkInvoiceAsPaid,
   useReverseInvoicePayment,
   useProcessRefund,
+  useProcessInvoiceReturn,
   useUpdateInvoiceShippingCharged,
   useInvoiceShipment,
   useSaveInvoiceShipment,

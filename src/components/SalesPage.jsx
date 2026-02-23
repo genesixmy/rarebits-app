@@ -34,6 +34,8 @@ const getInitialDateRange = () => {
   };
 };
 
+const SETTLED_INVOICE_STATUSES = new Set(['paid', 'partially_returned', 'returned']);
+
 const SalesPage = ({ items }) => {
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -70,6 +72,7 @@ const SalesPage = ({ items }) => {
           line_total,
           is_manual,
           item_name,
+          invoice_item_returns(returned_quantity, refund_amount),
           item:items(id, name, category, cost_price),
           invoice:invoices(id, invoice_date, status, user_id, shipping_charged, shipment_id, channel_fee_amount, courier_payment_mode)
         `)
@@ -141,26 +144,42 @@ const SalesPage = ({ items }) => {
     };
 
     return invoiceItems
-      .filter(invItem => invItem.invoice && invItem.invoice.status === 'paid')
-      .map(invItem => ({
-        id: invItem.id,
-        name: (invItem.is_manual || !invItem.item_id)
-          ? (invItem.item_name || 'Item Manual')
-          : (invItem.item?.name || 'Item'),
-        cost_price: getEffectiveUnitCost(invItem),
-        category: (invItem.is_manual || !invItem.item_id) ? 'Manual' : (invItem.item?.category || 'Lain-lain'),
-        selling_price: invItem.unit_price,
-        quantity_sold: invItem.quantity,
-        actual_sold_amount: invItem.line_total,
-        date_sold: invItem.invoice.invoice_date,
-        invoice_id: invItem.invoice_id,
-        status: invItem.invoice.status,
-        invoice_shipping_charged: Math.max(parseFloat(invItem.invoice?.shipping_charged) || 0, 0),
-        invoice_shipping_cost: Math.max(parseFloat(invItem.invoice?.shipment?.shipping_cost) || 0, 0),
-        invoice_shipping_cost_recorded: Boolean(invItem.invoice?.shipment?.courier_paid),
-        invoice_channel_fee: Math.max(parseFloat(invItem.invoice?.channel_fee_amount) || 0, 0),
-        invoice_courier_payment_mode: resolveCourierPaymentModeForInvoice(invItem.invoice),
-      }));
+      .filter(invItem => invItem.invoice && SETTLED_INVOICE_STATUSES.has(invItem.invoice.status))
+      .map(invItem => {
+        const returnEntries = Array.isArray(invItem.invoice_item_returns) ? invItem.invoice_item_returns : [];
+        const returnedQty = returnEntries.reduce((sum, entry) => (
+          sum + Math.max(parseFloat(entry?.returned_quantity) || 0, 0)
+        ), 0);
+        const returnedRefund = returnEntries.reduce((sum, entry) => (
+          sum + Math.max(parseFloat(entry?.refund_amount) || 0, 0)
+        ), 0);
+
+        const baseQty = Math.max(parseFloat(invItem.quantity) || 0, 0);
+        const netQty = Math.max(baseQty - returnedQty, 0);
+        const baseRevenue = parseFloat(invItem.line_total) || 0;
+        const netRevenue = baseRevenue - returnedRefund;
+
+        return ({
+          id: invItem.id,
+          name: (invItem.is_manual || !invItem.item_id)
+            ? (invItem.item_name || 'Item Manual')
+            : (invItem.item?.name || 'Item'),
+          cost_price: getEffectiveUnitCost(invItem),
+          category: (invItem.is_manual || !invItem.item_id) ? 'Manual' : (invItem.item?.category || 'Lain-lain'),
+          selling_price: invItem.unit_price,
+          quantity_sold: netQty,
+          actual_sold_amount: netRevenue,
+          date_sold: invItem.invoice.invoice_date,
+          invoice_id: invItem.invoice_id,
+          status: invItem.invoice.status,
+          invoice_shipping_charged: Math.max(parseFloat(invItem.invoice?.shipping_charged) || 0, 0),
+          invoice_shipping_cost: Math.max(parseFloat(invItem.invoice?.shipment?.shipping_cost) || 0, 0),
+          invoice_shipping_cost_recorded: Boolean(invItem.invoice?.shipment?.courier_paid),
+          invoice_channel_fee: Math.max(parseFloat(invItem.invoice?.channel_fee_amount) || 0, 0),
+          invoice_courier_payment_mode: resolveCourierPaymentModeForInvoice(invItem.invoice),
+        });
+      })
+      .filter((row) => row.quantity_sold > 0 || Math.abs(row.actual_sold_amount) > 0.0001);
   }, [invoiceItems]);
 
   const filteredSoldItems = useMemo(() => {

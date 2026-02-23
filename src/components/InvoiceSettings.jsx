@@ -77,7 +77,6 @@ const mapSettingsToForm = (settings) => ({
   show_marketplace_links: settings?.show_marketplace_links ?? true,
   fax: settings?.fax || '',
   logo_url: settings?.logo_url || '',
-  tax_number: settings?.tax_number || '',
   business_reg_no: settings?.business_reg_no || '',
   footer_notes: settings?.footer_notes || '',
   show_logo: settings?.show_logo ?? true,
@@ -90,12 +89,10 @@ const mapSettingsToForm = (settings) => ({
   qr_mode: normalizeQrMode(settings?.qr_mode, settings?.qr_url),
   qr_label: settings?.qr_label || DEFAULT_INVOICE_SETTINGS.qr_label,
   qr_url: settings?.qr_url || '',
-  show_tax: settings?.show_tax ?? false,
   thermal_show_address: settings?.thermal_show_address ?? false,
   thermal_show_phone: settings?.thermal_show_phone ?? true,
   thermal_show_email: settings?.thermal_show_email ?? false,
   thermal_show_website: settings?.thermal_show_website ?? true,
-  thermal_show_tax: settings?.thermal_show_tax ?? (settings?.show_tax ?? false),
   show_generated_by: settings?.show_generated_by ?? true,
   show_generated_by_a4: settings?.show_generated_by_a4 ?? settings?.show_generated_by ?? true,
   show_generated_by_thermal: settings?.show_generated_by_thermal ?? false,
@@ -216,13 +213,10 @@ const InvoiceSettings = ({ userId }) => {
     qr_mode: normalizeQrMode(baseData.qr_mode, baseData.qr_url),
     qr_label: normalizeTextValue(baseData.qr_label) || DEFAULT_INVOICE_SETTINGS.qr_label,
     qr_url: normalizeTextValue(baseData.qr_url),
-    tax_number: normalizeTextValue(baseData.tax_number),
-    show_tax: Boolean(baseData.show_tax),
     thermal_show_address: Boolean(baseData.thermal_show_address),
     thermal_show_phone: Boolean(baseData.thermal_show_phone),
     thermal_show_email: Boolean(baseData.thermal_show_email),
     thermal_show_website: Boolean(baseData.thermal_show_website),
-    thermal_show_tax: Boolean(baseData.thermal_show_tax),
     business_reg_no: normalizeTextValue(baseData.business_reg_no),
     footer_notes: normalizeTextValue(baseData.footer_notes),
     show_generated_by: Boolean(baseData.show_generated_by_a4),
@@ -469,6 +463,17 @@ const InvoiceSettings = ({ userId }) => {
                 placeholder="Contoh: 03-12345678"
               />
             </div>
+            <div>
+              <label htmlFor="business-reg-no" className="mb-1 block text-sm font-medium text-muted-foreground">
+                No. Pendaftaran Perniagaan / SSM
+              </label>
+              <Input
+                id="business-reg-no"
+                value={formData.business_reg_no}
+                onChange={(event) => setField('business_reg_no', event.target.value)}
+                placeholder="Contoh: 202301012345"
+              />
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -604,53 +609,6 @@ const InvoiceSettings = ({ userId }) => {
 
       <Card>
         <CardHeader>
-          <CardTitle>Tax / Registration</CardTitle>
-          <CardDescription>Maklumat ini boleh dipaparkan jika perniagaan anda perlukan butiran cukai.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <div>
-              <label htmlFor="tax-number" className="mb-1 block text-sm font-medium text-muted-foreground">
-                No. Cukai
-              </label>
-              <Input
-                id="tax-number"
-                value={formData.tax_number}
-                onChange={(event) => setField('tax_number', event.target.value)}
-                placeholder="Contoh: SST123456"
-              />
-            </div>
-            <div>
-              <label htmlFor="business-reg-no" className="mb-1 block text-sm font-medium text-muted-foreground">
-                No. Pendaftaran Perniagaan / SSM
-              </label>
-              <Input
-                id="business-reg-no"
-                value={formData.business_reg_no}
-                onChange={(event) => setField('business_reg_no', event.target.value)}
-                placeholder="Contoh: 202301012345"
-              />
-            </div>
-          </div>
-
-          <div className="flex items-start gap-3 rounded-lg border p-3">
-            <Checkbox
-              id="show-tax"
-              checked={formData.show_tax}
-              onCheckedChange={(checked) => setField('show_tax', checked === true)}
-            />
-            <div>
-              <label htmlFor="show-tax" className="text-sm font-medium text-foreground">
-                Papar maklumat cukai pada cetakan
-              </label>
-              <p className="text-xs text-muted-foreground">Sesuai jika anda perlu paparkan nombor cukai pada invois rasmi.</p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
           <CardTitle>Invois / Resit</CardTitle>
           <CardDescription>Tetapan cetakan untuk A4, Thermal, dan Paperang.</CardDescription>
         </CardHeader>
@@ -766,16 +724,6 @@ const InvoiceSettings = ({ userId }) => {
                 />
                 <label htmlFor="thermal-show-website" className="text-sm font-medium text-foreground">
                   Papar website
-                </label>
-              </div>
-              <div className="flex items-start gap-3 rounded-lg border p-3">
-                <Checkbox
-                  id="thermal-show-tax"
-                  checked={formData.thermal_show_tax}
-                  onCheckedChange={(checked) => setField('thermal_show_tax', checked === true)}
-                />
-                <label htmlFor="thermal-show-tax" className="text-sm font-medium text-foreground">
-                  Papar no. cukai
                 </label>
               </div>
               <div className="flex items-start gap-3 rounded-lg border p-3">

@@ -36,7 +36,7 @@ const TransactionList = ({ transactions, wallets, onEdit, onDelete }) => {
               const isTransferOut = classification === TRANSACTION_CLASSIFICATIONS.TRANSFER_OUT;
               const isTransferIn = classification === TRANSACTION_CLASSIFICATIONS.TRANSFER_IN;
               const isAdjustment = classification === TRANSACTION_CLASSIFICATIONS.ADJUSTMENT;
-              const isRefund = tx.type === 'refund';
+              const isRefund = tx.type === 'refund' || tx.type === 'refund_adjustment' || tx.type === 'goodwill_adjustment';
               const isLegacyInvoicePayment = tx.type === 'pembayaran_invois';
               const isLegacyManualSale = tx.type === 'item_manual';
               const shipmentReference = tx.reference_type === 'shipment' && tx.reference_id
@@ -99,7 +99,7 @@ const TransactionList = ({ transactions, wallets, onEdit, onDelete }) => {
               if (isRefund) {
                 isEditable = false;
                 isDeletable = false;
-                title = tx.description || 'Pemulangan Dana';
+                title = tx.description || 'Pelarasan Harga';
               }
 
               const typeBadgeLabel = classificationLabel(classification);

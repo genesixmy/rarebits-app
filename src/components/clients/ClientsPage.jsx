@@ -26,6 +26,31 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 
+const resolveInvoiceFinalTotal = (invoiceLike, fallbackOriginal = 0) => {
+  const fallback = Math.max(parseFloat(fallbackOriginal) || 0, 0);
+  const totalAmountRaw = parseFloat(invoiceLike?.total_amount);
+  const totalAmount = Number.isFinite(totalAmountRaw) && totalAmountRaw >= 0
+    ? totalAmountRaw
+    : fallback;
+
+  const adjustmentRaw = parseFloat(invoiceLike?.adjustment_total);
+  const adjustmentTotal = Number.isFinite(adjustmentRaw) && adjustmentRaw > 0
+    ? adjustmentRaw
+    : 0;
+
+  const returnedRaw = parseFloat(invoiceLike?.returned_total);
+  const returnedTotal = Number.isFinite(returnedRaw) && returnedRaw > 0
+    ? returnedRaw
+    : 0;
+
+  const finalRaw = parseFloat(invoiceLike?.final_total);
+  const finalTotal = Number.isFinite(finalRaw)
+    ? Math.max(Math.min(finalRaw, totalAmount), 0)
+    : Math.max(totalAmount - adjustmentTotal - returnedTotal, 0);
+
+  return finalTotal;
+};
+
 const fetchClientsWithStats = async (userId) => {
   const { data: clients, error: clientsError } = await supabase
     .from('clients')
@@ -34,32 +59,21 @@ const fetchClientsWithStats = async (userId) => {
     .order('name', { ascending: true });
   if (clientsError) throw clientsError;
 
-  const { data: invoiceItems, error: invoiceItemsError } = await supabase
-    .from('invoice_items')
-    .select(`
-      id,
-      quantity,
-      unit_price,
-      line_total,
-      is_manual,
-      item_name,
-      invoice:invoices(id, client_id, status, user_id)
-    `)
+  const { data: paidInvoices, error: invoicesError } = await supabase
+    .from('invoices')
+    .select('*')
+    .eq('user_id', userId)
+    .in('status', ['paid', 'partially_returned', 'returned'])
+    .not('client_id', 'is', null)
     .order('created_at', { ascending: false });
-  if (invoiceItemsError) throw invoiceItemsError;
+  if (invoicesError) throw invoicesError;
 
-  const paidItems = (invoiceItems || []).filter(invItem =>
-    invItem.invoice?.user_id === userId &&
-    invItem.invoice?.status === 'paid' &&
-    invItem.invoice?.client_id
-  );
-
-  console.log('[ClientsPage] fetchClientsWithStats - invoice items fetched:', {
-    count: paidItems.length,
+  console.log('[ClientsPage] fetchClientsWithStats - paid invoices fetched:', {
+    count: paidInvoices?.length || 0,
   });
 
-  const stats = paidItems.reduce((acc, invItem) => {
-    const clientId = invItem.invoice?.client_id;
+  const stats = (paidInvoices || []).reduce((acc, invoice) => {
+    const clientId = invoice?.client_id;
     if (!clientId) return acc;
 
     if (!acc[clientId]) {
@@ -67,12 +81,7 @@ const fetchClientsWithStats = async (userId) => {
     }
 
     acc[clientId].purchases += 1;
-
-    const quantity = parseInt(invItem.quantity, 10) || 1;
-    const unitPrice = parseFloat(invItem.unit_price) || 0;
-    const lineTotal = parseFloat(invItem.line_total);
-    const amount = Number.isFinite(lineTotal) ? lineTotal : unitPrice * quantity;
-    acc[clientId].totalSpend += amount;
+    acc[clientId].totalSpend += resolveInvoiceFinalTotal(invoice);
 
     return acc;
   }, {});

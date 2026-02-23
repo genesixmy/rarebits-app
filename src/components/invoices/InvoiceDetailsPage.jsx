@@ -8,6 +8,7 @@ import {
   useMarkInvoiceAsPaid,
   useReverseInvoicePayment,
   useProcessRefund,
+  useProcessInvoiceReturn,
   useInvoiceShipment,
   useSaveInvoiceShipment,
   useUpdateInvoiceShipmentStatus,
@@ -85,6 +86,37 @@ const COURIER_MAX_LENGTH = 50;
 const TRACKING_NO_MAX_LENGTH = 64;
 const TRACKING_NO_PATTERN = /^[A-Za-z0-9\- ]*$/;
 const SHIPMENT_NOTES_MAX_LENGTH = 500;
+
+const getSellerCollectedShippingCharged = (invoiceData) => {
+  const courierMode = resolveCourierPaymentModeForInvoice(invoiceData);
+  if (courierMode === COURIER_PAYMENT_MODES.PLATFORM) return 0;
+  const parsed = Number.parseFloat(invoiceData?.shipping_charged);
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.max(parsed, 0);
+};
+
+const getInvoiceFinancialSummary = (invoiceData) => {
+  const totalAmountRaw = Number.parseFloat(invoiceData?.total_amount);
+  const totalAmount = Number.isFinite(totalAmountRaw) && totalAmountRaw >= 0 ? totalAmountRaw : 0;
+
+  const adjustmentRaw = Number.parseFloat(invoiceData?.adjustment_total);
+  const adjustmentTotal = Number.isFinite(adjustmentRaw) && adjustmentRaw > 0 ? adjustmentRaw : 0;
+
+  const returnedRaw = Number.parseFloat(invoiceData?.returned_total);
+  const returnedTotal = Number.isFinite(returnedRaw) && returnedRaw > 0 ? returnedRaw : 0;
+
+  const finalRaw = Number.parseFloat(invoiceData?.final_total);
+  const finalTotal = Number.isFinite(finalRaw)
+    ? Math.max(Math.min(finalRaw, totalAmount), 0)
+    : Math.max(totalAmount - adjustmentTotal - returnedTotal, 0);
+
+  return {
+    originalTotal: totalAmount,
+    adjustmentTotal,
+    returnedTotal,
+    finalTotal,
+  };
+};
 
 const normalizeWhitespaceText = (value) => {
   if (typeof value !== 'string') return '';
@@ -239,7 +271,6 @@ const buildInvoicePrintSettings = (settings) => {
   const website = normalizeOptionalText(settings?.website);
   const fax = normalizeOptionalText(settings?.fax);
   const logoUrl = normalizeOptionalText(settings?.logo_url);
-  const taxNumber = normalizeOptionalText(settings?.tax_number);
   const footerNotes = normalizeOptionalText(settings?.footer_notes);
   const qrLabel = pickFirstNonEmptyText(settings?.qr_label, 'Scan untuk lihat katalog');
   const qrUrlRaw = normalizeOptionalText(settings?.qr_url);
@@ -266,9 +297,6 @@ const buildInvoicePrintSettings = (settings) => {
     thermalShowPhone: settings?.thermal_show_phone ?? true,
     thermalShowEmail: settings?.thermal_show_email ?? false,
     thermalShowWebsite: settings?.thermal_show_website ?? true,
-    showTax: Boolean(settings?.show_tax && taxNumber),
-    showTaxThermal: Boolean((settings?.thermal_show_tax ?? settings?.show_tax ?? false) && taxNumber),
-    taxNumber,
     footerNotes,
     qrMode,
     qrLabel,
@@ -286,11 +314,17 @@ const InvoiceDetailsPage = () => {
   const navigate = useNavigate();
   const { invoiceId } = useParams();
 
-  // Refund modal state
+  // Adjustment modal state
   const [showRefundModal, setShowRefundModal] = useState(false);
   const [refundAmount, setRefundAmount] = useState('');
   const [refundReason, setRefundReason] = useState('');
   const [refundNotes, setRefundNotes] = useState('');
+  const [showReturnModal, setShowReturnModal] = useState(false);
+  const [selectedReturnItemId, setSelectedReturnItemId] = useState('');
+  const [returnQuantity, setReturnQuantity] = useState('1');
+  const [returnRefundAmount, setReturnRefundAmount] = useState('');
+  const [returnReason, setReturnReason] = useState('');
+  const [returnNotes, setReturnNotes] = useState('');
   const [showPrintOptions, setShowPrintOptions] = useState(false);
   const [showCourierPaidModal, setShowCourierPaidModal] = useState(false);
   const [courierPaidCost, setCourierPaidCost] = useState('');
@@ -335,6 +369,7 @@ const InvoiceDetailsPage = () => {
   const markInvoiceAsPaid = useMarkInvoiceAsPaid();
   const reversePayment = useReverseInvoicePayment();
   const processRefund = useProcessRefund();
+  const processInvoiceReturn = useProcessInvoiceReturn();
   const saveInvoiceShipment = useSaveInvoiceShipment();
   const updateInvoiceShipmentStatus = useUpdateInvoiceShipmentStatus();
   const updateInvoiceShippingCharged = useUpdateInvoiceShippingCharged();
@@ -630,8 +665,12 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
     const createdAtLabel = invoiceData.created_at
       ? format(new Date(invoiceData.created_at), 'dd MMM yyyy, HH:mm', { locale: ms })
       : '-';
-    const paymentStatus = invoiceData.status === 'paid' ? 'Paid' : 'Unpaid';
-    const paymentStatusClass = invoiceData.status === 'paid' ? 'status-paid' : 'status-unpaid';
+    const paymentSettled = ['paid', 'partially_returned', 'returned'].includes(invoiceData.status);
+    const paymentStatus = paymentSettled ? 'Paid' : 'Unpaid';
+    const paymentStatusClass = paymentSettled ? 'status-paid' : 'status-unpaid';
+    const shippingCharged = getSellerCollectedShippingCharged(invoiceData);
+    const financialSummary = getInvoiceFinancialSummary(invoiceData);
+    const showShippingLine = shippingCharged > 0;
 
     const itemRows = (invoiceData.invoice_items || [])
       .map((item) => {
@@ -850,11 +889,6 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
               font-size: 16px;
               font-weight: 700;
             }
-            .tax-meta {
-              margin-top: 8px;
-              font-size: 11px;
-              color: #4b5563;
-            }
             .qr-wrap {
               margin-top: 10px;
               display: flex;
@@ -947,11 +981,24 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                   <span>Subtotal</span>
                   <span>${escapeHtml(formatCurrency(invoiceData.subtotal || 0))}</span>
                 </div>
-                <div class="totals-row">
-                  <span>Cukai</span>
-                  <span>${escapeHtml(formatCurrency(invoiceData.tax_amount || 0))}</span>
-                </div>
-                ${printSettings.showTax ? `<div class="tax-meta">No. Cukai: ${escapeHtml(printSettings.taxNumber)}</div>` : ''}
+                ${showShippingLine ? `
+                  <div class="totals-row">
+                    <span>Caj Pos</span>
+                    <span>${escapeHtml(formatCurrency(shippingCharged))}</span>
+                  </div>
+                ` : ''}
+                ${financialSummary.adjustmentTotal > 0 ? `
+                  <div class="totals-row">
+                    <span>Pelarasan</span>
+                    <span>- ${escapeHtml(formatCurrency(financialSummary.adjustmentTotal))}</span>
+                  </div>
+                ` : ''}
+                ${financialSummary.returnedTotal > 0 ? `
+                  <div class="totals-row">
+                    <span>Return</span>
+                    <span>- ${escapeHtml(formatCurrency(financialSummary.returnedTotal))}</span>
+                  </div>
+                ` : ''}
                 ${invoiceData.payment_method ? `
                   <div class="totals-row">
                     <span>Kaedah Bayaran</span>
@@ -959,8 +1006,8 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                   </div>
                 ` : ''}
                 <div class="totals-row total">
-                  <span>Jumlah</span>
-                  <span>${escapeHtml(formatCurrency(invoiceData.total_amount || 0))}</span>
+                  <span>Final Dibayar</span>
+                  <span>${escapeHtml(formatCurrency(financialSummary.finalTotal || 0))}</span>
                 </div>
               </div>
             </section>
@@ -1041,6 +1088,9 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
     ].filter(Boolean);
     const thermalQrDataUrl = normalizeOptionalText(options.qrDataUrl);
     const showQr = Boolean(printSettings.showQrThermal && thermalQrDataUrl);
+    const shippingCharged = getSellerCollectedShippingCharged(invoiceData);
+    const financialSummary = getInvoiceFinancialSummary(invoiceData);
+    const showShippingLine = shippingCharged > 0;
 
     return `
       <!doctype html>
@@ -1101,7 +1151,6 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
             <div class="center company">${escapeHtml(companyName)}</div>
             ${addressLines.map((line) => `<div class="center muted contact">${escapeHtml(line)}</div>`).join('')}
             ${contactLines.map((line) => `<div class="center muted contact">${escapeHtml(line)}</div>`).join('')}
-            ${printSettings.showTaxThermal ? `<div class="center muted contact">No. Cukai: ${escapeHtml(printSettings.taxNumber)}</div>` : ''}
             <div class="divider"></div>
             <div class="center title">INVOIS</div>
             <div class="center muted">${escapeHtml(invoiceData.invoice_number || '')}</div>
@@ -1114,8 +1163,10 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
             <div class="divider"></div>
             <div class="totals">
               <div class="row"><span>Subtotal</span><span>${escapeHtml(formatCurrency(invoiceData.subtotal || 0))}</span></div>
-              <div class="row"><span>Cukai</span><span>${escapeHtml(formatCurrency(invoiceData.tax_amount || 0))}</span></div>
-              <div class="row grand"><span>Jumlah</span><span>${escapeHtml(formatCurrency(invoiceData.total_amount || 0))}</span></div>
+              ${showShippingLine ? `<div class="row"><span>Caj Pos</span><span>${escapeHtml(formatCurrency(shippingCharged))}</span></div>` : ''}
+              ${financialSummary.adjustmentTotal > 0 ? `<div class="row"><span>Pelarasan</span><span>- ${escapeHtml(formatCurrency(financialSummary.adjustmentTotal))}</span></div>` : ''}
+              ${financialSummary.returnedTotal > 0 ? `<div class="row"><span>Return</span><span>- ${escapeHtml(formatCurrency(financialSummary.returnedTotal))}</span></div>` : ''}
+              <div class="row grand"><span>Final Dibayar</span><span>${escapeHtml(formatCurrency(financialSummary.finalTotal || 0))}</span></div>
             </div>
             ${showQr ? `
               <div class="divider"></div>
@@ -1189,6 +1240,9 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
     ].filter(Boolean);
     const paperangQrSvgMarkup = typeof options.qrSvgMarkup === 'string' ? options.qrSvgMarkup : '';
     const showQr = Boolean(printSettings.showQrPaperang && paperangQrSvgMarkup);
+    const shippingCharged = getSellerCollectedShippingCharged(invoiceData);
+    const financialSummary = getInvoiceFinancialSummary(invoiceData);
+    const showShippingLine = shippingCharged > 0;
 
     return `
       <style>
@@ -1250,7 +1304,6 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
         <div class="export-center export-company">${escapeHtml(companyName)}</div>
         ${addressLines.map((line) => `<div class="export-center export-contact">${escapeHtml(line)}</div>`).join('')}
         ${contactLines.map((line) => `<div class="export-center export-contact">${escapeHtml(line)}</div>`).join('')}
-        ${printSettings.showTaxThermal ? `<div class="export-center export-contact">No. Cukai: ${escapeHtml(printSettings.taxNumber)}</div>` : ''}
         <div class="divider"></div>
         <div class="export-center export-title">INVOIS</div>
         <div class="export-center export-sub">${escapeHtml(invoiceData.invoice_number || '')}</div>
@@ -1263,8 +1316,10 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
         <div class="divider"></div>
         <div class="totals">
           <div class="row"><span>Subtotal</span><span>${escapeHtml(formatCurrency(invoiceData.subtotal || 0))}</span></div>
-          <div class="row"><span>Cukai</span><span>${escapeHtml(formatCurrency(invoiceData.tax_amount || 0))}</span></div>
-          <div class="row grand"><span>Jumlah</span><span>${escapeHtml(formatCurrency(invoiceData.total_amount || 0))}</span></div>
+          ${showShippingLine ? `<div class="row"><span>Caj Pos</span><span>${escapeHtml(formatCurrency(shippingCharged))}</span></div>` : ''}
+          ${financialSummary.adjustmentTotal > 0 ? `<div class="row"><span>Pelarasan</span><span>- ${escapeHtml(formatCurrency(financialSummary.adjustmentTotal))}</span></div>` : ''}
+          ${financialSummary.returnedTotal > 0 ? `<div class="row"><span>Return</span><span>- ${escapeHtml(formatCurrency(financialSummary.returnedTotal))}</span></div>` : ''}
+          <div class="row grand"><span>Final Dibayar</span><span>${escapeHtml(formatCurrency(financialSummary.finalTotal || 0))}</span></div>
         </div>
         ${showQr ? `
           <div class="divider"></div>
@@ -1404,9 +1459,6 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
       addTextBlock(printSettings.companyName, { align: 'center', size: 32, weight: 700, lineHeight: 39 });
       addressLines.forEach((line) => addTextBlock(line, { align: 'center', size: 25, weight: 700, lineHeight: 31 }));
       contactLines.forEach((line) => addTextBlock(line, { align: 'center', size: 25, weight: 700, lineHeight: 31 }));
-      if (printSettings.showTaxThermal && printSettings.taxNumber) {
-        addTextBlock(`No. Cukai: ${printSettings.taxNumber}`, { align: 'center', size: 25, weight: 700, lineHeight: 31 });
-      }
 
       addDivider();
       addTextBlock('INVOIS', { align: 'center', size: 28, weight: 700, lineHeight: 36 });
@@ -1433,8 +1485,18 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
 
       addDivider();
       addRow('Subtotal', formatCurrency(invoice.subtotal || 0));
-      addRow('Cukai', formatCurrency(invoice.tax_amount || 0));
-      addRow('Jumlah', formatCurrency(invoice.total_amount || 0), { size: 27, weight: 700, lineHeight: 36 });
+      const shippingCharged = getSellerCollectedShippingCharged(invoice);
+      const financialSummary = getInvoiceFinancialSummary(invoice);
+      if (shippingCharged > 0) {
+        addRow('Caj Pos', formatCurrency(shippingCharged));
+      }
+      if (financialSummary.adjustmentTotal > 0) {
+        addRow('Pelarasan', `- ${formatCurrency(financialSummary.adjustmentTotal)}`);
+      }
+      if (financialSummary.returnedTotal > 0) {
+        addRow('Return', `- ${formatCurrency(financialSummary.returnedTotal)}`);
+      }
+      addRow('Final Dibayar', formatCurrency(financialSummary.finalTotal || 0), { size: 27, weight: 700, lineHeight: 36 });
 
       if (qrDataUrlForExport) {
         addDivider();
@@ -1895,29 +1957,25 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
   const handleProcessRefund = async () => {
     try {
       const amount = parseFloat(refundAmount);
+      const currentFinalTotal = getInvoiceFinancialSummary(invoice).finalTotal;
       if (!amount || amount <= 0) {
-        toast.error('Amaun pemulangan mestilah lebih besar dari 0');
+        toast.error('Amaun pelarasan mestilah lebih besar dari 0');
         return;
       }
 
-      if (amount > (invoice?.total_amount || 0)) {
-        toast.error(`Amaun pemulangan tidak boleh melebihi RM${invoice?.total_amount}`);
-        return;
-      }
-
-      if (!refundReason) {
-        toast.error('Sila pilih sebab pemulangan');
+      if (amount > currentFinalTotal) {
+        toast.error(`Amaun pelarasan tidak boleh melebihi RM${currentFinalTotal.toFixed(2)}`);
         return;
       }
 
       await processRefund.mutateAsync({
         invoiceId,
         refundAmount: amount,
-        reason: refundReason,
+        reason: refundReason?.trim() || '',
         notes: refundNotes || '',
       });
 
-      toast.success(`Pemulangan sebanyak RM${amount.toFixed(2)} berjaya diproses`);
+      toast.success(`Pelarasan harga RM${amount.toFixed(2)} berjaya direkod`);
       
       // Reset modal
       setShowRefundModal(false);
@@ -1926,7 +1984,100 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
       setRefundNotes('');
     } catch (error) {
       console.error('[InvoiceDetailsPage] Error processing refund:', error);
-      toast.error('Ralat: ' + (error.message || 'Gagal memproses pemulangan'));
+      toast.error('Ralat: ' + (error.message || 'Gagal memproses pelarasan'));
+    }
+  };
+
+  const openReturnModal = () => {
+    if (returnableItems.length === 0) {
+      toast.error('Tiada item yang boleh dipulangkan');
+      return;
+    }
+
+    const firstItem = returnableItems[0];
+    setSelectedReturnItemId(firstItem.invoiceItemId);
+    setReturnQuantity('1');
+    setReturnRefundAmount((firstItem.unitPrice || 0).toFixed(2));
+    setReturnReason('');
+    setReturnNotes('');
+    setShowReturnModal(true);
+  };
+
+  const handleReturnItemChange = (invoiceItemId) => {
+    setSelectedReturnItemId(invoiceItemId);
+    const nextItem = returnableItems.find((entry) => entry.invoiceItemId === invoiceItemId);
+    if (!nextItem) return;
+    setReturnQuantity('1');
+    setReturnRefundAmount((nextItem.unitPrice || 0).toFixed(2));
+  };
+
+  const handleReturnQuantityChange = (rawValue) => {
+    const selectedItem = selectedReturnItem;
+    if (!selectedItem) {
+      setReturnQuantity(rawValue);
+      return;
+    }
+
+    const parsed = parseInt(rawValue, 10);
+    if (Number.isNaN(parsed)) {
+      setReturnQuantity('');
+      setReturnRefundAmount('');
+      return;
+    }
+
+    const clamped = Math.min(Math.max(parsed, 1), selectedItem.maxReturnQty);
+    setReturnQuantity(String(clamped));
+    setReturnRefundAmount((selectedItem.unitPrice * clamped).toFixed(2));
+  };
+
+  const handleProcessReturn = async () => {
+    try {
+      if (!selectedReturnItem) {
+        toast.error('Pilih item untuk dipulangkan');
+        return;
+      }
+
+      const quantity = parseInt(returnQuantity, 10);
+      if (!Number.isFinite(quantity) || quantity <= 0) {
+        toast.error('Kuantiti pulangan tidak sah');
+        return;
+      }
+
+      if (quantity > selectedReturnItem.maxReturnQty) {
+        toast.error(`Kuantiti pulangan maksimum ${selectedReturnItem.maxReturnQty}`);
+        return;
+      }
+
+      const amount = parseFloat(returnRefundAmount);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        toast.error('Amaun pulangan tidak sah');
+        return;
+      }
+
+      if (amount > financialSummary.finalTotal) {
+        toast.error(`Amaun pulangan tidak boleh melebihi RM${financialSummary.finalTotal.toFixed(2)}`);
+        return;
+      }
+
+      await processInvoiceReturn.mutateAsync({
+        invoiceId,
+        invoiceItemId: selectedReturnItem.invoiceItemId,
+        returnQuantity: quantity,
+        refundAmount: amount,
+        reason: returnReason?.trim() || '',
+        notes: returnNotes || '',
+      });
+
+      toast.success(`Pulangan ${quantity} unit berjaya diproses`);
+      setShowReturnModal(false);
+      setSelectedReturnItemId('');
+      setReturnQuantity('1');
+      setReturnRefundAmount('');
+      setReturnReason('');
+      setReturnNotes('');
+    } catch (error) {
+      console.error('[InvoiceDetailsPage] Error processing return:', error);
+      toast.error('Ralat: ' + (error.message || 'Gagal memproses pulangan'));
     }
   };
 
@@ -1935,6 +2086,8 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
       draft: 'bg-gray-100 text-gray-800',
       finalized: 'bg-blue-100 text-blue-800',
       paid: 'bg-green-100 text-green-800',
+      partially_returned: 'bg-amber-100 text-amber-800',
+      returned: 'bg-rose-100 text-rose-800',
       cancelled: 'bg-red-100 text-red-800',
     };
     return statusColors[status] || 'bg-gray-100 text-gray-800';
@@ -1945,6 +2098,8 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
       draft: 'Draf',
       finalized: 'Muktamad',
       paid: 'Dibayar',
+      partially_returned: 'Separa Pulang',
+      returned: 'Dipulangkan',
       cancelled: 'Dibatalkan',
     };
     return labels[status] || status;
@@ -1999,13 +2154,14 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
   const resolvedShippingMethod = resolveShippingMethodForInvoice(invoice);
   const shippingMethodLabel = getShippingMethodLabel(resolvedShippingMethod);
   const deliveryRequired = isDeliveryRequiredForInvoice(invoice);
+  const isSettledInvoice = ['paid', 'partially_returned', 'returned'].includes(invoice.status);
   const shipmentStatus = deliveryRequired ? (shipment?.ship_status || 'pending') : 'not_required';
-  const deliveryActionsDisabled = invoice.status !== 'paid';
+  const deliveryActionsDisabled = !isSettledInvoice;
   const isSavingDelivery = saveInvoiceShipment.isPending || updateInvoiceShipmentStatus.isPending;
   const isSavingShippingCharged = updateInvoiceShippingCharged.isPending;
   const hasCourierPaid = isPlatformCourierMode ? true : Boolean(shipment?.courier_paid);
   const hasShipmentRecord = Boolean(shipment?.id || invoice?.shipment_id);
-  const canShowCourierPaidAction = deliveryRequired && invoice.status === 'paid' && hasShipmentRecord && !isPlatformCourierMode;
+  const canShowCourierPaidAction = deliveryRequired && isSettledInvoice && hasShipmentRecord && !isPlatformCourierMode;
   const shouldShowDeliveryCard = deliveryRequired || showOptionalDeliveryCard;
   const courierPayAllowedByStatus = ['pending', 'shipped', 'delivered'].includes(shipmentStatus);
   const canMarkCourierPaid = canShowCourierPaidAction && courierPayAllowedByStatus && !hasCourierPaid;
@@ -2016,8 +2172,39 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
     : Boolean(shipment && (shipment.courier_paid || shippingCostValue > 0));
   const shippingProfitValue = shippingChargedAmount - shippingCostValue;
   const channelFeeAmount = Math.max(parseFloat(invoice.channel_fee_amount) || 0, 0);
-  const netAfterChannelFee = (parseFloat(invoice.total_amount) || 0) - channelFeeAmount;
+  const financialSummary = getInvoiceFinancialSummary(invoice);
+  const netAfterChannelFee = financialSummary.finalTotal - channelFeeAmount;
   const hasTrackingNumber = normalizeWhitespaceText(shipment?.tracking_no || deliveryForm.trackingNo || '').length > 0;
+  const invoiceItemReturns = Array.isArray(invoice?.invoice_item_returns) ? invoice.invoice_item_returns : [];
+  const returnedQtyByInvoiceItemId = invoiceItemReturns.reduce((acc, entry) => {
+    const key = entry?.invoice_item_id;
+    if (!key) return acc;
+    const qty = parseInt(entry?.returned_quantity, 10);
+    acc[key] = (acc[key] || 0) + (Number.isNaN(qty) ? 0 : Math.max(qty, 0));
+    return acc;
+  }, {});
+  const returnableItems = (invoice?.invoice_items || [])
+    .filter((item) => item?.item_id)
+    .map((item) => {
+      const soldQty = Math.max(parseInt(item?.quantity, 10) || 0, 0);
+      const returnedQty = Math.max(returnedQtyByInvoiceItemId[item.id] || 0, 0);
+      const maxReturnQty = Math.max(soldQty - returnedQty, 0);
+      const itemLabel = item.item?.name || item.item_name || 'Item';
+      const unitPrice = Math.max(parseFloat(item?.unit_price) || 0, 0);
+      return {
+        invoiceItemId: item.id,
+        itemId: item.item_id,
+        itemLabel,
+        unitPrice,
+        soldQty,
+        returnedQty,
+        maxReturnQty,
+      };
+    })
+    .filter((entry) => entry.maxReturnQty > 0);
+  const selectedReturnItem = returnableItems.find((entry) => entry.invoiceItemId === selectedReturnItemId) || null;
+  const canAdjustInvoice = ['paid', 'partially_returned'].includes(invoice.status) && financialSummary.finalTotal > 0;
+  const canProcessReturn = canAdjustInvoice && returnableItems.length > 0;
 
   return (
     <div className="space-y-6 overflow-x-hidden p-4 sm:p-6">
@@ -2063,7 +2250,7 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
             variant="outline"
             size="default"
             onClick={() => navigate(`/invoices/${invoiceId}/edit`)}
-            disabled={invoice.status === 'paid'}
+            disabled={isSettledInvoice}
             className="gap-2 flex-1 sm:flex-initial h-10"
           >
             <Edit className="h-5 w-5" />
@@ -2098,7 +2285,7 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
             </>
           )}
 
-          {invoice.status === 'paid' && (
+          {canAdjustInvoice && (
             <>
               <Button
                 variant="outline"
@@ -2108,7 +2295,16 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                 className="gap-2 flex-1 sm:flex-initial h-10"
               >
                 <DollarSign className="h-5 w-5" />
-                Refund
+                Adjust Price
+              </Button>
+              <Button
+                variant="outline"
+                size="default"
+                onClick={openReturnModal}
+                disabled={processInvoiceReturn.isPending || !canProcessReturn}
+                className="gap-2 flex-1 sm:flex-initial h-10"
+              >
+                Return Item
               </Button>
             </>
           )}
@@ -2121,7 +2317,7 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                 handleDeleteInvoice();
               }
             }}
-            disabled={invoice.status === 'paid'}
+            disabled={isSettledInvoice}
             className="gap-2 flex-1 sm:flex-initial text-red-600 hover:text-red-800 h-10"
           >
             <Trash2 className="h-5 w-5" />
@@ -2321,12 +2517,6 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                     - {formatCurrency(channelFeeAmount)}
                   </span>
                 </div>
-                <div className="flex justify-between text-sm">
-                  <span>Cukai:</span>
-                  <span className="font-medium">
-                    {formatCurrency(invoice.tax_amount)}
-                  </span>
-                </div>
                 {!isPlatformCourierMode && (
                   <div className="flex justify-between text-sm">
                     <span>Caj Pos Dikutip:</span>
@@ -2335,11 +2525,33 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                     </span>
                   </div>
                 )}
+                <div className="flex justify-between text-sm">
+                  <span>Original Amount:</span>
+                  <span className="font-medium">
+                    {formatCurrency(financialSummary.originalTotal)}
+                  </span>
+                </div>
+                {financialSummary.adjustmentTotal > 0 && (
+                  <div className="flex justify-between text-sm text-red-600">
+                    <span>Adjustment:</span>
+                    <span className="font-medium">
+                      - {formatCurrency(financialSummary.adjustmentTotal)}
+                    </span>
+                  </div>
+                )}
+                {financialSummary.returnedTotal > 0 && (
+                  <div className="flex justify-between text-sm text-rose-600">
+                    <span>Return:</span>
+                    <span className="font-medium">
+                      - {formatCurrency(financialSummary.returnedTotal)}
+                    </span>
+                  </div>
+                )}
               </div>
 
               <div className="flex justify-between text-xl font-bold">
-                <span>Jumlah:</span>
-                <span>{formatCurrency(invoice.total_amount)}</span>
+                <span>Final Paid:</span>
+                <span>{formatCurrency(financialSummary.finalTotal)}</span>
               </div>
               <div className="flex justify-between text-sm text-muted-foreground">
                 <span>Bersih Selepas Caj Platform:</span>
@@ -2369,25 +2581,83 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                 </Button>
               )}
 
-              {invoice.status === 'paid' && (
+              {isSettledInvoice && (
                 <>
-                  <div className="rounded-lg bg-green-50 p-3 border border-green-200">
-                    <p className="text-sm font-medium text-green-800">✓ Invois Telah Dibayar</p>
-                    <p className="text-xs text-green-700 mt-1">
-                      Dompet dan rekod pelanggan telah diperbarui
+                  <div className={`rounded-lg border p-3 ${
+                    invoice.status === 'returned'
+                      ? 'border-rose-200 bg-rose-50'
+                      : invoice.status === 'partially_returned'
+                        ? 'border-amber-200 bg-amber-50'
+                        : 'border-green-200 bg-green-50'
+                  }`}>
+                    <p className={`text-sm font-medium ${
+                      invoice.status === 'returned'
+                        ? 'text-rose-800'
+                        : invoice.status === 'partially_returned'
+                          ? 'text-amber-800'
+                          : 'text-green-800'
+                    }`}>
+                      {invoice.status === 'returned'
+                        ? 'Invois Dipulangkan Penuh'
+                        : invoice.status === 'partially_returned'
+                          ? 'Invois Separa Pulang'
+                          : 'Invois Telah Dibayar'}
+                    </p>
+                    <p className={`mt-1 text-xs ${
+                      invoice.status === 'returned'
+                        ? 'text-rose-700'
+                        : invoice.status === 'partially_returned'
+                          ? 'text-amber-700'
+                          : 'text-green-700'
+                    }`}>
+                      {invoice.status === 'returned'
+                        ? 'Pulangan penuh direkod. Stok telah dipulangkan.'
+                        : invoice.status === 'partially_returned'
+                          ? 'Pulangan separa direkod. Baki jualan masih aktif.'
+                          : 'Dompet dan rekod pelanggan telah diperbarui.'}
                     </p>
                   </div>
-                  
-                  {/* Refunds History - Direct under paid status */}
+
+                  {/* Adjustment history */}
                   {invoice?.refunds && invoice.refunds.length > 0 && (
                     <div className="space-y-2 mt-3">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-red-700 dark:text-red-300">
+                        Sejarah Pelarasan Harga
+                      </p>
                       {invoice.refunds.map((refund) => (
                         <div key={refund.id} className="flex items-start justify-between p-3 rounded-lg bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900">
                           <div className="flex-1">
                             <p className="font-semibold text-red-700 dark:text-red-300">RM {parseFloat(refund.amount).toFixed(2)}</p>
-                            <p className="text-sm text-red-600 dark:text-red-400 mt-0.5">{refund.reason}</p>
+                            <p className="text-sm text-red-600 dark:text-red-400 mt-0.5">{refund.reason || 'Price Adjustment'}</p>
                             {refund.notes && <p className="text-xs text-red-500 dark:text-red-400 mt-1">Catatan: {refund.notes}</p>}
                             <p className="text-xs text-red-500 dark:text-red-600 mt-1">{new Date(refund.created_at).toLocaleDateString()} · {new Date(refund.created_at).toLocaleTimeString()}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {invoiceItemReturns.length > 0 && (
+                    <div className="mt-3 space-y-2">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-rose-700 dark:text-rose-300">
+                        Sejarah Return Item
+                      </p>
+                      {invoiceItemReturns.map((entry) => (
+                        <div key={entry.id} className="flex items-start justify-between rounded-lg border border-rose-200 bg-rose-50 p-3 dark:border-rose-900 dark:bg-rose-950/30">
+                          <div className="flex-1">
+                            <p className="font-semibold text-rose-700 dark:text-rose-300">
+                              {(parseInt(entry.returned_quantity, 10) || 0)} unit • RM {(parseFloat(entry.refund_amount) || 0).toFixed(2)}
+                            </p>
+                            <p className="mt-0.5 text-sm text-rose-600 dark:text-rose-400">
+                              {entry.return_item_name || 'Item Returned'}
+                            </p>
+                            <p className="mt-1 text-xs text-rose-500 dark:text-rose-400">
+                              {entry.reason || 'Item Returned'}
+                            </p>
+                            {entry.notes && <p className="mt-1 text-xs text-rose-500 dark:text-rose-400">Catatan: {entry.notes}</p>}
+                            <p className="mt-1 text-xs text-rose-500 dark:text-rose-600">
+                              {new Date(entry.created_at).toLocaleDateString()} · {new Date(entry.created_at).toLocaleTimeString()}
+                            </p>
                           </div>
                         </div>
                       ))}
@@ -2469,7 +2739,7 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                     onBlur={() => {
                       validateShippingChargedInput({ commitDisplay: true });
                     }}
-                    disabled={invoice.status === 'paid' || isSavingShippingCharged}
+                    disabled={isSettledInvoice || isSavingShippingCharged}
                     className="h-10"
                   />
                   {shippingChargedError && (
@@ -2479,7 +2749,7 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                     <p className="text-xs text-gray-500">
                       Kos pos yang dibayar pelanggan. Biar kosong untuk auto 0.
                     </p>
-                    {invoice.status !== 'paid' && (
+                    {!isSettledInvoice && (
                       <Button
                         variant="outline"
                         size="sm"
@@ -2658,18 +2928,149 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
         </div>
       </div>
 
-      {/* Refund Modal */}
+      {/* Return Modal */}
+      {showReturnModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <Card className="w-full max-w-md">
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
+              <div>
+                <CardTitle>Return Item</CardTitle>
+                <CardDescription className="mt-2">
+                  Invois: <span className="font-semibold text-foreground">{invoice?.invoice_number}</span>
+                </CardDescription>
+                <CardDescription>
+                  Baki Final Paid: <span className="font-semibold text-foreground">{formatCurrency(financialSummary.finalTotal || 0)}</span>
+                </CardDescription>
+              </div>
+              <button
+                onClick={() => setShowReturnModal(false)}
+                className="text-gray-500 hover:text-gray-700"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </CardHeader>
+
+            <CardContent className="space-y-4">
+              <div className="flex gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0 text-amber-600" />
+                <div className="text-sm text-amber-800">
+                  <p className="font-medium">Pulangan Item Fizikal</p>
+                  <p className="mt-1">
+                    Aliran ini akan tambah semula stok, tolak hasil invois dan rekod keluar duit dari dompet.
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Item Dipulangkan *</label>
+                <select
+                  value={selectedReturnItemId}
+                  onChange={(event) => handleReturnItemChange(event.target.value)}
+                  className="flex h-10 w-full items-center justify-between rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  {returnableItems.length === 0 ? (
+                    <option value="">Tiada item boleh dipulangkan</option>
+                  ) : (
+                    returnableItems.map((entry) => (
+                      <option key={entry.invoiceItemId} value={entry.invoiceItemId}>
+                        {entry.itemLabel} (Baki: {entry.maxReturnQty} unit)
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Kuantiti Return *</label>
+                  <Input
+                    type="number"
+                    min="1"
+                    max={selectedReturnItem?.maxReturnQty || 1}
+                    value={returnQuantity}
+                    onChange={(event) => handleReturnQuantityChange(event.target.value)}
+                    className="h-10"
+                  />
+                  <p className="text-xs text-gray-600">
+                    Maksimum: {selectedReturnItem?.maxReturnQty || 0} unit
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Amaun Refund (RM) *</label>
+                  <Input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max={financialSummary.finalTotal || 0}
+                    value={returnRefundAmount}
+                    onChange={(event) => setReturnRefundAmount(event.target.value)}
+                    className="h-10"
+                  />
+                  <p className="text-xs text-gray-600">
+                    Maksimum: RM{(financialSummary.finalTotal || 0).toFixed(2)}
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Sebab Return (Pilihan)</label>
+                <select
+                  value={returnReason}
+                  onChange={(event) => setReturnReason(event.target.value)}
+                  className="flex h-10 w-full items-center justify-between rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">Pilih sebab return (opsyenal)</option>
+                  <option value="Customer Return">Pemulangan Pelanggan</option>
+                  <option value="Defect Return">Return Barang Rosak</option>
+                  <option value="Cancel Order">Batal Order</option>
+                  <option value="Other">Lain-lain</option>
+                </select>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Catatan (Pilihan)</label>
+                <Input
+                  placeholder="Masukkan catatan return..."
+                  value={returnNotes}
+                  onChange={(event) => setReturnNotes(event.target.value)}
+                  className="h-10"
+                />
+              </div>
+            </CardContent>
+
+            <div className="flex justify-end gap-3 border-t p-4">
+              <Button
+                variant="outline"
+                onClick={() => setShowReturnModal(false)}
+                disabled={processInvoiceReturn.isPending}
+                className="h-10"
+              >
+                Batal
+              </Button>
+              <Button
+                onClick={handleProcessReturn}
+                disabled={processInvoiceReturn.isPending || !selectedReturnItem || !returnQuantity || !returnRefundAmount}
+                className="h-10 bg-rose-600 hover:bg-rose-700"
+              >
+                {processInvoiceReturn.isPending ? 'Sedang Memproses...' : 'Process Return'}
+              </Button>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {/* Adjustment Modal */}
       {showRefundModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <Card className="w-full max-w-md">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
               <div>
-                <CardTitle>Kembalikan Dana</CardTitle>
+                <CardTitle>Adjust Price</CardTitle>
                 <CardDescription className="mt-2">
                   Invois: <span className="font-semibold text-foreground">{invoice?.invoice_number}</span>
                 </CardDescription>
                 <CardDescription>
-                  Jumlah: <span className="font-semibold text-foreground">{formatCurrency(invoice?.total_amount || 0)}</span>
+                  Final Paid: <span className="font-semibold text-foreground">{formatCurrency(financialSummary.finalTotal || 0)}</span>
                 </CardDescription>
               </div>
               <button
@@ -2685,42 +3086,42 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
               <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 flex gap-3">
                 <AlertCircle className="h-5 w-5 text-amber-600 flex-shrink-0 mt-0.5" />
                 <div className="text-sm text-amber-800">
-                  <p className="font-medium">Maklumat Penting</p>
-                  <p className="mt-1">Pemulangan ini akan mengurangkan saldo dompet anda. Amaun mestilah ≤ RM{invoice?.total_amount}</p>
+                  <p className="font-medium">Maklumat Pelarasan</p>
+                  <p className="mt-1">Pelarasan harga akan mengurangkan hasil invois dan baki dompet. Amaun mestilah {'<='} RM{financialSummary.finalTotal.toFixed(2)}</p>
                 </div>
               </div>
 
-              {/* Refund Amount */}
+              {/* Adjustment Amount */}
               <div className="space-y-2">
-                <label className="text-sm font-medium">Amaun Pemulangan (RM) *</label>
+                <label className="text-sm font-medium">Amaun Pelarasan (RM) *</label>
                 <Input
                   type="number"
                   step="0.01"
                   min="0"
-                  max={invoice?.total_amount || 0}
+                  max={financialSummary.finalTotal || 0}
                   placeholder="0.00"
                   value={refundAmount}
                   onChange={(e) => setRefundAmount(e.target.value)}
                   className="h-10"
                 />
                 <p className="text-xs text-gray-600">
-                  Maksimum: RM{invoice?.total_amount}
+                  Maksimum: RM{financialSummary.finalTotal.toFixed(2)}
                 </p>
               </div>
 
-              {/* Refund Reason */}
+              {/* Adjustment Reason */}
               <div className="space-y-2">
-                <label className="text-sm font-medium">Sebab Pemulangan *</label>
+                <label className="text-sm font-medium">Sebab Pelarasan (Pilihan)</label>
                 <select
                   value={refundReason}
                   onChange={(e) => setRefundReason(e.target.value)}
                   className="flex h-10 w-full items-center justify-between rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
-                  <option value="">Pilih sebab pemulangan</option>
-                  <option value="Customer Return">Pelanggan Mengembalikan Item</option>
+                  <option value="">Pilih sebab pelarasan (opsyenal)</option>
+                  <option value="Price Correction">Pembetulan Harga</option>
                   <option value="Courtesy">Gerak Budi / Diskaun</option>
-                  <option value="Damage">Item Rosak</option>
-                  <option value="Exchange">Pertukaran Item</option>
+                  <option value="Defect Compensation">Kompensasi Kerosakan</option>
+                  <option value="Shipping Compensation">Kompensasi Penghantaran</option>
                   <option value="Other">Lain-lain</option>
                 </select>
               </div>
@@ -2748,10 +3149,10 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
               </Button>
               <Button
                 onClick={handleProcessRefund}
-                disabled={processRefund.isPending || !refundAmount || !refundReason}
+                disabled={processRefund.isPending || !refundAmount}
                 className="bg-amber-600 hover:bg-amber-700 h-10"
               >
-                {processRefund.isPending ? 'Sedang Memproses...' : 'Kembalikan Dana'}
+                {processRefund.isPending ? 'Sedang Memproses...' : 'Simpan Pelarasan'}
               </Button>
             </div>
           </Card>

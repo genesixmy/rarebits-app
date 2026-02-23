@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
@@ -13,12 +13,15 @@ import {
 } from '@/components/ui/tooltip';
 import { Loader2,
   Package, 
+  Truck,
+  Tag,
   TrendingUp, 
   TrendingDown,
   BarChart3,
   Wallet,
   CheckCircle,
   XCircle,
+  AlertTriangle,
   Info
 } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
@@ -32,8 +35,10 @@ import {
 import { useTheme } from '@/contexts/ThemeProvider';
 import { supabase } from '@/lib/customSupabaseClient';
 import { resolveTransactionClassification, TRANSACTION_CLASSIFICATIONS } from '@/components/wallet/transactionClassification';
+import { calculateBusinessHealth, getItemAvailableQuantity } from '@/lib/dashboardHealth';
+import { calculateRealityCheck } from '@/lib/dashboardRealityCheck';
 
-const StatCard = ({ title, value, icon, subtext, delay, isHighlighted = false, tone = 'sky', size = 'default', helperText = '' }) => {
+const StatCard = ({ title, value, icon, subtext, subtextSecondary = '', delay, isHighlighted = false, tone = 'sky', size = 'default', helperText = '' }) => {
   const [isHelperOpen, setIsHelperOpen] = useState(false);
   const toneMap = {
     sky: {
@@ -111,7 +116,7 @@ const StatCard = ({ title, value, icon, subtext, delay, isHighlighted = false, t
               >
                 {React.cloneElement(icon, { className: cn(isHero ? 'h-5 w-5' : 'h-4 w-4', isHighlighted ? 'text-sky-500' : toneStyle.icon) })}
               </span>
-              <CardTitle className={cn(isHero ? "text-base md:text-lg" : "text-base md:text-base", "font-semibold", isHighlighted ? 'text-white' : 'text-foreground')}>
+              <CardTitle className={cn("text-base", "font-semibold", isHighlighted ? 'text-white' : 'text-foreground')}>
                 <span className="inline-flex items-center gap-2">
                   <span>{title}</span>
                   {helperText ? (
@@ -146,7 +151,7 @@ const StatCard = ({ title, value, icon, subtext, delay, isHighlighted = false, t
           </div>
         </CardHeader>
         <CardContent className="pt-0">
-          <div className={cn(isHero ? "text-2xl md:text-3xl" : "text-xl md:text-2xl", "font-bold leading-none tracking-tight", isHighlighted ? 'text-white' : 'text-foreground')}>
+          <div className={cn("text-2xl", "font-bold leading-none tracking-tight", isHighlighted ? 'text-white' : 'text-foreground')}>
             {value}
           </div>
           <div className="mt-3 flex items-center gap-2">
@@ -158,10 +163,15 @@ const StatCard = ({ title, value, icon, subtext, delay, isHighlighted = false, t
             >
               <BarChart3 className={cn("h-3 w-3", isHighlighted ? 'text-white' : toneStyle.trendIcon)} />
             </span>
-            <p className={cn("text-xs font-medium", isHighlighted ? 'text-white/90' : 'text-muted-foreground')}>
+            <p className={cn("text-sm font-medium", isHighlighted ? 'text-white/90' : 'text-muted-foreground')}>
               {subtext}
             </p>
           </div>
+          {subtextSecondary ? (
+            <p className={cn("mt-1 text-xs", isHighlighted ? 'text-white/80' : 'text-muted-foreground')}>
+              {subtextSecondary}
+            </p>
+          ) : null}
         </CardContent>
       </Card>
     </motion.div>
@@ -190,11 +200,264 @@ const getInitialDateRange = () => {
   };
 };
 
+const SETTLED_INVOICE_STATUSES = new Set(['paid', 'partially_returned', 'returned']);
+
+const getInvoiceFinancialSummary = (invoice, fallbackOriginal = 0) => {
+  const fallback = Math.max(parseFloat(fallbackOriginal) || 0, 0);
+  const totalAmountRaw = parseFloat(invoice?.total_amount);
+  const totalAmount = Number.isFinite(totalAmountRaw) && totalAmountRaw >= 0
+    ? totalAmountRaw
+    : fallback;
+
+  const adjustmentRaw = parseFloat(invoice?.adjustment_total);
+  const adjustmentTotal = Number.isFinite(adjustmentRaw) && adjustmentRaw > 0
+    ? adjustmentRaw
+    : 0;
+
+  const returnedRaw = parseFloat(invoice?.returned_total);
+  const returnedTotal = Number.isFinite(returnedRaw) && returnedRaw > 0
+    ? returnedRaw
+    : 0;
+
+  const finalRaw = parseFloat(invoice?.final_total);
+  const finalTotal = Number.isFinite(finalRaw)
+    ? Math.max(Math.min(finalRaw, totalAmount), 0)
+    : Math.max(totalAmount - adjustmentTotal - returnedTotal, 0);
+
+  return {
+    totalAmount,
+    finalTotal,
+    adjustmentTotal,
+    returnedTotal,
+  };
+};
+
+const getHealthTone = (label) => {
+  if (label === 'Strong') {
+    return {
+      fillClass: 'bg-emerald-500',
+      chipClass: 'bg-emerald-100 text-emerald-700',
+      batteryClass: 'border-emerald-300',
+    };
+  }
+  if (label === 'Stable') {
+    return {
+      fillClass: 'bg-sky-500',
+      chipClass: 'bg-sky-100 text-sky-700',
+      batteryClass: 'border-sky-300',
+    };
+  }
+  if (label === 'Weak') {
+    return {
+      fillClass: 'bg-amber-500',
+      chipClass: 'bg-amber-100 text-amber-700',
+      batteryClass: 'border-amber-300',
+    };
+  }
+  return {
+    fillClass: 'bg-rose-500',
+    chipClass: 'bg-rose-100 text-rose-700',
+    batteryClass: 'border-rose-300',
+  };
+};
+
+const getDeadCapitalTone = (deadCapitalPct) => {
+  if (deadCapitalPct > 20) {
+    return {
+      label: 'Berisiko',
+      chipClass: 'border-rose-200 bg-rose-100 text-rose-700',
+      fillClass: 'bg-rose-500',
+      trackClass: 'border-rose-200 bg-rose-50/70',
+    };
+  }
+
+  if (deadCapitalPct >= 10) {
+    return {
+      label: 'Perlu perhatian',
+      chipClass: 'border-amber-200 bg-amber-100 text-amber-700',
+      fillClass: 'bg-amber-500',
+      trackClass: 'border-amber-200 bg-amber-50/70',
+    };
+  }
+
+  return {
+    label: 'Sihat',
+    chipClass: 'border-emerald-200 bg-emerald-100 text-emerald-700',
+    fillClass: 'bg-emerald-500',
+    trackClass: 'border-emerald-200 bg-emerald-50/70',
+  };
+};
+
+const formatSignedPercent = (value) => {
+  if (!Number.isFinite(value)) return '-';
+  return `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`;
+};
+
+const getRevenueChipTone = (value) => {
+  if (!Number.isFinite(value)) return 'bg-indigo-100 text-indigo-700 border-indigo-200';
+  if (value >= 0) return 'bg-indigo-100 text-indigo-700 border-indigo-200';
+  return 'bg-indigo-50 text-indigo-700 border-indigo-200';
+};
+
+const getProfitChipTone = (value) => {
+  if (!Number.isFinite(value)) return 'bg-emerald-100 text-emerald-700 border-emerald-200';
+  if (value >= 0) return 'bg-emerald-100 text-emerald-700 border-emerald-200';
+  return 'bg-rose-100 text-rose-700 border-rose-200';
+};
+
+const getRealityGapChipTone = (tone) => {
+  if (tone === 'danger') return 'bg-rose-100 text-rose-700 border-rose-200';
+  if (tone === 'warn') return 'bg-amber-100 text-amber-700 border-amber-200';
+  if (tone === 'success') return 'bg-emerald-100 text-emerald-700 border-emerald-200';
+  if (tone === 'info') return 'bg-sky-100 text-sky-700 border-sky-200';
+  return 'bg-slate-100 text-slate-700 border-slate-200';
+};
+
+const getRealityReasonRowTone = (severity) => {
+  if (severity === 'danger') {
+    return {
+      row: 'border-rose-200 bg-rose-50/70',
+      iconWrap: 'bg-rose-100 text-rose-700',
+    };
+  }
+  if (severity === 'warn') {
+    return {
+      row: 'border-amber-200 bg-amber-50/70',
+      iconWrap: 'bg-amber-100 text-amber-700',
+    };
+  }
+  return {
+    row: 'border-slate-200 bg-slate-50/70',
+    iconWrap: 'bg-slate-100 text-slate-700',
+  };
+};
+
+const getRealityReasonIcon = (type) => {
+  if (type === 'shipping') return Truck;
+  if (type === 'platform') return Tag;
+  if (type === 'cost') return Package;
+  if (type === 'adjustment') return TrendingDown;
+  return Info;
+};
+
+const getRealityReasonImpactBadge = (reason) => {
+  const impactAmount = Number.parseFloat(reason?.impactAmount) || 0;
+
+  if (reason?.type === 'cost') {
+    return {
+      label: 'Margin ↓',
+      className: 'bg-amber-100 text-amber-700 border-amber-200',
+    };
+  }
+
+  if (reason?.type === 'shipping') {
+    if (impactAmount > 0) {
+      return {
+        label: `-RM${impactAmount.toFixed(2)}`,
+        className: 'bg-rose-100 text-rose-700 border-rose-200',
+      };
+    }
+    return {
+      label: 'Kos ↑',
+      className: 'bg-amber-100 text-amber-700 border-amber-200',
+    };
+  }
+
+  if (reason?.type === 'platform') {
+    if (impactAmount > 0) {
+      return {
+        label: `-RM${impactAmount.toFixed(2)}`,
+        className: 'bg-amber-100 text-amber-700 border-amber-200',
+      };
+    }
+    return {
+      label: 'Fi ↑',
+      className: 'bg-slate-100 text-slate-700 border-slate-200',
+    };
+  }
+
+  if (reason?.type === 'adjustment') {
+    if (impactAmount > 0) {
+      return {
+        label: `-RM${impactAmount.toFixed(2)}`,
+        className: 'bg-rose-100 text-rose-700 border-rose-200',
+      };
+    }
+    return {
+      label: 'Pelarasan',
+      className: 'bg-slate-100 text-slate-700 border-slate-200',
+    };
+  }
+
+  return {
+    label: 'Info',
+    className: 'bg-slate-100 text-slate-700 border-slate-200',
+  };
+};
+
+const getRealityStatusPill = ({ hasComparison, reasons = [] }) => {
+  if (!hasComparison) {
+    return {
+      label: 'Info',
+      className: 'bg-slate-100 text-slate-700 border-slate-200',
+    };
+  }
+
+  if (reasons.some((reason) => reason.severity === 'danger')) {
+    return {
+      label: 'Alert',
+      className: 'bg-rose-100 text-rose-700 border-rose-200',
+    };
+  }
+
+  if (reasons.some((reason) => reason.severity === 'warn')) {
+    return {
+      label: 'Alert',
+      className: 'bg-amber-100 text-amber-700 border-amber-200',
+    };
+  }
+
+  return {
+    label: 'Stable',
+    className: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+  };
+};
+
+const getRealityInsightText = ({
+  hasComparison,
+  revenueChangePct,
+  profitChangePct,
+  isSlowWeek,
+}) => {
+  if (!hasComparison) {
+    return 'Ringkasan awal minggu ini — trend akan lebih jelas bila ada bandingan.';
+  }
+
+  if (revenueChangePct > 0 && profitChangePct > -5 && profitChangePct < (revenueChangePct - 3)) {
+    return 'Busy tapi margin ketat - profit tak ikut revenue.';
+  }
+
+  if (profitChangePct > (revenueChangePct + 3)) {
+    return 'Profit lebih laju dari revenue.';
+  }
+
+  if (isSlowWeek) {
+    return 'Minggu ini perlahan - fokus pada item fast sell.';
+  }
+
+  if (revenueChangePct < 0) {
+    return 'Jualan perlahan minggu ini, kawal kos supaya margin kekal sihat.';
+  }
+
+  return 'Revenue dan profit bergerak seimbang minggu ini.';
+};
+
 const Dashboard = ({ items, categories }) => {
   const { toast } = useToast();
   const { theme } = useTheme();
   const [dateRange, setDateRange] = useState(getInitialDateRange());
   const [userId, setUserId] = useState(null);
+  const [isDeadCapitalTooltipOpen, setIsDeadCapitalTooltipOpen] = useState(false);
 
   // Get current user ID
   useEffect(() => {
@@ -223,7 +486,8 @@ const Dashboard = ({ items, categories }) => {
           is_manual,
           item_name,
           items(id, name, category, cost_price, user_id),
-          invoices(id, invoice_date, status, platform, user_id, created_at, updated_at, shipping_charged, shipment_id, channel_fee_amount, courier_payment_mode)
+          invoice_item_returns(returned_quantity, refund_amount, returned_unit_price, returned_cost_price),
+          invoices(*)
         `);
 
       if (error) {
@@ -235,7 +499,7 @@ const Dashboard = ({ items, categories }) => {
       const paidRows = (data || []).filter(invItem => 
         invItem.invoices && 
         invItem.invoices.user_id === userId &&
-        invItem.invoices.status === 'paid'
+        SETTLED_INVOICE_STATUSES.has(invItem.invoices.status)
       );
 
       const shipmentIds = [...new Set(
@@ -281,9 +545,9 @@ const Dashboard = ({ items, categories }) => {
 
       const { data: paidInvoices, error: invoiceError } = await supabase
         .from('invoices')
-        .select('id, shipment_id, shipping_method, shipping_charged')
+        .select('id, status, shipment_id, shipping_method, shipping_charged')
         .eq('user_id', userId)
-        .eq('status', 'paid');
+        .in('status', Array.from(SETTLED_INVOICE_STATUSES));
 
       if (invoiceError) {
         console.error('[Dashboard] Error fetching paid invoices for shipping reminder:', invoiceError);
@@ -310,6 +574,7 @@ const Dashboard = ({ items, categories }) => {
       }
 
       return (paidInvoices || []).reduce((count, invoice) => {
+        if (invoice?.status === 'returned') return count;
         if (!isDeliveryRequiredForInvoice(invoice)) return count;
 
         const shipmentId = invoice?.shipment_id;
@@ -455,6 +720,154 @@ const Dashboard = ({ items, categories }) => {
     enabled: !!userId && !!dateRange.startDate && !!dateRange.endDate
   });
 
+  const { data: expensesTotal30d = 0 } = useQuery({
+    queryKey: ['dashboard-expenses-30d', userId, businessWalletIds.length],
+    queryFn: async () => {
+      if (!userId || businessWalletIds.length === 0) return 0;
+
+      const now = new Date();
+      const startDate = new Date();
+      startDate.setDate(now.getDate() - 29);
+      const endDate = new Date(now);
+      endDate.setHours(23, 59, 59, 999);
+      const startDateStr = startDate.toISOString().slice(0, 10);
+      const endDateStr = endDate.toISOString().slice(0, 10);
+
+      const { data, error } = await supabase
+        .from('transactions')
+        .select('amount, type, transaction_type, category, invoice_id, reference_type')
+        .eq('user_id', userId)
+        .in('wallet_id', businessWalletIds)
+        .gte('transaction_date', startDateStr)
+        .lte('transaction_date', endDateStr);
+
+      if (error) {
+        console.error('[Dashboard] Error fetching 30-day expenses:', error);
+        return 0;
+      }
+
+      return (data || []).reduce((sum, tx) => {
+        const classification = resolveTransactionClassification(tx);
+        if (classification !== TRANSACTION_CLASSIFICATIONS.EXPENSE) return sum;
+        return sum + Math.abs(parseFloat(tx.amount) || 0);
+      }, 0);
+    },
+    enabled: !!userId && businessWalletIds.length > 0,
+    staleTime: 30 * 1000,
+  });
+
+  const sales30dStats = useMemo(() => {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - 29);
+
+    const rows = invoiceItems.filter((sale) => {
+      const invoiceDate = sale?.invoices?.invoice_date;
+      if (!invoiceDate) return false;
+      const parsed = new Date(invoiceDate);
+      if (Number.isNaN(parsed.getTime())) return false;
+      return parsed >= cutoff;
+    });
+
+    const soldQty30d = rows.reduce((sum, sale) => sum + getNetSoldQuantityForSale(sale), 0);
+
+    const categorySales30d = rows.reduce((acc, sale) => {
+      const category = sale.is_manual ? 'Manual' : (sale.items?.category || 'Lain-lain');
+      acc[category] = (acc[category] || 0) + getNetItemRevenueForSale(sale);
+      return acc;
+    }, {});
+
+    return {
+      soldQty30d,
+      categorySales30d,
+    };
+  }, [invoiceItems]);
+
+  const healthData = useMemo(() => {
+    return calculateBusinessHealth({
+      items,
+      walletBalance: parseFloat(businessWalletBalance?.balance) || 0,
+      expensesTotal30d,
+      soldQty30d: sales30dStats.soldQty30d,
+      categorySales30d: sales30dStats.categorySales30d,
+      underperformThresholdValue: 200,
+    });
+  }, [items, businessWalletBalance?.balance, expensesTotal30d, sales30dStats]);
+
+  const healthReasons = useMemo(() => {
+    return (healthData.reasons || []).slice(0, 2).map((reason) => {
+      if (reason.key === 'stuck_capital') {
+        return `RM${(reason.value || 0).toFixed(2)} modal tersekat >60 hari`;
+      }
+      if (reason.key === 'underperform_categories') {
+        return `${reason.value || 0} kategori underperform`;
+      }
+      if (reason.key === 'cash_buffer_low') {
+        return `Baki wallet rendah (cover ${(reason.value || 0).toFixed(1)} hari)`;
+      }
+      if (reason.key === 'sell_through_low') {
+        return `Sell-through rendah (${((reason.value || 0) * 100).toFixed(1)}%/30 hari)`;
+      }
+      return '';
+    }).filter(Boolean);
+  }, [healthData.reasons]);
+  const healthScorePercent = Math.max(0, Math.min(healthData.score || 0, 100));
+  const healthTone = getHealthTone(healthData.label);
+  const deadCapitalMetrics = useMemo(() => {
+    const deadCapital = Number.parseFloat(healthData?.metrics?.stuckCapital60d) || 0;
+    const totalStockCapital = Number.parseFloat(healthData?.metrics?.totalStockCostValue) || 0;
+    const hasActiveStock = totalStockCapital > 0;
+    const deadCapitalPctRaw = hasActiveStock ? (deadCapital / totalStockCapital) * 100 : 0;
+    const deadCapitalPct = Math.max(0, Math.min(deadCapitalPctRaw, 100));
+
+    return {
+      deadCapital,
+      totalStockCapital,
+      deadCapitalPct,
+      deadCapitalPctRounded: Math.round(deadCapitalPct),
+      hasActiveStock,
+    };
+  }, [healthData?.metrics?.stuckCapital60d, healthData?.metrics?.totalStockCostValue]);
+  const deadCapitalTone = getDeadCapitalTone(deadCapitalMetrics.deadCapitalPct);
+  const deadCapitalSegmentCount = 7;
+  const deadCapitalFilledSegments = deadCapitalMetrics.hasActiveStock
+    ? Math.max(
+      1,
+      Math.min(
+        deadCapitalSegmentCount,
+        Math.ceil((deadCapitalMetrics.deadCapitalPct / 100) * deadCapitalSegmentCount)
+      )
+    )
+    : 0;
+  const realityCheckData = useMemo(() => (
+    calculateRealityCheck({
+      invoiceItems,
+    })
+  ), [invoiceItems]);
+  const hasRealityComparison = (
+    realityCheckData.hasPreviousData
+    && Number.isFinite(realityCheckData.revenueChangePct)
+    && Number.isFinite(realityCheckData.profitChangePct)
+  );
+  const realityRevenueChangeText = formatSignedPercent(realityCheckData.revenueChangePct);
+  const realityProfitChangeText = formatSignedPercent(realityCheckData.profitChangePct);
+  const realityRevenueChipLabel = hasRealityComparison
+    ? `${realityRevenueChangeText} vs minggu lepas`
+    : 'Tiada bandingan';
+  const realityProfitChipLabel = hasRealityComparison
+    ? `${realityProfitChangeText} vs minggu lepas`
+    : 'Tiada bandingan';
+  const realityStatusPill = getRealityStatusPill({
+    hasComparison: hasRealityComparison,
+    reasons: realityCheckData.reasons,
+  });
+  const realityInsightText = getRealityInsightText({
+    hasComparison: hasRealityComparison,
+    revenueChangePct: realityCheckData.revenueChangePct,
+    profitChangePct: realityCheckData.profitChangePct,
+    isSlowWeek: realityCheckData.isSlowWeek,
+  });
+  const realityTopReasons = (realityCheckData.reasons || []).slice(0, 2);
+
   // Filter by date range
   const getFilteredSales = () => {
     if (!dateRange.startDate || !dateRange.endDate) {
@@ -497,10 +910,40 @@ const Dashboard = ({ items, categories }) => {
     return 0;
   };
 
+  function getInvoiceItemReturnEntries(sale) {
+    return Array.isArray(sale?.invoice_item_returns) ? sale.invoice_item_returns : [];
+  }
+
+  function getReturnedQuantityForSale(sale) {
+    return getInvoiceItemReturnEntries(sale).reduce((sum, entry) => {
+      const qty = parseFloat(entry?.returned_quantity);
+      return sum + (Number.isFinite(qty) && qty > 0 ? qty : 0);
+    }, 0);
+  }
+
+  function getReturnedRefundTotalForSale(sale) {
+    return getInvoiceItemReturnEntries(sale).reduce((sum, entry) => {
+      const amount = parseFloat(entry?.refund_amount);
+      return sum + (Number.isFinite(amount) && amount > 0 ? amount : 0);
+    }, 0);
+  }
+
+  function getNetSoldQuantityForSale(sale) {
+    const soldQty = Math.max(parseFloat(sale?.quantity) || 0, 0);
+    const returnedQty = getReturnedQuantityForSale(sale);
+    return Math.max(soldQty - returnedQty, 0);
+  }
+
+  function getNetItemRevenueForSale(sale) {
+    const lineRevenue = parseFloat(sale?.line_total);
+    const baseRevenue = Number.isFinite(lineRevenue) ? lineRevenue : 0;
+    return baseRevenue - getReturnedRefundTotalForSale(sale);
+  }
+
   // Calculate stats from invoice_items
   const totalCost = filteredSales.reduce((sum, sale) => {
     const costPrice = getEffectiveCostPrice(sale);
-    const cost = costPrice * (sale.quantity || 1);
+    const cost = costPrice * getNetSoldQuantityForSale(sale);
     return sum + cost;
   }, 0);
 
@@ -540,24 +983,45 @@ const Dashboard = ({ items, categories }) => {
   }, new Map());
   const totalChannelFees = Array.from(channelFeeByInvoice.values()).reduce((sum, fee) => sum + fee, 0);
 
-  const totalItemRevenue = filteredSales.reduce((sum, sale) => sum + (parseFloat(sale.line_total) || 0), 0);
   const totalItemProfit = filteredSales.reduce((sum, sale) => {
-    const revenue = parseFloat(sale.line_total) || 0;
+    const revenue = getNetItemRevenueForSale(sale);
     const costPrice = getEffectiveCostPrice(sale);
-    const cost = costPrice * (sale.quantity || 1);
+    const cost = costPrice * getNetSoldQuantityForSale(sale);
     return sum + (revenue - cost);
   }, 0) - totalChannelFees;
 
   const revenueByInvoice = filteredSales.reduce((acc, sale) => {
     const invoiceId = sale?.invoices?.id;
     if (!invoiceId) return acc;
-    const revenue = parseFloat(sale.line_total) || 0;
+    const revenue = getNetItemRevenueForSale(sale);
     acc.set(invoiceId, (acc.get(invoiceId) || 0) + revenue);
     return acc;
   }, new Map());
 
+  const invoiceFinancialById = filteredSales.reduce((acc, sale) => {
+    const invoice = sale?.invoices;
+    const invoiceId = invoice?.id;
+    if (!invoiceId || acc.has(invoiceId)) return acc;
+
+    const itemRevenue = revenueByInvoice.get(invoiceId) || 0;
+    const shippingCharged = shippingByInvoice.get(invoiceId)?.shippingCharged || 0;
+    const fallbackOriginal = itemRevenue + shippingCharged;
+
+    acc.set(invoiceId, getInvoiceFinancialSummary(invoice, fallbackOriginal));
+    return acc;
+  }, new Map());
+
+  const totalFinalRevenue = Array.from(invoiceFinancialById.values()).reduce(
+    (sum, values) => sum + (values.finalTotal || 0),
+    0
+  );
+  const totalAdjustments = Array.from(invoiceFinancialById.values()).reduce(
+    (sum, values) => sum + (values.adjustmentTotal || 0),
+    0
+  );
+
   const filteredStats = {
-    totalRevenue: totalItemRevenue,
+    totalRevenue: totalFinalRevenue,
     totalCost: totalCost,
     totalExpenses: parseFloat(businessExpenses.total) || 0,
     totalShippingCharged: totalShippingCharged,
@@ -565,14 +1029,23 @@ const Dashboard = ({ items, categories }) => {
     totalShippingProfit: totalShippingProfit,
     shippingPendingCount: shippingPendingCount,
     totalRefunds: parseFloat(totalRefunds) || 0,
+    totalAdjustments: totalAdjustments,
     totalChannelFees: totalChannelFees,
     totalItemProfit: totalItemProfit,
-    totalProfit: totalItemProfit + totalShippingProfit,
+    totalProfit: totalItemProfit + totalShippingProfit - totalAdjustments,
     soldItemsCount: filteredSales.length,
     totalQuantitySold: filteredSales.reduce((sum, sale) => {
-      return sum + (sale.quantity || 0);
+      return sum + getNetSoldQuantityForSale(sale);
     }, 0)
   };
+
+  const totalAvailableUnits = items.reduce((sum, item) => {
+    return sum + getItemAvailableQuantity(item);
+  }, 0);
+  const totalUnitStock = filteredStats.totalQuantitySold + totalAvailableUnits;
+  const soldUnitMovementPercent = totalUnitStock > 0
+    ? (filteredStats.totalQuantitySold / totalUnitStock) * 100
+    : 0;
 
   const netProfitPercentage = filteredStats.totalRevenue > 0
     ? (filteredStats.totalProfit / filteredStats.totalRevenue) * 100
@@ -586,6 +1059,7 @@ const Dashboard = ({ items, categories }) => {
   };
 
   const categoryStats = filteredSales.reduce((acc, sale) => {
+    if (getNetSoldQuantityForSale(sale) <= 0) return acc;
     const category = sale.is_manual ? 'Manual' : (sale.items?.category || 'Lain-lain');
     acc[category] = (acc[category] || 0) + 1;
     return acc;
@@ -593,6 +1067,7 @@ const Dashboard = ({ items, categories }) => {
 
   // Calculate platform stats from invoice platform field
   const platformStats = filteredSales.reduce((acc, sale) => {
+    if (getNetSoldQuantityForSale(sale) <= 0) return acc;
     const platform = sale.invoices?.platform || 'Manual';
     acc[platform] = (acc[platform] || 0) + 1;
     return acc;
@@ -615,6 +1090,7 @@ const Dashboard = ({ items, categories }) => {
   const defaultColors = ['#3b82f6', '#10b981', '#f97316', '#a855f7', '#ef4444', '#6366f1', '#f43f5e'];
 
   const recentSales = filteredSales
+    .filter((sale) => getNetSoldQuantityForSale(sale) > 0)
     .sort((a, b) => {
       const aTime = a.invoices?.updated_at || a.invoices?.created_at || a.invoices?.invoice_date || 0;
       const bTime = b.invoices?.updated_at || b.invoices?.created_at || b.invoices?.invoice_date || 0;
@@ -697,7 +1173,7 @@ const Dashboard = ({ items, categories }) => {
 
       <section className="space-y-2">
         <h2 className="px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Performance</h2>
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
           <StatCard
             title="Jualan Barang"
             value={`RM ${filteredStats.totalRevenue.toFixed(2)}`}
@@ -735,20 +1211,23 @@ const Dashboard = ({ items, categories }) => {
           <h2 className="px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Operations</h2>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <StatCard
-              title="Kuantiti Terjual"
+              title="Unit Terjual"
               value={filteredStats.totalQuantitySold}
               icon={<CheckCircle />}
-              subtext={`Daripada ${filteredStats.soldItemsCount} item`}
-              delay={0.35}
+              subtext={`${filteredStats.totalQuantitySold} / ${totalUnitStock} unit`}
+              subtextSecondary={`${soldUnitMovementPercent.toFixed(1)}% stok telah bergerak`}
+              delay={0.42}
               tone="amber"
+              size="hero"
             />
             <StatCard
               title="Jumlah Item"
               value={globalStats.totalItems}
               icon={<Package />}
               subtext={`${globalStats.availableItems} tersedia`}
-              delay={0.4}
+              delay={0.46}
               tone="sky"
+              size="hero"
             />
           </div>
         </section>
@@ -761,13 +1240,226 @@ const Dashboard = ({ items, categories }) => {
               value={`RM ${filteredStats.totalExpenses.toFixed(2)}`}
               icon={<TrendingDown />}
               subtext="Perbelanjaan perniagaan"
-              delay={0.45}
+              delay={0.5}
               tone="fuchsia"
             />
           </div>
         </section>
       </div>
 
+      <section className="space-y-2">
+        <h2 className="px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Insights</h2>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.34 }}
+          >
+            <Card className="rounded-3xl border border-slate-200/80 bg-card shadow-sm">
+              <CardHeader className="pb-3">
+                <div className="flex items-center justify-between gap-3">
+                  <CardTitle className="text-base font-semibold">Business Health</CardTitle>
+                  <span className={cn("inline-flex rounded-full px-2.5 py-1 text-xs font-semibold", healthTone.chipClass)}>
+                    {healthData.label}
+                  </span>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-3 pt-0">
+                <div className="flex items-end justify-between gap-3">
+                  <p className="text-2xl font-bold leading-none">{healthScorePercent}%</p>
+                  <p className="text-sm font-medium text-muted-foreground">
+                    Cash cover {healthData.metrics.cashBufferDays.toFixed(1)} hari
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className={cn("relative h-3 flex-1 overflow-hidden rounded-full border bg-muted", healthTone.batteryClass)}>
+                    <div
+                      className={cn("absolute inset-y-0 left-0 rounded-full transition-all duration-300", healthTone.fillClass)}
+                      style={{ width: `${healthScorePercent}%` }}
+                    />
+                  </div>
+                  <span className={cn("h-2 w-1.5 rounded-sm border", healthTone.batteryClass)} />
+                </div>
+                <div className="space-y-1.5">
+                  <p className="text-sm font-semibold text-muted-foreground">Masalah utama:</p>
+                  {healthReasons.length > 0 ? (
+                    healthReasons.map((reason, index) => (
+                      <p key={`health-reason-${index}`} className="text-sm text-foreground">
+                        {`\u2022 ${reason}`}
+                      </p>
+                    ))
+                  ) : (
+                    <p className="text-sm text-muted-foreground">Tiada isu utama dikesan.</p>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          </motion.div>
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.38 }}
+          >
+            <Card className="rounded-3xl border border-slate-200/80 bg-card shadow-sm">
+              <CardHeader className="pb-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-1.5">
+                    <CardTitle className="text-base font-semibold">Dead Capital</CardTitle>
+                    <UiTooltip open={isDeadCapitalTooltipOpen} onOpenChange={setIsDeadCapitalTooltipOpen}>
+                      <UiTooltipTrigger asChild>
+                        <button
+                          type="button"
+                          className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition-colors hover:bg-slate-200"
+                          onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            setIsDeadCapitalTooltipOpen((prev) => !prev);
+                          }}
+                          aria-label="Apa itu Dead Capital?"
+                        >
+                          <Info className="h-5 w-5" />
+                        </button>
+                      </UiTooltipTrigger>
+                      <UiTooltipContent side="top" className="max-w-[240px] text-xs leading-relaxed">
+                        <p className="font-semibold text-foreground">Apa itu Dead Capital?</p>
+                        <p className="mt-1 text-muted-foreground">
+                          Dead Capital ialah modal barang yang tidak terjual melebihi 60 hari.
+                        </p>
+                        <p className="mt-1 text-muted-foreground">
+                          Barang yang baru masuk atau masih aktif dijual belum dianggap "tidur".
+                        </p>
+                        <p className="mt-1 text-muted-foreground">
+                          Ia akan mula dikira selepas 60 hari tanpa jualan.
+                        </p>
+                      </UiTooltipContent>
+                    </UiTooltip>
+                  </div>
+                  {deadCapitalMetrics.hasActiveStock ? (
+                    <span className={cn("inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold", deadCapitalTone.chipClass)}>
+                      {deadCapitalTone.label}
+                    </span>
+                  ) : null}
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-3 pt-0">
+                {deadCapitalMetrics.hasActiveStock ? (
+                  <>
+                    <div className="flex items-baseline gap-1.5">
+                      <p className="text-2xl font-bold leading-none text-foreground">
+                        {deadCapitalMetrics.deadCapitalPctRounded}%
+                      </p>
+                      <p className="text-sm font-medium text-muted-foreground">modal tidur</p>
+                    </div>
+                    <div className="space-y-1.5">
+                      <div className="rounded-full border border-slate-200 bg-slate-50 p-1">
+                        <div className="grid grid-cols-7 gap-2">
+                          {Array.from({ length: deadCapitalSegmentCount }).map((_, index) => (
+                            <span
+                              key={`dead-capital-segment-${index}`}
+                              className={cn(
+                                "h-3 rounded-full transition-colors duration-300",
+                                index < deadCapitalFilledSegments ? deadCapitalTone.fillClass : "bg-slate-200"
+                              )}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">
+                        Target sihat: &lt;10%
+                      </span>
+                      <span className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">
+                        RM {deadCapitalMetrics.deadCapital.toFixed(2)} daripada RM {deadCapitalMetrics.totalStockCapital.toFixed(2)}
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <div className="space-y-1">
+                    <p className="text-base font-semibold text-muted-foreground">Tiada stok aktif</p>
+                    <p className="text-sm text-muted-foreground">Dead capital akan muncul bila ada stok tersedia.</p>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </motion.div>
+        </div>
+      </section>
+
+      <motion.div
+        initial={{ opacity: 0, y: 14 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.34 }}
+      >
+        <Card className="overflow-hidden border-slate-200/80 bg-card shadow-sm">
+          <CardHeader className="p-4 pb-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <CardTitle className="text-lg font-semibold">Reality Check - Minggu Ini</CardTitle>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground">
+                  {realityCheckData.windows.thisWeek.startDate} - {realityCheckData.windows.thisWeek.endDate}
+                </span>
+                <span className={cn("inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold", realityStatusPill.className)}>
+                  {realityStatusPill.label}
+                </span>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3 p-4 pt-0">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <div className="rounded-xl border border-indigo-200/70 bg-indigo-50/60 p-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-indigo-700">Revenue</p>
+                <p className="mt-1 text-2xl font-bold leading-none text-indigo-900">RM {realityCheckData.thisWeek.revenueTotal.toFixed(2)}</p>
+                <span className={cn("mt-2 inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold", getRevenueChipTone(realityCheckData.revenueChangePct))}>
+                  {realityRevenueChipLabel}
+                </span>
+              </div>
+              <div className="rounded-xl border border-emerald-200/70 bg-emerald-50/60 p-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">Profit</p>
+                <p className="mt-1 text-2xl font-bold leading-none text-emerald-900">RM {realityCheckData.thisWeek.profitTotal.toFixed(2)}</p>
+                <span className={cn("mt-2 inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold", getProfitChipTone(realityCheckData.profitChangePct))}>
+                  {realityProfitChipLabel}
+                </span>
+              </div>
+            </div>
+
+            <div className={cn("flex items-start gap-2 rounded-lg border px-3 py-2 text-sm", getRealityGapChipTone(realityCheckData.gapIndicator.tone))}>
+              <AlertTriangle className="h-4 w-4 shrink-0" />
+              <p className="min-w-0 whitespace-normal leading-snug font-medium">{realityInsightText}</p>
+            </div>
+
+            <div className="h-px w-full bg-slate-200" />
+
+            <div className="space-y-2">
+              {realityTopReasons.length > 0 ? (
+                <div className="space-y-2">
+                  {realityTopReasons.map((reason) => {
+                    const Icon = getRealityReasonIcon(reason.type);
+                    const tone = getRealityReasonRowTone(reason.severity);
+                    const impactBadge = getRealityReasonImpactBadge(reason);
+                    return (
+                      <div key={reason.key} className={cn("flex items-start gap-2.5 rounded-lg border px-2.5 py-2", tone.row)}>
+                        <span className={cn("mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md", tone.iconWrap)}>
+                          <Icon className="h-3.5 w-3.5" />
+                        </span>
+                        <div className="min-w-0 flex-1 space-y-0.5">
+                          <p className="text-sm font-semibold leading-tight text-foreground">{reason.label}</p>
+                          <p className="text-sm leading-snug text-muted-foreground sm:truncate">{reason.explanation}</p>
+                        </div>
+                        <span className={cn("inline-flex shrink-0 rounded-full border px-2 py-0.5 text-xs font-semibold", impactBadge.className)}>
+                          {impactBadge.label}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">Tiada kebocoran margin utama dikesan minggu ini.</p>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      </motion.div>
       <Card>
         <CardHeader className="flex flex-col items-start gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="w-full">
@@ -808,6 +1500,9 @@ const Dashboard = ({ items, categories }) => {
                     const totalRevenue = parseFloat(sale.line_total) || 0;
                     const invoiceId = sale?.invoices?.id;
                     const invoiceRevenue = invoiceId ? (revenueByInvoice.get(invoiceId) || 0) : 0;
+                    const invoiceAdjustment = invoiceId
+                      ? (invoiceFinancialById.get(invoiceId)?.adjustmentTotal || 0)
+                      : 0;
                     const invoiceChannelFee = invoiceId ? (channelFeeByInvoice.get(invoiceId) || 0) : 0;
                     const channelFeeShare = invoiceRevenue > 0
                       ? (totalRevenue / invoiceRevenue) * invoiceChannelFee
@@ -822,7 +1517,10 @@ const Dashboard = ({ items, categories }) => {
                       ? (totalRevenue / invoiceRevenue) * shippingCostPaid
                       : 0;
                     const shippingProfitShare = shippingChargedShare - shippingCostShare;
-                    const profit = totalRevenue - totalCost - channelFeeShare + shippingProfitShare;
+                    const adjustmentShare = invoiceRevenue > 0
+                      ? (totalRevenue / invoiceRevenue) * invoiceAdjustment
+                      : 0;
+                    const profit = totalRevenue - totalCost - channelFeeShare + shippingProfitShare - adjustmentShare;
                     const isLoss = profit < 0;
                     return (
                       <tr key={`${sale.id}-${index}`} className="border-t relative group overflow-hidden">
@@ -915,3 +1613,4 @@ const Dashboard = ({ items, categories }) => {
 };
 
 export default Dashboard;
+

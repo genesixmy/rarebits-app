@@ -20,9 +20,20 @@ import CatalogCreatePage from '@/components/catalogs/CatalogCreatePage';
 import CatalogPublicPage from '@/components/catalogs/CatalogPublicPage';
 import Layout from '@/components/layout/Layout';
 import { Loader2, Search } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { useToast } from '@/components/ui/use-toast';
 import { useAuth } from '@/contexts/SupabaseAuthContext.jsx';
 import { ItemFormProvider } from '@/contexts/ItemFormContext';
@@ -127,6 +138,17 @@ const getItemAgingMeta = (item, todayUtcMs) => {
   };
 };
 
+const EMPTY_FAST_SELL_SUGGESTIONS = Object.freeze([]);
+
+const areSetsEqual = (left, right) => {
+  if (left === right) return true;
+  if (left.size !== right.size) return false;
+  for (const value of left) {
+    if (!right.has(value)) return false;
+  }
+  return true;
+};
+
 const fetchItems = async (userId) => {
   const { data, error } = await supabase
     .from('items')
@@ -193,6 +215,8 @@ function App() {
   const [filterAgingStatus, setFilterAgingStatus] = useState('all');
   const [inventorySort, setInventorySort] = useState('default');
   const [favoriteUpdatingIds, setFavoriteUpdatingIds] = useState(new Set());
+  const [isSuggestFavoritesOpen, setIsSuggestFavoritesOpen] = useState(false);
+  const [selectedSuggestedFavoriteIds, setSelectedSuggestedFavoriteIds] = useState(new Set());
   const inventoryRefetchTimeoutRef = useRef(null);
   const previousPathRef = useRef(location.pathname);
 
@@ -254,6 +278,31 @@ function App() {
     staleTime: 0,
     gcTime: 1000 * 60 * 5,
   });
+
+  const {
+    data: fastSellSuggestionsData,
+    error: fastSellSuggestionsError,
+    isLoading: isLoadingFastSellSuggestions,
+  } = useQuery({
+    queryKey: ['fast-sell-suggestions', user?.id],
+    queryFn: async () => {
+      const { data, error } = await supabase.rpc('get_fast_sell_suggestions', {
+        p_days: 30,
+        p_min_sold: 3,
+        p_limit: 20,
+      });
+      if (error) throw error;
+      return Array.isArray(data) ? data : [];
+    },
+    enabled: !!user && isSuggestFavoritesOpen,
+    staleTime: 0,
+    gcTime: 1000 * 60 * 5,
+  });
+
+  const fastSellSuggestions = useMemo(
+    () => (Array.isArray(fastSellSuggestionsData) ? fastSellSuggestionsData : EMPTY_FAST_SELL_SUGGESTIONS),
+    [fastSellSuggestionsData]
+  );
 
   const { data: clients = [], error: clientsError } = useQuery({
     queryKey: ['clients', user?.id],
@@ -325,9 +374,10 @@ function App() {
     if (profileError) toast({ title: "Gagal memuatkan profil", description: profileError.message, variant: "destructive" });
     if (categoriesError) toast({ title: "Gagal memuatkan kategori", description: categoriesError.message, variant: "destructive" });
     if (itemsError) toast({ title: "Gagal memuatkan item", description: itemsError.message, variant: "destructive" });
+    if (fastSellSuggestionsError) toast({ title: "Gagal memuatkan cadangan favorite", description: fastSellSuggestionsError.message, variant: "destructive" });
     if (clientsError) toast({ title: "Gagal memuatkan pelanggan", description: clientsError.message, variant: "destructive" });
     if (walletsError) toast({ title: "Gagal memuatkan wallet", description: walletsError.message, variant: "destructive" });
-  }, [profileError, categoriesError, itemsError, clientsError, walletsError, toast]);
+  }, [profileError, categoriesError, itemsError, fastSellSuggestionsError, clientsError, walletsError, toast]);
 
   // Auth state listener
   useEffect(() => {
@@ -1005,6 +1055,83 @@ function App() {
     });
   }, [toggleFavoriteMutation]);
 
+  const applySuggestedFavoritesMutation = useMutation({
+    mutationFn: async (itemIds) => {
+      if (!user?.id) throw new Error('User tidak sah');
+      if (!Array.isArray(itemIds) || itemIds.length === 0) return 0;
+
+      const uniqueIds = Array.from(new Set(itemIds.filter(Boolean)));
+      if (uniqueIds.length === 0) return 0;
+
+      const { error } = await supabase
+        .from('items')
+        .update({ is_favorite: true })
+        .eq('user_id', user.id)
+        .in('id', uniqueIds);
+
+      if (error) throw error;
+      return uniqueIds.length;
+    },
+    onSuccess: async (updatedCount) => {
+      setIsSuggestFavoritesOpen(false);
+      setSelectedSuggestedFavoriteIds(new Set());
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['items', user.id] }),
+        queryClient.invalidateQueries({ queryKey: ['available-items', user.id] }),
+        queryClient.invalidateQueries({ queryKey: ['fast-sell-suggestions', user.id] }),
+      ]);
+      toast({
+        title: 'Favorite dikemas kini',
+        description: updatedCount > 0
+          ? `${updatedCount} item ditandakan sebagai favorite.`
+          : 'Tiada item dikemas kini.',
+      });
+    },
+    onError: (error) => {
+      toast({
+        title: 'Gagal kemas kini favorite',
+        description: error.message,
+        variant: 'destructive',
+      });
+    },
+  });
+
+  useEffect(() => {
+    if (!isSuggestFavoritesOpen) {
+      setSelectedSuggestedFavoriteIds((prev) => (prev.size === 0 ? prev : new Set()));
+      return;
+    }
+
+    const nextSelected = new Set(
+      fastSellSuggestions
+        .filter((suggestion) => !suggestion.is_favorite)
+        .map((suggestion) => suggestion.item_id)
+    );
+    setSelectedSuggestedFavoriteIds((prev) => (areSetsEqual(prev, nextSelected) ? prev : nextSelected));
+  }, [isSuggestFavoritesOpen, fastSellSuggestions]);
+
+  const handleApplySuggestedFavorites = useCallback(() => {
+    const itemIds = Array.from(selectedSuggestedFavoriteIds);
+    if (itemIds.length === 0) {
+      toast({
+        title: 'Tiada item dipilih',
+        description: 'Pilih sekurang-kurangnya satu item.',
+      });
+      return;
+    }
+
+    applySuggestedFavoritesMutation.mutate(itemIds);
+  }, [selectedSuggestedFavoriteIds, applySuggestedFavoritesMutation, toast]);
+
+  const toggleSuggestedFavoriteSelection = useCallback((itemId, checked) => {
+    setSelectedSuggestedFavoriteIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(itemId);
+      else next.delete(itemId);
+      return next;
+    });
+  }, []);
+
   const itemsWithAging = useMemo(() => {
     const now = new Date();
     const todayUtcMs = Date.UTC(
@@ -1060,6 +1187,10 @@ function App() {
     filterAgingStatus,
     inventorySort,
   ]);
+  const suggestedNonFavoriteCount = useMemo(
+    () => (fastSellSuggestions || []).filter((suggestion) => !suggestion.is_favorite).length,
+    [fastSellSuggestions]
+  );
   
   if (isPublicCatalogRoute) {
     return (
@@ -1113,7 +1244,17 @@ function App() {
               <Route path="/" element={<Dashboard items={items} categories={categories} />} />
               <Route path="/inventory" element={
                 <div className="space-y-6">
-                  <h1 className="page-title">Inventori</h1>
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <h1 className="page-title">Inventori</h1>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => setIsSuggestFavoritesOpen(true)}
+                      className="w-full sm:w-auto"
+                    >
+                      Suggest Favorites
+                    </Button>
+                  </div>
                   <Card>
                     <CardHeader>
                       <CardTitle className="text-lg font-semibold">Tapis Item</CardTitle>
@@ -1198,6 +1339,88 @@ function App() {
           </motion.div>
         </AnimatePresence>
       </Layout>
+
+      <AlertDialog open={isSuggestFavoritesOpen} onOpenChange={setIsSuggestFavoritesOpen}>
+        <AlertDialogContent className="max-w-xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Suggest Favorites</AlertDialogTitle>
+            <AlertDialogDescription>
+              Cadangan item fast sell berdasarkan jualan invois dibayar dalam 30 hari terakhir (minimum 3x).
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          <div className="max-h-[60vh] space-y-2 overflow-y-auto pr-1">
+            {isLoadingFastSellSuggestions ? (
+              <div className="flex items-center justify-center py-6 text-sm text-muted-foreground">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Memuatkan cadangan...
+              </div>
+            ) : fastSellSuggestions.length === 0 ? (
+              <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                Tiada cadangan fast sell buat masa ini.
+              </div>
+            ) : (
+              fastSellSuggestions.map((suggestion) => {
+                const checked = suggestion.is_favorite || selectedSuggestedFavoriteIds.has(suggestion.item_id);
+                const disabled = suggestion.is_favorite || applySuggestedFavoritesMutation.isPending;
+                return (
+                  <label
+                    key={suggestion.item_id}
+                    className="flex items-start gap-3 rounded-lg border p-3"
+                  >
+                    <Checkbox
+                      checked={checked}
+                      disabled={disabled}
+                      onCheckedChange={(value) => toggleSuggestedFavoriteSelection(suggestion.item_id, value === true)}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-sm font-medium text-foreground">{suggestion.item_name || 'Item'}</p>
+                        {suggestion.is_favorite ? (
+                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
+                            Sudah Favorite
+                          </span>
+                        ) : (
+                          <span className="rounded-full bg-orange-100 px-2 py-0.5 text-[11px] font-medium text-orange-700">
+                            Fast Sell
+                          </span>
+                        )}
+                      </div>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Terjual {suggestion.sold_qty || 0}x / 30 hari • Available {suggestion.available_qty || 0}
+                      </p>
+                    </div>
+                  </label>
+                );
+              })
+            )}
+          </div>
+
+          <AlertDialogFooter className="gap-2">
+            <AlertDialogCancel disabled={applySuggestedFavoritesMutation.isPending}>
+              Batal
+            </AlertDialogCancel>
+            <Button
+              type="button"
+              onClick={handleApplySuggestedFavorites}
+              disabled={
+                applySuggestedFavoritesMutation.isPending
+                || selectedSuggestedFavoriteIds.size === 0
+                || suggestedNonFavoriteCount === 0
+              }
+            >
+              {applySuggestedFavoritesMutation.isPending ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Mengemaskini...
+                </>
+              ) : (
+                'Tandakan Favorite'
+              )}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AnimatePresence>
         {(showAddForm || editingItem) && (

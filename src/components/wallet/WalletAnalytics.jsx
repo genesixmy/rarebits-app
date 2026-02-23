@@ -25,6 +25,7 @@ const TYPE_LABEL = {
   transfer_in: 'Transfer Masuk',
   expense: 'Perbelanjaan',
   transfer_out: 'Transfer Keluar',
+  adjustment: 'Pelarasan',
   other: 'Lain-lain',
 };
 
@@ -63,6 +64,7 @@ const buildLocalTrend = (transactions, selectedWalletId, days) => {
     if (!map.has(dateKey)) return;
 
     const classification = resolveTransactionClassification(tx);
+    const direction = getTransactionDirection(tx);
     const amount = Math.abs(parseFloat(tx.amount) || 0);
     const row = map.get(dateKey);
 
@@ -83,7 +85,13 @@ const buildLocalTrend = (transactions, selectedWalletId, days) => {
       return;
     }
 
-    // Keep manual adjustments out of cashflow charts to avoid distorting business flow.
+    if (classification === TRANSACTION_CLASSIFICATIONS.ADJUSTMENT) {
+      if (direction < 0) {
+        row.outflow += amount;
+      } else {
+        row.inflow += amount;
+      }
+    }
   });
 
   return Array.from(map.values());
@@ -106,6 +114,7 @@ const buildLocalBreakdown = (transactions, selectedWalletId, days) => {
     if (createdAt < startDate || createdAt >= endDate) return;
 
     const classification = resolveTransactionClassification(tx);
+    const direction = getTransactionDirection(tx);
     const amount = Math.abs(parseFloat(tx.amount) || 0);
     if (!amount) return;
 
@@ -126,7 +135,13 @@ const buildLocalBreakdown = (transactions, selectedWalletId, days) => {
       return;
     }
 
-    // Keep manual adjustments out of cashflow charts to avoid distorting business flow.
+    if (classification === TRANSACTION_CLASSIFICATIONS.ADJUSTMENT) {
+      if (direction < 0) {
+        outflowMap.set(classification, (outflowMap.get(classification) || 0) + amount);
+      } else {
+        inflowMap.set(classification, (inflowMap.get(classification) || 0) + amount);
+      }
+    }
   });
 
   return {
@@ -146,6 +161,7 @@ const buildLocalMonthlySummary = (transactions, walletId, monthValue) => {
     if (createdAt < start || createdAt >= end) return;
 
     const classification = resolveTransactionClassification(tx);
+    const direction = getTransactionDirection(tx);
     const amount = Math.abs(parseFloat(tx.amount) || 0);
     if (!amount) return;
 
@@ -163,6 +179,15 @@ const buildLocalMonthlySummary = (transactions, walletId, monthValue) => {
       classification === TRANSACTION_CLASSIFICATIONS.TRANSFER_OUT
     ) {
       outflow += amount;
+      return;
+    }
+
+    if (classification === TRANSACTION_CLASSIFICATIONS.ADJUSTMENT) {
+      if (direction < 0) {
+        outflow += amount;
+      } else {
+        inflow += amount;
+      }
     }
   });
 

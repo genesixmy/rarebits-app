@@ -11,7 +11,7 @@ import imageCompression from 'browser-image-compression';
 
 const ProfileSettings = ({ user, onUpdateProfile }) => {
   const { toast } = useToast();
-  const { formData, updateFormField, clearDraft, resetToInitial } = useProfileForm();
+  const { formData, updateFormField, resetToInitial } = useProfileForm();
   const [profileLoading, setProfileLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [passwordLoading, setPasswordLoading] = useState(false);
@@ -90,15 +90,20 @@ const ProfileSettings = ({ user, onUpdateProfile }) => {
     e.preventDefault();
     try {
       setProfileLoading(true);
+      const nextUsername = (formData.username || '').trim();
+      const nextAvatarUrl = formData.avatarUrl || null;
       const { error } = await supabase.from('profiles').upsert({
         id: user.id,
-        username: formData.username,
-        avatar_url: formData.avatarUrl,
+        username: nextUsername,
+        avatar_url: nextAvatarUrl,
         updated_at: new Date(),
       });
       if (error) throw error;
       toast({ title: 'Profil berjaya dikemaskini!' });
-      clearDraft();
+      resetToInitial({
+        username: nextUsername,
+        avatarUrl: nextAvatarUrl,
+      });
       if (onUpdateProfile) {
         onUpdateProfile();
       }

@@ -11,11 +11,33 @@ import { ChevronRight, Plus, Search, ChevronDown, AlertCircle } from 'lucide-rea
 import { format } from 'date-fns';
 import { ms } from 'date-fns/locale';
 
-const ALLOWED_STATUS_FILTERS = new Set(['draft', 'finalized', 'paid', 'cancelled']);
+const ALLOWED_STATUS_FILTERS = new Set(['draft', 'finalized', 'paid', 'partially_returned', 'returned', 'cancelled']);
 const EMPTY_SHIPMENT_STATUS_MAP = new Map();
 
 const normalizeStatusFilter = (value) => (ALLOWED_STATUS_FILTERS.has(value) ? value : '');
 const normalizeShippingStateFilter = (value) => (value === 'pending' ? 'pending' : '');
+const toTimestamp = (value) => {
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
+};
+
+const getDisplayInvoiceTotal = (invoice) => {
+  const totalAmountRaw = parseFloat(invoice?.total_amount);
+  const totalAmount = Number.isFinite(totalAmountRaw) && totalAmountRaw >= 0 ? totalAmountRaw : 0;
+
+  const adjustmentRaw = parseFloat(invoice?.adjustment_total);
+  const adjustmentTotal = Number.isFinite(adjustmentRaw) && adjustmentRaw > 0 ? adjustmentRaw : 0;
+
+  const returnedRaw = parseFloat(invoice?.returned_total);
+  const returnedTotal = Number.isFinite(returnedRaw) && returnedRaw > 0 ? returnedRaw : 0;
+
+  const finalRaw = parseFloat(invoice?.final_total);
+  if (Number.isFinite(finalRaw)) {
+    return Math.max(Math.min(finalRaw, totalAmount), 0);
+  }
+
+  return Math.max(totalAmount - adjustmentTotal - returnedTotal, 0);
+};
 
 const InvoiceListPage = () => {
   const navigate = useNavigate();
@@ -120,14 +142,20 @@ const InvoiceListPage = () => {
     // Sort
     filtered.sort((a, b) => {
       switch (sortBy) {
-        case 'date-desc':
-          return new Date(b.invoice_date) - new Date(a.invoice_date);
-        case 'date-asc':
-          return new Date(a.invoice_date) - new Date(b.invoice_date);
+        case 'date-desc': {
+          const invoiceDateDiff = toTimestamp(b.invoice_date) - toTimestamp(a.invoice_date);
+          if (invoiceDateDiff !== 0) return invoiceDateDiff;
+          return toTimestamp(b.created_at) - toTimestamp(a.created_at);
+        }
+        case 'date-asc': {
+          const invoiceDateDiff = toTimestamp(a.invoice_date) - toTimestamp(b.invoice_date);
+          if (invoiceDateDiff !== 0) return invoiceDateDiff;
+          return toTimestamp(a.created_at) - toTimestamp(b.created_at);
+        }
         case 'amount-desc':
-          return b.total_amount - a.total_amount;
+          return getDisplayInvoiceTotal(b) - getDisplayInvoiceTotal(a);
         case 'amount-asc':
-          return a.total_amount - b.total_amount;
+          return getDisplayInvoiceTotal(a) - getDisplayInvoiceTotal(b);
         case 'buyer-asc':
           return (a.client?.name || '').localeCompare(b.client?.name || '');
         case 'buyer-desc':
@@ -153,6 +181,8 @@ const InvoiceListPage = () => {
       draft: 'bg-gray-100 text-gray-800',
       finalized: 'bg-blue-100 text-blue-800',
       paid: 'bg-green-100 text-green-800',
+      partially_returned: 'bg-amber-100 text-amber-800',
+      returned: 'bg-rose-100 text-rose-800',
       cancelled: 'bg-red-100 text-red-800',
     };
     return statusColors[status] || 'bg-gray-100 text-gray-800';
@@ -213,6 +243,8 @@ const InvoiceListPage = () => {
                 {statusFilter === 'draft' && 'Draf'}
                 {statusFilter === 'finalized' && 'Muktamad'}
                 {statusFilter === 'paid' && 'Dibayar'}
+                {statusFilter === 'partially_returned' && 'Separa Pulang'}
+                {statusFilter === 'returned' && 'Dipulangkan'}
                 {statusFilter === 'cancelled' && 'Dibatalkan'}
               </span>
               <ChevronDown className="h-5 w-5" />
@@ -224,6 +256,8 @@ const InvoiceListPage = () => {
                   { value: 'draft', label: 'Draf' },
                   { value: 'finalized', label: 'Muktamad' },
                   { value: 'paid', label: 'Dibayar' },
+                  { value: 'partially_returned', label: 'Separa Pulang' },
+                  { value: 'returned', label: 'Dipulangkan' },
                   { value: 'cancelled', label: 'Dibatalkan' },
                 ].map((option) => (
                   <button
@@ -379,7 +413,10 @@ const InvoiceListPage = () => {
                 <div className="col-span-4 min-w-0 md:col-span-3">
                   <p className="font-medium text-sm break-words">
                     {invoice.refunds && invoice.refunds.length > 0 && (
-                      <span className="text-red-600 dark:text-red-400 mr-1.5">â—</span>
+                      <span
+                        aria-hidden="true"
+                        className="mr-1.5 inline-block h-2 w-2 rounded-full bg-red-500 align-middle"
+                      />
                     )}
                     {invoice.invoice_number}
                   </p>
@@ -408,23 +445,25 @@ const InvoiceListPage = () => {
                 {/* Amount */}
                 <div className="col-span-4 md:col-span-2 text-right">
                   <p className="font-semibold text-sm">
-                    {formatCurrency(invoice.total_amount)}
+                    {formatCurrency(getDisplayInvoiceTotal(invoice))}
                   </p>
                 </div>
 
-                {/* Status & Refund Badge */}
+                {/* Status & Adjustment Badge */}
                 <div className="col-span-3 md:col-span-2 text-right flex flex-col gap-1 items-end">
                   <span className={`rounded-full px-3 py-1 text-xs font-medium ${getStatusBadgeColor(invoice.status)}`}>
                     {invoice.status === 'draft' && 'Draf'}
                     {invoice.status === 'finalized' && 'Muktamad'}
                     {invoice.status === 'paid' && 'Dibayar'}
+                    {invoice.status === 'partially_returned' && 'Separa Pulang'}
+                    {invoice.status === 'returned' && 'Dipulangkan'}
                     {invoice.status === 'cancelled' && 'Dibatalkan'}
                   </span>
                   {invoice.refunds && invoice.refunds.length > 0 && (
                     <span className="flex items-center gap-1 rounded-full px-2 py-1 text-xs font-medium bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400">
                       <AlertCircle className="h-3 w-3" />
                       <span>{invoice.refunds.length}</span>
-                      <span className="hidden md:inline">Refund{invoice.refunds.length !== 1 ? 's' : ''}</span>
+                      <span className="hidden md:inline">Adjustment{invoice.refunds.length !== 1 ? 's' : ''}</span>
                     </span>
                   )}
                 </div>

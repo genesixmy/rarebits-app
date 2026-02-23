@@ -12,6 +12,36 @@ import { useToast } from '@/components/ui/use-toast';
 import ClientFormModal from './ClientFormModal';
 import { COURIER_PAYMENT_MODES, resolveCourierPaymentModeForInvoice } from '@/lib/shipping';
 
+const resolveInvoiceTotals = (invoiceLike, fallbackOriginal = 0) => {
+  const fallback = Math.max(parseFloat(fallbackOriginal) || 0, 0);
+  const totalAmountRaw = parseFloat(invoiceLike?.total_amount);
+  const totalAmount = Number.isFinite(totalAmountRaw) && totalAmountRaw >= 0
+    ? totalAmountRaw
+    : fallback;
+
+  const adjustmentRaw = parseFloat(invoiceLike?.adjustment_total);
+  const adjustmentTotal = Number.isFinite(adjustmentRaw) && adjustmentRaw > 0
+    ? adjustmentRaw
+    : 0;
+
+  const returnedRaw = parseFloat(invoiceLike?.returned_total);
+  const returnedTotal = Number.isFinite(returnedRaw) && returnedRaw > 0
+    ? returnedRaw
+    : 0;
+
+  const finalRaw = parseFloat(invoiceLike?.final_total);
+  const finalTotal = Number.isFinite(finalRaw)
+    ? Math.max(Math.min(finalRaw, totalAmount), 0)
+    : Math.max(totalAmount - adjustmentTotal - returnedTotal, 0);
+
+  return {
+    totalAmount,
+    adjustmentTotal,
+    returnedTotal,
+    finalTotal,
+  };
+};
+
 const fetchClientDetails = async (clientId) => {
   const { data: client, error: clientError } = await supabase
     .from('clients')
@@ -32,18 +62,7 @@ const fetchClientDetails = async (clientId) => {
       cost_price,
       line_total,
       item:items(id, name, category, cost_price),
-      invoice:invoices(
-        id,
-        invoice_number,
-        invoice_date,
-        status,
-        platform,
-        client_id,
-        user_id,
-        channel_fee_amount,
-        shipping_charged,
-        courier_payment_mode
-      )
+      invoice:invoices(*)
     `)
     .order('created_at', { ascending: false });
 
@@ -52,9 +71,29 @@ const fetchClientDetails = async (clientId) => {
   const paidItems = (invoiceItems || [])
     .filter((invItem) =>
       invItem.invoice?.client_id === clientId &&
-      invItem.invoice?.status === 'paid' &&
+      ['paid', 'partially_returned', 'returned'].includes(invItem.invoice?.status) &&
       invItem.invoice?.user_id === client.user_id
     );
+
+  const paidInvoiceIds = [...new Set(paidItems.map((invItem) => invItem.invoice?.id).filter(Boolean))];
+  const returnedQtyByInvoice = {};
+
+  if (paidInvoiceIds.length > 0) {
+    const { data: returnRows, error: returnRowsError } = await supabase
+      .from('invoice_item_returns')
+      .select('invoice_id, returned_quantity')
+      .eq('user_id', client.user_id)
+      .in('invoice_id', paidInvoiceIds);
+
+    if (returnRowsError) throw returnRowsError;
+
+    (returnRows || []).forEach((row) => {
+      const invoiceId = row?.invoice_id;
+      if (!invoiceId) return;
+      const qty = parseFloat(row?.returned_quantity) || 0;
+      returnedQtyByInvoice[invoiceId] = (returnedQtyByInvoice[invoiceId] || 0) + Math.max(qty, 0);
+    });
+  }
 
   const invoiceSummaryById = paidItems.reduce((acc, invItem) => {
     const invoice = invItem.invoice;
@@ -79,6 +118,10 @@ const fetchClientDetails = async (clientId) => {
         invoice_date: invoice?.invoice_date,
         items_amount: 0,
         shipping_collected: shippingCollected,
+        total_amount: parseFloat(invoice?.total_amount),
+        adjustment_total: parseFloat(invoice?.adjustment_total),
+        returned_total: parseFloat(invoice?.returned_total),
+        final_total: parseFloat(invoice?.final_total),
       });
     }
 
@@ -135,10 +178,19 @@ const fetchClientDetails = async (clientId) => {
     .sort((a, b) => new Date(b.date_sold || 0) - new Date(a.date_sold || 0));
 
   const purchases = Array.from(invoiceSummaryById.values())
-    .map((summary) => ({
-      ...summary,
-      total_paid: summary.items_amount + summary.shipping_collected,
-    }))
+    .map((summary) => {
+      const fallbackOriginal = summary.items_amount + summary.shipping_collected;
+      const totals = resolveInvoiceTotals(summary, fallbackOriginal);
+
+      return {
+        ...summary,
+        total_amount: totals.totalAmount,
+        adjustment_total: totals.adjustmentTotal,
+        returned_total: totals.returnedTotal,
+        total_paid: totals.finalTotal,
+        returned_qty: returnedQtyByInvoice[summary.invoice_id] || 0,
+      };
+    })
     .sort((a, b) => new Date(b.invoice_date || 0) - new Date(a.invoice_date || 0));
 
   return { ...client, items, purchases };
@@ -196,7 +248,7 @@ const ClientDetailPage = () => {
     const purchases = client.purchases || [];
     const totalItemsAmount = purchases.reduce((sum, purchase) => sum + (parseFloat(purchase.items_amount) || 0), 0);
     const shippingCollected = purchases.reduce((sum, purchase) => sum + (parseFloat(purchase.shipping_collected) || 0), 0);
-    const totalPaidToSeller = totalItemsAmount + shippingCollected;
+    const totalPaidToSeller = purchases.reduce((sum, purchase) => sum + (parseFloat(purchase.total_paid) || 0), 0);
 
     const platformBreakdown = client.items.reduce((acc, item) => {
       (item.sold_platforms || []).forEach(platform => {
@@ -441,6 +493,16 @@ const ClientDetailPage = () => {
                              <div className="mt-2 inline-flex rounded-full bg-secondary px-3 py-1 text-xs font-medium text-secondary-foreground">
                                Caj Pos RM{(parseFloat(purchase.shipping_collected) || 0).toFixed(2)}
                              </div>
+                           )}
+                           {(parseFloat(purchase.adjustment_total) || 0) > 0 && (
+                             <p className="mt-1 text-xs font-medium text-red-600">
+                               Price Adjustment (-RM{(parseFloat(purchase.adjustment_total) || 0).toFixed(2)})
+                             </p>
+                           )}
+                           {(parseFloat(purchase.returned_total) || 0) > 0 && (
+                             <p className="mt-1 text-xs font-medium text-rose-600">
+                               Item Returned ({Math.round(parseFloat(purchase.returned_qty) || 0)} unit) -RM{(parseFloat(purchase.returned_total) || 0).toFixed(2)}
+                             </p>
                            )}
                          </td>
                         </tr>
