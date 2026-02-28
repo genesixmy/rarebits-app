@@ -36,7 +36,7 @@ const fetchClientsWithStats = async (userId) => {
 
   const { data: items, error: itemsError } = await supabase
     .from('items')
-    .select('client_id, selling_price')
+    .select('client_id, selling_price, actual_sold_amount, invoice_quantity')
     .eq('user_id', userId)
     .eq('status', 'terjual')
     .not('client_id', 'is', null);
@@ -46,8 +46,10 @@ const fetchClientsWithStats = async (userId) => {
     if (!acc[item.client_id]) {
       acc[item.client_id] = { purchases: 0, totalSpend: 0 };
     }
+    // Use actual_sold_amount if available (from invoices), otherwise use selling_price
+    const amount = parseFloat(item.actual_sold_amount) || parseFloat(item.selling_price) || 0;
     acc[item.client_id].purchases += 1;
-    acc[item.client_id].totalSpend += parseFloat(item.selling_price) || 0;
+    acc[item.client_id].totalSpend += amount;
     return acc;
   }, {});
 

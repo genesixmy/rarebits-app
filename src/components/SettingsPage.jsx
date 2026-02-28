@@ -1,9 +1,10 @@
 import React from 'react';
-import { Card, CardContent } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import ProfileSettings from '@/components/ProfileSettings';
 import CategorySettings from '@/components/CategorySettings';
-import { User, Tag } from 'lucide-react';
+import InvoiceSettings from '@/components/InvoiceSettings';
+import PlatformFeeSettings from '@/components/PlatformFeeSettings';
+import { User, Tag, FileText, Store } from 'lucide-react';
 import { ProfileFormProvider } from '@/contexts/ProfileFormContext';
 
 const SettingsPage = ({ user, categories, onUpdateCategories, onUpdateProfile }) => {
@@ -11,12 +12,18 @@ const SettingsPage = ({ user, categories, onUpdateCategories, onUpdateProfile })
     <div className="space-y-6">
       <h1 className="page-title">Tetapan</h1>
       <Tabs defaultValue="profile" className="w-full">
-        <TabsList className="grid w-full grid-cols-2">
-          <TabsTrigger value="profile" className="gap-2">
+        <TabsList className="!grid w-full !h-auto grid-cols-2 sm:grid-cols-4 gap-1">
+          <TabsTrigger value="profile" className="w-full min-h-10 gap-2 rounded-lg border border-transparent text-xs transition-colors hover:border-primary/40 hover:bg-white hover:text-primary data-[state=active]:border-primary/20 data-[state=active]:bg-primary/10 data-[state=active]:font-semibold data-[state=active]:text-primary sm:text-sm">
             <User className="w-4 h-4" /> Profil
           </TabsTrigger>
-          <TabsTrigger value="categories" className="gap-2">
+          <TabsTrigger value="categories" className="w-full min-h-10 gap-2 rounded-lg border border-transparent text-xs transition-colors hover:border-primary/40 hover:bg-white hover:text-primary data-[state=active]:border-primary/20 data-[state=active]:bg-primary/10 data-[state=active]:font-semibold data-[state=active]:text-primary sm:text-sm">
             <Tag className="w-4 h-4" /> Kategori
+          </TabsTrigger>
+          <TabsTrigger value="sales-channel" className="w-full min-h-10 gap-2 rounded-lg border border-transparent text-xs transition-colors hover:border-primary/40 hover:bg-white hover:text-primary data-[state=active]:border-primary/20 data-[state=active]:bg-primary/10 data-[state=active]:font-semibold data-[state=active]:text-primary sm:text-sm">
+            <Store className="w-4 h-4" /> Platform Fee
+          </TabsTrigger>
+          <TabsTrigger value="invoice" className="w-full min-h-10 gap-2 rounded-lg border border-transparent text-xs transition-colors hover:border-primary/40 hover:bg-white hover:text-primary data-[state=active]:border-primary/20 data-[state=active]:bg-primary/10 data-[state=active]:font-semibold data-[state=active]:text-primary sm:text-sm">
+            <FileText className="w-4 h-4" /> Brand
           </TabsTrigger>
         </TabsList>
         <TabsContent value="profile" className="mt-6">
@@ -30,6 +37,12 @@ const SettingsPage = ({ user, categories, onUpdateCategories, onUpdateProfile })
             onUpdate={onUpdateCategories}
             userId={user.id}
           />
+        </TabsContent>
+        <TabsContent value="sales-channel" className="mt-6">
+          <PlatformFeeSettings userId={user.id} />
+        </TabsContent>
+        <TabsContent value="invoice" className="mt-6">
+          <InvoiceSettings userId={user.id} />
         </TabsContent>
       </Tabs>
     </div>

@@ -1,30 +1,206 @@
 import React, { useState, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Card, CardContent, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
-import { Calendar, ChevronLeft, ChevronRight, CheckCircle, XCircle, Download } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { Calendar, ChevronLeft, ChevronRight, CheckCircle, XCircle, Download, FileText, Loader2, Wallet, Truck, TrendingUp } from 'lucide-react';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { useToast } from '@/components/ui/use-toast';
+import { useQuery } from '@tanstack/react-query';
+import { supabase } from '@/lib/customSupabaseClient';
+import {
+  buildFinancialMetricsFromSalesLines,
+  getSaleLineFinancialBreakdown,
+} from '@/lib/financialDefinitions';
 
 const getInitialDateRange = () => {
+  const today = new Date();
+  const firstDayOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+
+  const formatDate = (date) => {
+    const d = new Date(date);
+    let month = '' + (d.getMonth() + 1);
+    let day = '' + d.getDate();
+    const year = d.getFullYear();
+
+    if (month.length < 2) month = `0${month}`;
+    if (day.length < 2) day = `0${day}`;
+
+    return [year, month, day].join('-');
+  };
+
   return {
-    startDate: '',
-    endDate: ''
+    startDate: formatDate(firstDayOfMonth),
+    endDate: formatDate(today),
   };
 };
 
+const SETTLED_INVOICE_STATUSES = new Set(['paid', 'partially_returned', 'returned']);
+
 const SalesPage = ({ items }) => {
+  const navigate = useNavigate();
   const { toast } = useToast();
   const [dateRange, setDateRange] = useState(getInitialDateRange());
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(10);
+  const [isNetProfitDetailOpen, setIsNetProfitDetailOpen] = useState(false);
 
-  const soldItems = useMemo(() => 
-    items.filter(item => item.status === 'terjual' && item.date_sold), 
-    [items]
-  );
+  // Get current user
+  const { data: authData } = useQuery({
+    queryKey: ['auth'],
+    queryFn: async () => {
+      const { data } = await supabase.auth.getSession();
+      return data;
+    },
+  });
+
+  const userId = authData?.session?.user?.id;
+
+  // Fetch all invoice items (sales records)
+  const { data: invoiceItems = [], isLoading } = useQuery({
+    queryKey: ['invoice-items', userId],
+    queryFn: async () => {
+      if (!userId) return [];
+
+      const { data, error } = await supabase
+        .from('invoice_items')
+        .select(`
+          id,
+          invoice_id,
+          item_id,
+          quantity,
+          unit_price,
+          cost_price,
+          line_total,
+          is_manual,
+          item_name,
+          invoice_item_returns(returned_quantity, refund_amount),
+          item:items(id, name, category, cost_price),
+          invoice:invoices(
+            id,
+            invoice_date,
+            status,
+            user_id,
+            shipping_charged,
+            shipment_id,
+            channel_fee_amount,
+            courier_payment_mode,
+            adjustment_total,
+            invoice_fees(id, amount, amount_override),
+            invoice_refunds(refund_type, type, amount, reason, note)
+          )
+        `)
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('[SalesPage] Error fetching invoice items:', error);
+        return [];
+      }
+
+      // Filter by user_id after fetching (client-side filtering)
+      const filteredData = (data || []).filter(invItem => invItem.invoice?.user_id === userId);
+
+      const shipmentIds = [...new Set(
+        filteredData
+          .map((row) => row?.invoice?.shipment_id)
+          .filter(Boolean)
+      )];
+
+      const shipmentById = new Map();
+      if (shipmentIds.length > 0) {
+        const { data: shipmentRows, error: shipmentError } = await supabase
+          .from('shipments')
+          .select('id, user_id, shipping_cost, courier_paid')
+          .eq('user_id', userId)
+          .in('id', shipmentIds);
+
+        if (shipmentError) {
+          console.error('[SalesPage] Error fetching shipments:', shipmentError);
+        } else {
+          (shipmentRows || []).forEach((shipment) => {
+            shipmentById.set(shipment.id, shipment);
+          });
+        }
+      }
+
+      return filteredData.map((row) => ({
+        ...row,
+        invoice: {
+          ...row.invoice,
+          shipment: row?.invoice?.shipment_id
+            ? (shipmentById.get(row.invoice.shipment_id) || null)
+            : null,
+        },
+      }));
+    },
+    enabled: !!userId,
+  });
+
+  // Transform invoice items to sales records format
+  const soldItems = useMemo(() => {
+    const getEffectiveUnitCost = (invItem) => {
+      const isManual = invItem.is_manual || !invItem.item_id;
+      const snapshotUnitCost = parseFloat(invItem.cost_price);
+      const fallbackItemUnitCost = parseFloat(invItem.item?.cost_price);
+
+      const hasSnapshotCost = Number.isFinite(snapshotUnitCost) && snapshotUnitCost > 0;
+      if (hasSnapshotCost) return snapshotUnitCost;
+
+      if (!isManual && Number.isFinite(fallbackItemUnitCost) && fallbackItemUnitCost >= 0) {
+        return fallbackItemUnitCost;
+      }
+
+      if (Number.isFinite(snapshotUnitCost) && snapshotUnitCost >= 0) {
+        return snapshotUnitCost;
+      }
+
+      return 0;
+    };
+
+    return invoiceItems
+      .filter(invItem => invItem.invoice && SETTLED_INVOICE_STATUSES.has(invItem.invoice.status))
+      .map(invItem => {
+        const returnEntries = Array.isArray(invItem.invoice_item_returns) ? invItem.invoice_item_returns : [];
+        const returnedQty = returnEntries.reduce((sum, entry) => (
+          sum + Math.max(parseFloat(entry?.returned_quantity) || 0, 0)
+        ), 0);
+        const returnedRefund = returnEntries.reduce((sum, entry) => (
+          sum + Math.max(parseFloat(entry?.refund_amount) || 0, 0)
+        ), 0);
+
+        const baseQty = Math.max(parseFloat(invItem.quantity) || 0, 0);
+        const netQty = Math.max(baseQty - returnedQty, 0);
+        const baseRevenue = parseFloat(invItem.line_total) || 0;
+        const netRevenue = baseRevenue - returnedRefund;
+
+        return ({
+          id: invItem.id,
+          name: (invItem.is_manual || !invItem.item_id)
+            ? (invItem.item_name || 'Item Manual')
+            : (invItem.item?.name || 'Item'),
+          cost_price: getEffectiveUnitCost(invItem),
+          category: (invItem.is_manual || !invItem.item_id) ? 'Manual' : (invItem.item?.category || 'Lain-lain'),
+          selling_price: invItem.unit_price,
+          quantity_sold: netQty,
+          actual_sold_amount: netRevenue,
+          date_sold: invItem.invoice.invoice_date,
+          invoice_id: invItem.invoice_id,
+          invoice: invItem.invoice,
+          status: invItem.invoice.status,
+        });
+      })
+      .filter((row) => row.quantity_sold > 0 || Math.abs(row.actual_sold_amount) > 0.0001);
+  }, [invoiceItems]);
 
   const filteredSoldItems = useMemo(() => {
     let filtered = soldItems;
@@ -40,6 +216,24 @@ const SalesPage = ({ items }) => {
     }
     return filtered.sort((a, b) => new Date(b.date_sold) - new Date(a.date_sold));
   }, [soldItems, dateRange]);
+
+  const financialMetrics = useMemo(
+    () => buildFinancialMetricsFromSalesLines(filteredSoldItems),
+    [filteredSoldItems]
+  );
+
+  const salesSummary = useMemo(() => ({
+    revenueItem: financialMetrics.revenueItem,
+    soldInvoiceCount: financialMetrics.soldInvoiceCount,
+    shippingCollected: financialMetrics.shippingCharged,
+    shippingCost: financialMetrics.shippingCost,
+    shippingProfit: financialMetrics.shippingProfit,
+    totalPlatformFees: financialMetrics.platformFeeTotal,
+    totalAdjustments: financialMetrics.goodwillAdjustments,
+    netProfit: financialMetrics.netProfit,
+    shippingPending: financialMetrics.shippingPendingCount,
+    itemProfit: financialMetrics.itemProfit,
+  }), [financialMetrics]);
 
   const totalPages = Math.ceil(filteredSoldItems.length / itemsPerPage);
   const indexOfLastItem = currentPage * itemsPerPage;
@@ -63,13 +257,16 @@ const SalesPage = ({ items }) => {
       return;
     }
     const headers = ['Tarikh Jual', 'Nama Item', 'Harga Jual (RM)', 'Platform', 'Kategori'];
-    const rows = filteredSoldItems.map(item => [
-      item.date_sold,
-      `"${item.name.replace(/"/g, '""')}"`,
-      item.selling_price,
-      `"${(item.sold_platforms || []).join(', ')}"`,
-      `"${item.category}"`
-    ]);
+    const rows = filteredSoldItems.map(item => {
+      const actualRevenue = parseFloat(item.actual_sold_amount) || parseFloat(item.selling_price) || 0;
+      return [
+        item.date_sold,
+        `"${item.name.replace(/"/g, '""')}"`,
+        actualRevenue.toFixed(2),
+        `"${(item.sold_platforms || []).join(', ')}"`,
+        `"${item.category}"`
+      ];
+    });
 
     let csvContent = "data:text/csv;charset=utf-8," + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
     const encodedUri = encodeURI(csvContent);
@@ -91,67 +288,239 @@ const SalesPage = ({ items }) => {
     >
       <h1 className="page-title">Senarai Jualan</h1>
       
-      <div className="px-6 py-4 bg-background rounded-2xl shadow-sm">
-        <h2 className="text-lg font-semibold leading-none tracking-tight mb-4">Tapis Tarikh Jualan</h2>
-        <div className="flex flex-col md:flex-row md:items-end gap-4">
-          <div className="flex-1">
-            <label htmlFor="start-date" className="text-xs text-muted-foreground mb-1">Tarikh Mula</label>
-            <Input id="start-date" type="date" value={dateRange.startDate} onChange={(e) => setDateRange(prev => ({ ...prev, startDate: e.target.value }))} className="w-full bg-white rounded-lg focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background" />
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg font-semibold">Tapis Tarikh Jualan</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="flex flex-col sm:flex-row gap-4 w-full">
+            <div className="flex-1">
+              <label htmlFor="start-date" className="block text-xs font-medium text-muted-foreground mb-2">Tarikh Mula</label>
+              <Input
+                id="start-date"
+                type="date"
+                value={dateRange.startDate}
+                onChange={(e) => setDateRange(prev => ({ ...prev, startDate: e.target.value }))}
+                className="h-10 w-full rounded-full border-cyan-300 bg-white px-4 font-medium text-cyan-700 focus-visible:ring-cyan-300"
+              />
+            </div>
+            <div className="flex-1">
+              <label htmlFor="end-date" className="block text-xs font-medium text-muted-foreground mb-2">Tarikh Akhir</label>
+              <Input
+                id="end-date"
+                type="date"
+                value={dateRange.endDate}
+                onChange={(e) => setDateRange(prev => ({ ...prev, endDate: e.target.value }))}
+                className="h-10 w-full rounded-full border-cyan-300 bg-white px-4 font-medium text-cyan-700 focus-visible:ring-cyan-300"
+              />
+            </div>
+            <div className="flex items-end">
+              <Button 
+                variant="default"
+                size="default"
+                onClick={() => setDateRange({ startDate: '', endDate: '' })} 
+                className="h-10 w-full whitespace-nowrap border-0 text-white brand-gradient brand-gradient-hover sm:w-auto"
+              >
+                Tetapkan Semula
+              </Button>
+            </div>
           </div>
-          <div className="flex-1">
-            <label htmlFor="end-date" className="text-xs text-muted-foreground mb-1">Tarikh Akhir</label>
-            <Input id="end-date" type="date" value={dateRange.endDate} onChange={(e) => setDateRange(prev => ({ ...prev, endDate: e.target.value }))} className="w-full bg-white rounded-lg focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background" />
-          </div>
-          <Button variant="secondary" onClick={() => setDateRange({ startDate: '', endDate: '' })} className="h-10">Set Semula</Button>
-        </div>
+        </CardContent>
+      </Card>
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-6">
+        <Card>
+          <CardContent className="pt-5">
+            <div className="flex items-center gap-3">
+              <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-emerald-100">
+                <Wallet className="h-4 w-4 text-emerald-600" />
+              </span>
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">Revenue Item</p>
+                <p className="text-lg font-semibold">RM{salesSummary.revenueItem.toFixed(2)}</p>
+                <p className="text-[11px] text-muted-foreground">{salesSummary.soldInvoiceCount} jualan</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-5">
+            <div className="flex items-center gap-3">
+              <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-sky-100">
+                <Truck className="h-4 w-4 text-sky-600" />
+              </span>
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">Caj Pos Dikutip</p>
+                <p className="text-lg font-semibold">RM{salesSummary.shippingCollected.toFixed(2)}</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-5">
+            <div className="flex items-center gap-3">
+              <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-amber-100">
+                <Truck className="h-4 w-4 text-amber-600" />
+              </span>
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">Kos Pos</p>
+                <p className="text-lg font-semibold">RM{salesSummary.shippingCost.toFixed(2)}</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-5">
+            <div className="flex items-center gap-3">
+              <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-amber-100">
+                <Truck className="h-4 w-4 text-amber-600" />
+              </span>
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">Untung Pos</p>
+                <p className="text-lg font-semibold">RM{salesSummary.shippingProfit.toFixed(2)}</p>
+                {salesSummary.shippingPending > 0 && (
+                  <p className="text-[11px] text-muted-foreground">{salesSummary.shippingPending} belum final</p>
+                )}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-5">
+            <div className="flex items-center gap-3">
+              <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-cyan-100">
+                <FileText className="h-4 w-4 text-cyan-600" />
+              </span>
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">Caj Platform</p>
+                <p className="text-lg font-semibold">RM{salesSummary.totalPlatformFees.toFixed(2)}</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card
+          role="button"
+          tabIndex={0}
+          onClick={() => setIsNetProfitDetailOpen(true)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              setIsNetProfitDetailOpen(true);
+            }
+          }}
+          className="cursor-pointer transition-colors hover:border-primary/40"
+          aria-label="Lihat butiran untung bersih"
+        >
+          <CardContent className="pt-5">
+            <div className="flex items-center gap-3">
+              <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-violet-100">
+                <TrendingUp className="h-4 w-4 text-violet-600" />
+              </span>
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">Untung Bersih</p>
+                <p className="text-lg font-semibold">RM{salesSummary.netProfit.toFixed(2)}</p>
+                <p className="text-[11px] text-primary">Klik untuk lihat pecahan</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
       </div>
 
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
+        <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <CardTitle>Hasil Jualan</CardTitle>
-          <Button variant="outline" onClick={exportToCSV} disabled={!filteredSoldItems || filteredSoldItems.length === 0}>
-            <Download className="w-4 h-4 mr-2" /> Eksport CSV
+          <Button 
+            variant="default" 
+            size="default"
+            onClick={exportToCSV} 
+            disabled={!filteredSoldItems || filteredSoldItems.length === 0}
+            className="flex-1 h-10 gap-2 border-0 text-white brand-gradient brand-gradient-hover sm:flex-initial"
+          >
+            <Download className="w-5 h-5" /> 
+            <span>Eksport CSV</span>
           </Button>
         </CardHeader>
         <CardContent className="p-0">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-sm text-muted-foreground">
-                  <th className="p-4 font-medium">Item</th>
-                  <th className="p-4 font-medium">Tarikh</th>
-                  <th className="p-4 font-medium">Status</th>
-                  <th className="p-4 font-medium text-right">Harga Jualan</th>
-                </tr>
-              </thead>
-              <tbody>
-                {currentItems.map(item => {
-                  const profit = (parseFloat(item.selling_price) || 0) - (parseFloat(item.cost_price) || 0);
-                  const isLoss = profit < 0;
-                  return (
-                    <tr key={item.id} className="border-t relative group overflow-hidden">
-                       <td className="p-4 font-semibold text-foreground flex items-center gap-3">
-                         <div className="absolute left-0 top-0 h-full w-1 bg-primary scale-y-0 group-hover:scale-y-100 transition-transform origin-center duration-300" />
-                         <div className="transition-transform duration-300 group-hover:translate-x-2">
-                           {item.name}
-                         </div>
-                       </td>
-                       <td className="p-4 text-muted-foreground">{new Date(item.date_sold).toLocaleDateString()}</td>
-                       <td className="p-4">
-                         <div className={cn("inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium", isLoss ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700")}>
-                           {isLoss ? <XCircle className="w-3 h-3" /> : <CheckCircle className="w-3 h-3" />}
-                           RM {Math.abs(profit).toFixed(2)}
-                         </div>
-                       </td>
-                       <td className="p-4 text-right font-semibold text-foreground">RM{parseFloat(item.selling_price).toFixed(2)}</td>
+          {isLoading ? (
+            <div className="flex justify-center py-12">
+              <Loader2 className="w-8 h-8 animate-spin" />
+            </div>
+          ) : (
+            <div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-sm text-muted-foreground">
+                      <th className="p-4 font-medium">Item</th>
+                      <th className="p-4 font-medium">Tarikh</th>
+                      <th className="p-4 font-medium">Status</th>
+                      <th className="p-4 font-medium">Invois</th>
+                      <th className="p-4 font-medium text-right">Item Total</th>
+                      <th className="p-4 font-medium text-right">Pos (Caj/Kos)</th>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          {filteredSoldItems.length === 0 && (
-            <p className="text-center text-muted-foreground p-8">Tiada jualan ditemui untuk julat tarikh ini.</p>
+                  </thead>
+                  <tbody>
+                    {currentItems.map(item => {
+                      const breakdown = getSaleLineFinancialBreakdown(item, financialMetrics);
+                      const shippingSnapshot = item.invoice_id
+                        ? (financialMetrics.invoiceShippingById.get(item.invoice_id) || {
+                          shippingCharged: 0,
+                          shippingCostPaid: 0,
+                        })
+                        : { shippingCharged: 0, shippingCostPaid: 0 };
+                      const profit = breakdown.netProfit;
+                      const isLoss = profit < 0;
+                      return (
+                        <tr key={item.id} className="border-t relative group overflow-hidden">
+                           <td className="p-4 font-semibold text-foreground flex items-center gap-3">
+                             <div className="absolute left-0 top-0 h-full w-1 bg-primary scale-y-0 group-hover:scale-y-100 transition-transform origin-center duration-300" />
+                             <div className="transition-transform duration-300 group-hover:translate-x-2">
+                               {item.name}
+                             </div>
+                           </td>
+                           <td className="p-4 text-muted-foreground">{new Date(item.date_sold).toLocaleDateString()}</td>
+                           <td className="p-4">
+                             <div
+                               className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium ${
+                                 isLoss
+                                   ? 'border border-rose-200 bg-rose-50 text-rose-700'
+                                   : 'text-white brand-gradient'
+                               }`}
+                             >
+                               {isLoss ? <XCircle className="w-3 h-3" /> : <CheckCircle className="w-3 h-3" />}
+                               RM {Math.abs(profit).toFixed(2)}
+                             </div>
+                           </td>
+                           <td className="p-4">
+                             {item.invoice_id ? (
+                               <Button
+                                 size="sm"
+                                 variant="default"
+                                 onClick={() => navigate(`/invoices/${item.invoice_id}`)}
+                                 className="gap-2 border-0 text-white brand-gradient brand-gradient-hover"
+                               >
+                                 <FileText className="w-4 h-4" />
+                                 Lihat
+                               </Button>
+                             ) : (
+                               <span className="text-muted-foreground text-xs">-</span>
+                             )}
+                           </td>
+                          <td className="p-4 text-right font-semibold text-foreground">RM{breakdown.netRevenueAfterGoodwill.toFixed(2)}</td>
+                           <td className="p-4 text-right text-xs text-muted-foreground">
+                             <div>Caj RM{shippingSnapshot.shippingCharged.toFixed(2)}</div>
+                             <div>Kos RM{shippingSnapshot.shippingCostPaid.toFixed(2)}</div>
+                           </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              {filteredSoldItems.length === 0 && (
+                <p className="text-center text-muted-foreground p-8">Tiada jualan ditemui untuk julat tarikh ini.</p>
+              )}
+            </div>
           )}
         </CardContent>
         {totalPages > 1 && (
@@ -192,6 +561,44 @@ const SalesPage = ({ items }) => {
           </CardFooter>
         )}
       </Card>
+
+      <AlertDialog open={isNetProfitDetailOpen} onOpenChange={setIsNetProfitDetailOpen}>
+        <AlertDialogContent className="max-w-md border-primary/20 bg-white">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-primary">Butiran Untung Bersih</AlertDialogTitle>
+            <AlertDialogDescription>
+              Formula: Untung Item + Untung Pos - Caj Platform - Pelarasan
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-sm">
+              <span className="font-medium text-slate-700">Item</span>
+              <span className="font-semibold text-slate-900">RM{salesSummary.itemProfit.toFixed(2)}</span>
+            </div>
+            <div className="flex items-center justify-between rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-sm">
+              <span className="font-medium text-slate-700">Caj Platform</span>
+              <span className="font-semibold text-slate-900">RM{salesSummary.totalPlatformFees.toFixed(2)}</span>
+            </div>
+            <div className="flex items-center justify-between rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-sm">
+              <span className="font-medium text-slate-700">Pelarasan</span>
+              <span className="font-semibold text-slate-900">RM{salesSummary.totalAdjustments.toFixed(2)}</span>
+            </div>
+            <div className="flex items-center justify-between rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-sm">
+              <span className="font-medium text-slate-700">Pos</span>
+              <span className="font-semibold text-slate-900">RM{salesSummary.shippingProfit.toFixed(2)}</span>
+            </div>
+            <div className="mt-1 flex items-center justify-between rounded-lg border border-primary/30 bg-gradient-to-r from-cyan-50 to-teal-50 px-3 py-2.5 text-sm">
+              <span className="font-semibold text-primary">Untung Bersih</span>
+              <span className="font-bold text-primary">RM{salesSummary.netProfit.toFixed(2)}</span>
+            </div>
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogAction className="border-0 text-white brand-gradient brand-gradient-hover">
+              Tutup
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </motion.div>
   );
 };

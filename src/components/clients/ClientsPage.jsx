@@ -10,6 +10,10 @@ import { useToast } from '@/components/ui/use-toast';
 import { supabase } from '@/lib/customSupabaseClient';
 import ClientFormModal from './ClientFormModal';
 import {
+  FINANCIAL_SETTLED_INVOICE_STATUSES,
+  resolveInvoiceCollectedSummary,
+} from '@/lib/financialDefinitions';
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -34,20 +38,30 @@ const fetchClientsWithStats = async (userId) => {
     .order('name', { ascending: true });
   if (clientsError) throw clientsError;
 
-  const { data: items, error: itemsError } = await supabase
-    .from('items')
-    .select('client_id, selling_price')
+  const { data: paidInvoices, error: invoicesError } = await supabase
+    .from('invoices')
+    .select('*')
     .eq('user_id', userId)
-    .eq('status', 'terjual')
-    .not('client_id', 'is', null);
-  if (itemsError) throw itemsError;
+    .in('status', Array.from(FINANCIAL_SETTLED_INVOICE_STATUSES))
+    .not('client_id', 'is', null)
+    .order('created_at', { ascending: false });
+  if (invoicesError) throw invoicesError;
 
-  const stats = items.reduce((acc, item) => {
-    if (!acc[item.client_id]) {
-      acc[item.client_id] = { purchases: 0, totalSpend: 0 };
+  console.log('[ClientsPage] fetchClientsWithStats - paid invoices fetched:', {
+    count: paidInvoices?.length || 0,
+  });
+
+  const stats = (paidInvoices || []).reduce((acc, invoice) => {
+    const clientId = invoice?.client_id;
+    if (!clientId) return acc;
+
+    if (!acc[clientId]) {
+      acc[clientId] = { purchases: 0, totalSpend: 0 };
     }
-    acc[item.client_id].purchases += 1;
-    acc[item.client_id].totalSpend += parseFloat(item.selling_price) || 0;
+
+    acc[clientId].purchases += 1;
+    acc[clientId].totalSpend += resolveInvoiceCollectedSummary(invoice).finalTotal;
+
     return acc;
   }, {});
 

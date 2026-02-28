@@ -2,7 +2,7 @@ import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { Home, Package, Receipt, Settings, Users, Wallet } from 'lucide-react';
+import { Home, Package, Receipt, Settings, Users, Wallet, FileText } from 'lucide-react';
 
 const Sidebar = ({ isSidebarOpen, setSidebarOpen }) => {
   const location = useLocation();
@@ -15,6 +15,7 @@ const Sidebar = ({ isSidebarOpen, setSidebarOpen }) => {
     { path: '/', label: 'Papan Pemuka', icon: <Home className="w-5 h-5" /> },
     { path: '/inventory', label: 'Inventori', icon: <Package className="w-5 h-5" /> },
     { path: '/sales', label: 'Jualan', icon: <Receipt className="w-5 h-5" /> },
+    { path: '/invoices', label: 'Invois', icon: <FileText className="w-5 h-5" /> },
     { path: '/clients', label: 'Pelanggan', icon: <Users className="w-5 h-5" /> },
     { path: '/wallet', label: 'Wallet', icon: <Wallet className="w-5 h-5" /> },
     { path: '/settings', label: 'Tetapan', icon: <Settings className="w-5 h-5" /> },

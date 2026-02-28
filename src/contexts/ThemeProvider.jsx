@@ -8,20 +8,18 @@ const initialState = {
 export const ThemeProviderContext = createContext(initialState);
 
 export function ThemeProvider({ children, defaultTheme = 'light', storageKey = 'rarebits-theme' }) {
-  const [theme, setTheme] = useState(() => localStorage.getItem(storageKey) || defaultTheme);
+  // DISABLED: Dark mode is disabled. Always use light theme.
+  const [theme] = useState('light');
 
   useEffect(() => {
     const root = window.document.documentElement;
     root.classList.remove('light', 'dark');
-    root.classList.add(theme);
-  }, [theme]);
+    root.classList.add('light');
+  }, []);
 
   const value = {
-    theme,
-    setTheme: (newTheme) => {
-      localStorage.setItem(storageKey, newTheme);
-      setTheme(newTheme);
-    },
+    theme: 'light',
+    setTheme: () => null, // DISABLED: Theme switching is disabled
   };
 
   return (

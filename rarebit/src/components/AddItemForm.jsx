@@ -24,6 +24,8 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
       category: item?.category || (categories?.[0]?.name || ''),
       costPrice: item?.cost_price || '',
       sellingPrice: item?.selling_price || '',
+      quantity: item?.quantity || '',
+      quantitySold: item?.quantity_sold || '',
       status: item?.status || 'tersedia',
       dateBought: item?.date_bought || new Date().toISOString().split('T')[0],
       dateSold: item?.date_sold || '',
@@ -34,12 +36,74 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
       wallet_id: (item?.status === 'terjual' && wallets.length > 0) ? (item.wallet_id || wallets[0].id) : '',
   });
 
-  const [formData, setFormData] = useState(() => getInitialFormData(item));
+  const [formData, setFormData] = useState(() => {
+    // Try to restore from storage first if editing existing item
+    if (item?.id) {
+      try {
+        // Try sessionStorage first (fast, current session)
+        let saved = sessionStorage.getItem(`rarebit_form_draft_${item.id}`);
+        if (saved) {
+          console.log(`[AddItemForm] Restored draft from sessionStorage for item ${item.id}`);
+          return JSON.parse(saved);
+        }
+        
+        // Fall back to localStorage if sessionStorage empty
+        saved = localStorage.getItem(`rarebit_form_draft_${item.id}`);
+        if (saved) {
+          console.log(`[AddItemForm] Restored draft from localStorage for item ${item.id}`);
+          return JSON.parse(saved);
+        }
+      } catch (error) {
+        console.error('[AddItemForm] Error restoring from storage:', error);
+      }
+    }
+    // Otherwise use initial data
+    return getInitialFormData(item);
+  });
 
-  // Effect to re-initialize form when the `item` prop changes (e.g., opening the form)
+  // Save form data to localStorage whenever it changes (for tab switching)
   useEffect(() => {
-    setFormData(getInitialFormData(item));
-  }, [item, categories, clients, wallets]);
+    if (item?.id) {
+      try {
+        const dataToSave = JSON.stringify(formData);
+        // Save to both localStorage and sessionStorage for redundancy
+        localStorage.setItem(`rarebit_form_draft_${item.id}`, dataToSave);
+        sessionStorage.setItem(`rarebit_form_draft_${item.id}`, dataToSave);
+        console.log(`[AddItemForm] Saved draft to storage for item ${item.id}`);
+      } catch (error) {
+        console.error('[AddItemForm] Error saving to storage:', error);
+      }
+    }
+  }, [formData, item?.id]);
+
+  // Save before page unload (when switching tabs, closing, etc)
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (item?.id && formData.name) {
+        try {
+          const dataToSave = JSON.stringify(formData);
+          localStorage.setItem(`rarebit_form_draft_${item.id}`, dataToSave);
+          sessionStorage.setItem(`rarebit_form_draft_${item.id}`, dataToSave);
+          console.log(`[AddItemForm] Saved draft on beforeunload for item ${item.id}`);
+        } catch (error) {
+          console.error('[AddItemForm] Error saving on beforeunload:', error);
+        }
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [formData, item?.id]);
+
+  // Initialize wallet selection when wallets load (don't re-run on item changes)
+  useEffect(() => {
+    if (formData.status === 'terjual' && !formData.wallet_id && wallets.length > 0) {
+      setFormData(prev => ({
+        ...prev,
+        wallet_id: wallets[0].id
+      }));
+    }
+  }, [wallets]);
   
   // Effect to manage form state when `status` changes
   useEffect(() => {
@@ -51,15 +115,15 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
             wallet_id: prev.wallet_id || (wallets.length > 0 ? wallets[0].id : ''),
         }));
     }
-    // When an item is NOT marked as sold, clear all sales-related data
+    // When an item is NOT marked as sold, only clear sales-related metadata
+    // but KEEP the selling price so user can switch back and forth without losing data
     else {
         setFormData(prev => ({
             ...prev,
             dateSold: '',
-            sellingPrice: '',
             sold_platforms: [],
             client_id: '',
-            wallet_id: '' // Clear wallet_id as it's not relevant
+            wallet_id: '' // Clear wallet_id as it's not relevant when not sold
         }));
     }
   }, [formData.status, wallets]);
@@ -97,8 +161,13 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
     
     // Strict validation for sold items
     if (formData.status === 'terjual') {
-        if (!formData.sellingPrice || !formData.dateSold || !formData.wallet_id) {
-            toast({ title: "Ralat Pengesahan Jualan", description: "Untuk item terjual, sila isi Harga Jual, Tarikh Jual, dan pilih Akaun Wallet.", variant: "destructive" });
+        if (!formData.sellingPrice || !formData.dateSold || !formData.wallet_id || !formData.quantitySold) {
+            toast({ title: "Ralat Pengesahan Jualan", description: "Untuk item terjual, sila isi Harga Jual, Tarikh Jual, Kuantiti Terjual, dan pilih Akaun Wallet.", variant: "destructive" });
+            return;
+        }
+        // Validate that quantity sold doesn't exceed available quantity
+        if (formData.quantity && formData.quantitySold > formData.quantity) {
+            toast({ title: "Ralat Kuantiti", description: `Kuantiti terjual (${formData.quantitySold}) tidak boleh lebih besar daripada kuantiti tersedia (${formData.quantity}).`, variant: "destructive" });
             return;
         }
     }
@@ -176,7 +245,19 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle className="gradient-text">{item ? 'Sunting Item' : 'Tambah Item Baharu'}</CardTitle>
-              <Button variant="ghost" size="icon" onClick={onCancel}><X className="w-5 h-5" /></Button>
+              <Button variant="ghost" size="icon" onClick={() => {
+                // Clear draft when closing form without saving
+                if (item?.id) {
+                  try {
+                    localStorage.removeItem(`rarebit_form_draft_${item.id}`);
+                    sessionStorage.removeItem(`rarebit_form_draft_${item.id}`);
+                    console.log(`[AddItemForm] Cleared draft from storage for item ${item.id}`);
+                  } catch (error) {
+                    console.error('[AddItemForm] Error clearing storage:', error);
+                  }
+                }
+                onCancel();
+              }}><X className="w-5 h-5" /></Button>
             </CardHeader>
             <CardContent className="max-h-[80vh] overflow-y-auto pr-2">
               <form onSubmit={handleSubmit} className="space-y-6 pr-4">
@@ -201,9 +282,17 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
                     <label className="block text-sm font-medium text-muted-foreground mb-2">Harga Kos *</label>
                     <div className="relative"><span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-primary font-medium">RM</span><Input type="number" step="0.01" min="0" value={formData.costPrice} onChange={(e) => setFormData(prev => ({ ...prev, costPrice: e.target.value }))} placeholder="0.00" className="pl-12" required /></div>
                   </div>
+                  <div>
+                    <label className="block text-sm font-medium text-muted-foreground mb-2">Kuantiti (Stock) *</label>
+                    <Input type="number" min="1" step="1" value={formData.quantity || 1} onChange={(e) => setFormData(prev => ({ ...prev, quantity: parseInt(e.target.value) || 1 }))} placeholder="1" required />
+                  </div>
                    <div>
                     <label className="block text-sm font-medium text-muted-foreground mb-2">Tarikh Beli *</label>
                     <Input type="date" value={formData.dateBought} onChange={(e) => setFormData(prev => ({ ...prev, dateBought: e.target.value }))} required />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-muted-foreground mb-2">Harga Jual *</label>
+                    <div className="relative"><span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-primary font-medium">RM</span><Input type="number" step="0.01" min="0" value={formData.sellingPrice} onChange={(e) => setFormData(prev => ({ ...prev, sellingPrice: e.target.value }))} placeholder="0.00" className="pl-12" required /></div>
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-muted-foreground mb-2">Status</label>
@@ -216,13 +305,28 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
                   
                   {isSold && (
                     <>
-                      <div>
-                        <label className="block text-sm font-medium text-muted-foreground mb-2">Harga Jual *</label>
-                        <div className="relative"><span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-primary font-medium">RM</span><Input type="number" step="0.01" min="0" value={formData.sellingPrice} onChange={(e) => setFormData(prev => ({ ...prev, sellingPrice: e.target.value }))} placeholder="0.00" className="pl-12" required={isSold} /></div>
-                      </div>
                        <div>
                         <label className="block text-sm font-medium text-muted-foreground mb-2">Tarikh Jual *</label>
                         <Input type="date" value={formData.dateSold} onChange={(e) => setFormData(prev => ({ ...prev, dateSold: e.target.value }))} required={isSold} />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-muted-foreground mb-2">Kuantiti Terjual *</label>
+                        <div className="space-y-2">
+                          <Input 
+                            type="number" 
+                            min="1" 
+                            step="1" 
+                            value={formData.quantitySold} 
+                            onChange={(e) => setFormData(prev => ({ ...prev, quantitySold: parseInt(e.target.value) || '' }))} 
+                            placeholder="Berapa banyak unit dijual?" 
+                            required={isSold}
+                          />
+                          {formData.quantity && formData.quantitySold && (
+                            <p className="text-xs text-muted-foreground">
+                              Baki: <span className="font-semibold text-foreground">{Math.max(0, formData.quantity - formData.quantitySold)} unit</span>
+                            </p>
+                          )}
+                        </div>
                       </div>
                       <div className="md:col-span-2">
                         <label className="block text-sm font-medium text-muted-foreground mb-2">Akaun Wallet (Perniagaan) *</label>
@@ -308,7 +412,19 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
                     {isSaving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="w-4 h-4 mr-2" />}
                     <span className="whitespace-nowrap">{item ? 'Kemas Kini' : 'Tambah'}</span>
                   </Button>
-                  <Button type="button" variant="destructive" onClick={onCancel} className="sm:w-auto sm:flex-1" disabled={isSaving || uploading}>
+                  <Button type="button" variant="destructive" onClick={() => {
+                    // Clear draft when closing form without saving
+                    if (item?.id) {
+                      try {
+                        localStorage.removeItem(`rarebit_form_draft_${item.id}`);
+                        sessionStorage.removeItem(`rarebit_form_draft_${item.id}`);
+                        console.log(`[AddItemForm] Cleared draft from storage for item ${item.id}`);
+                      } catch (error) {
+                        console.error('[AddItemForm] Error clearing storage:', error);
+                      }
+                    }
+                    onCancel();
+                  }} className="sm:w-auto sm:flex-1" disabled={isSaving || uploading}>
                     <X className="w-4 h-4 sm:hidden" />
                     <span className="hidden sm:inline">Batal</span>
                   </Button>

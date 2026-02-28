@@ -20,6 +20,10 @@ import { AnimatePresence } from 'framer-motion';
 import TransactionFormModal from '@/components/wallet/TransactionFormModal';
 import TransferFormModal from '@/components/wallet/TransferFormModal';
 import {
+  isTransferLegacyType,
+  manualTypeToLegacyType,
+} from '@/components/wallet/transactionClassification';
+import {
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -218,8 +222,52 @@ const WalletAccountPage = () => {
             rpcName = 'update_transaction_and_adjust_wallets';
             params = { p_transaction_id: transactionData.id, p_user_id: user.id, p_new_wallet_id: transactionData.wallet_id, p_new_amount: transactionData.amount, p_new_date: transactionData.transaction_date, p_new_description: transactionData.description, p_new_category: transactionData.category };
         } else {
+            const parsedAmount = parseFloat(transactionData.amount);
+            if (!Number.isFinite(parsedAmount)) {
+              throw new Error('Jumlah transaksi tidak sah');
+            }
+
+            if (transactionData.type === 'adjustment') {
+              const { data: walletSnapshot, error: walletError } = await supabase
+                .from('wallets')
+                .select('balance')
+                .eq('id', transactionData.wallet_id)
+                .eq('user_id', user.id)
+                .single();
+
+              if (walletError || !walletSnapshot) {
+                throw new Error('Wallet tidak ditemui untuk pelarasan');
+              }
+
+              const delta = transactionData.adjustment_direction === 'decrease'
+                ? -Math.abs(parsedAmount)
+                : Math.abs(parsedAmount);
+              const nextBalance = (parseFloat(walletSnapshot.balance) || 0) + delta;
+              if (nextBalance < 0) {
+                throw new Error('Pelarasan menyebabkan baki negatif');
+              }
+
+              const { error: adjustmentError } = await supabase.rpc('adjust_wallet_balance_manually', {
+                p_user_id: user.id,
+                p_wallet_id: transactionData.wallet_id,
+                p_new_balance: nextBalance,
+              });
+
+              if (adjustmentError) throw adjustmentError;
+              return isEditing;
+            }
+
             rpcName = 'add_transaction_and_update_wallet';
-            params = { p_user_id: user.id, p_wallet_id: transactionData.wallet_id, p_type: transactionData.type, p_amount: transactionData.amount, p_description: transactionData.description, p_category: transactionData.category, p_transaction_date: transactionData.transaction_date, p_item_id: transactionData.item_id || null };
+            params = {
+              p_user_id: user.id,
+              p_wallet_id: transactionData.wallet_id,
+              p_type: manualTypeToLegacyType(transactionData.type, transactionData.adjustment_direction),
+              p_amount: Math.abs(parsedAmount),
+              p_description: transactionData.description,
+              p_category: transactionData.category,
+              p_transaction_date: transactionData.transaction_date,
+              p_item_id: transactionData.item_id || null,
+            };
         }
         const { error } = await supabase.rpc(rpcName, params);
         if (error) throw error;
@@ -238,8 +286,9 @@ const WalletAccountPage = () => {
 
   const deleteTransactionMutation = useMutation({
     mutationFn: async (transaction) => {
-        const rpcName = transaction.type.startsWith('pemindahan') ? 'delete_transfer_transactions' : 'delete_transaction_and_adjust_wallet';
-        const params = transaction.type.startsWith('pemindahan') ? { p_transfer_id: transaction.transfer_id, p_user_id: user.id } : { p_transaction_id: transaction.id, p_user_id: user.id };
+        const isTransfer = isTransferLegacyType(transaction.type);
+        const rpcName = isTransfer ? 'delete_transfer_transactions' : 'delete_transaction_and_adjust_wallet';
+        const params = isTransfer ? { p_transfer_id: transaction.transfer_id, p_user_id: user.id } : { p_transaction_id: transaction.id, p_user_id: user.id };
         const { error } = await supabase.rpc(rpcName, params);
         if (error) throw error;
     },

@@ -102,15 +102,15 @@ const SalesPage = ({ items }) => {
             <label htmlFor="end-date" className="text-xs text-muted-foreground mb-1">Tarikh Akhir</label>
             <Input id="end-date" type="date" value={dateRange.endDate} onChange={(e) => setDateRange(prev => ({ ...prev, endDate: e.target.value }))} className="w-full bg-white rounded-lg focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background" />
           </div>
-          <Button variant="secondary" onClick={() => setDateRange({ startDate: '', endDate: '' })} className="h-10">Set Semula</Button>
+          <Button variant="secondary" size="default" onClick={() => setDateRange({ startDate: '', endDate: '' })} className="h-10 w-full md:w-auto">Set Semula</Button>
         </div>
       </div>
 
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
+        <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <CardTitle>Hasil Jualan</CardTitle>
-          <Button variant="outline" onClick={exportToCSV} disabled={!filteredSoldItems || filteredSoldItems.length === 0}>
-            <Download className="w-4 h-4 mr-2" /> Eksport CSV
+          <Button variant="outline" size="default" onClick={exportToCSV} disabled={!filteredSoldItems || filteredSoldItems.length === 0} className="gap-2 h-10 flex-1 sm:flex-initial">
+            <Download className="w-5 h-5" /> <span>Eksport CSV</span>
           </Button>
         </CardHeader>
         <CardContent className="p-0">
@@ -126,7 +126,10 @@ const SalesPage = ({ items }) => {
               </thead>
               <tbody>
                 {currentItems.map(item => {
-                  const profit = (parseFloat(item.selling_price) || 0) - (parseFloat(item.cost_price) || 0);
+                  const revenue = parseFloat(item.actual_sold_amount) || parseFloat(item.selling_price) || 0;
+                  const qty = item.invoice_quantity || 1;
+                  const costTotal = (parseFloat(item.cost_price) || 0) * qty;
+                  const profit = revenue - costTotal;
                   const isLoss = profit < 0;
                   return (
                     <tr key={item.id} className="border-t relative group overflow-hidden">
@@ -143,7 +146,7 @@ const SalesPage = ({ items }) => {
                            RM {Math.abs(profit).toFixed(2)}
                          </div>
                        </td>
-                       <td className="p-4 text-right font-semibold text-foreground">RM{parseFloat(item.selling_price).toFixed(2)}</td>
+                       <td className="p-4 text-right font-semibold text-foreground">RM{(parseFloat(item.actual_sold_amount) || parseFloat(item.selling_price) || 0).toFixed(2)}</td>
                     </tr>
                   );
                 })}
