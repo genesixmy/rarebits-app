@@ -1486,10 +1486,11 @@ const DashboardFinancialDebugPanel = ({
         <div className="my-1 border-t border-dashed border-primary/25" />
         <DebugMetricRow label="Net Profit" value={formatRM(metrics.netProfit)} isStrong />
 
-        <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
+        <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
           <DebugMetricRow label="Paid Invoices" value={`${metrics.paidInvoiceCount || 0}`} />
-          <DebugMetricRow label="Refunded Invoices" value={`${metrics.refundedInvoiceCount || 0}`} />
+          <DebugMetricRow label="Partially Returned Invoices" value={`${metrics.partiallyReturnedInvoiceCount || 0}`} />
           <DebugMetricRow label="Returned Invoices" value={`${metrics.returnedInvoiceCount || 0}`} />
+          <DebugMetricRow label="Adjusted Invoices (Goodwill)" value={`${metrics.adjustedInvoiceCount || 0}`} />
         </div>
       </CardContent>
     ) : null}
@@ -1783,7 +1784,8 @@ const Dashboard = ({ items, user, profile, isInventoryLoading = false }) => {
           invoice_item_returns(returned_quantity, refund_amount, returned_unit_price, returned_cost_price),
           invoices(
             *,
-            invoice_fees(id, amount, amount_override)
+            invoice_fees(id, amount, amount_override),
+            invoice_refunds(refund_type, type, amount, reason, note)
           )
         `)
         .order('created_at', { ascending: false });

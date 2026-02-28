@@ -86,6 +86,37 @@ const COURIER_MAX_LENGTH = 50;
 const TRACKING_NO_MAX_LENGTH = 64;
 const TRACKING_NO_PATTERN = /^[A-Za-z0-9\- ]*$/;
 const SHIPMENT_NOTES_MAX_LENGTH = 500;
+const INVOICE_ADJUSTMENT_TYPES = ['goodwill', 'return', 'cancel', 'correction'];
+
+const normalizeAdjustmentType = (value) => {
+  if (typeof value !== 'string') return '';
+  return value.trim().toLowerCase();
+};
+
+const resolveInvoiceAdjustmentType = (entry) => {
+  const normalizedType = normalizeAdjustmentType(entry?.refund_type || entry?.type || '');
+  if (INVOICE_ADJUSTMENT_TYPES.includes(normalizedType)) {
+    return normalizedType;
+  }
+
+  const amount = Number.parseFloat(entry?.amount);
+  if (Number.isFinite(amount) && amount < 0) {
+    return 'goodwill';
+  }
+
+  const hint = String(entry?.reason || entry?.note || entry?.notes || '').toLowerCase();
+  if (
+    hint.includes('courtesy')
+    || hint.includes('gerak budi')
+    || hint.includes('diskaun')
+    || hint.includes('price adjustment')
+    || hint.includes('kompensasi')
+  ) {
+    return 'goodwill';
+  }
+
+  return '';
+};
 
 const getSellerCollectedShippingCharged = (invoiceData) => {
   const courierMode = resolveCourierPaymentModeForInvoice(invoiceData);
@@ -316,6 +347,7 @@ const InvoiceDetailsPage = () => {
 
   // Adjustment modal state
   const [showRefundModal, setShowRefundModal] = useState(false);
+  const [refundType, setRefundType] = useState('goodwill');
   const [refundAmount, setRefundAmount] = useState('');
   const [refundReason, setRefundReason] = useState('');
   const [refundNotes, setRefundNotes] = useState('');
@@ -1957,9 +1989,22 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
   const handleProcessRefund = async () => {
     try {
       const amount = parseFloat(refundAmount);
+      const normalizedRefundType = normalizeAdjustmentType(refundType);
       const currentFinalTotal = getInvoiceFinancialSummary(invoice).finalTotal;
       if (!amount || amount <= 0) {
         toast.error('Amaun pelarasan mestilah lebih besar dari 0');
+        return;
+      }
+      if (!normalizedRefundType) {
+        toast.error('Jenis adjustment wajib dipilih.');
+        return;
+      }
+      if (!INVOICE_ADJUSTMENT_TYPES.includes(normalizedRefundType)) {
+        toast.error('Jenis adjustment tidak sah.');
+        return;
+      }
+      if (normalizedRefundType === 'return') {
+        toast.error('Jenis return sila guna proses pulangan item.');
         return;
       }
 
@@ -1973,19 +2018,23 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
         refundAmount: amount,
         reason: refundReason?.trim() || '',
         notes: refundNotes || '',
+        adjustmentType: normalizedRefundType,
       });
 
       toast.success('Invois telah diselaraskan');
-      
-      // Reset modal
-      setShowRefundModal(false);
-      setRefundAmount('');
-      setRefundReason('');
-      setRefundNotes('');
+      closeRefundModal();
     } catch (error) {
       console.error('[InvoiceDetailsPage] Error processing refund:', error);
       toast.error('Ralat: ' + (error.message || 'Gagal memproses pelarasan'));
     }
+  };
+
+  const closeRefundModal = () => {
+    setShowRefundModal(false);
+    setRefundType('goodwill');
+    setRefundAmount('');
+    setRefundReason('');
+    setRefundNotes('');
   };
 
   const openReturnModal = () => {
@@ -2197,7 +2246,10 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
   const invoiceRefunds = Array.isArray(invoice?.invoice_refunds)
     ? [...invoice.invoice_refunds].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
     : [];
-  const goodwillRefundHistory = invoiceRefunds.filter((entry) => (entry?.refund_type || '').toLowerCase() === 'goodwill');
+  const goodwillRefundHistory = invoiceRefunds.filter((entry) => {
+    const adjustmentType = resolveInvoiceAdjustmentType(entry);
+    return adjustmentType === 'goodwill' || adjustmentType === 'cancel' || adjustmentType === 'correction';
+  });
   const legacyGoodwillRefundHistory = Array.isArray(invoice?.refunds)
     ? [...invoice.refunds].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
     : [];
@@ -2325,7 +2377,10 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
               <Button
                 variant="outline"
                 size="default"
-                onClick={() => setShowRefundModal(true)}
+                onClick={() => {
+                  setRefundType('goodwill');
+                  setShowRefundModal(true);
+                }}
                 disabled={processRefund.isPending}
                 className="gap-2 flex-1 sm:flex-initial h-10"
               >
@@ -3131,7 +3186,7 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                 </CardDescription>
               </div>
               <button
-                onClick={() => setShowRefundModal(false)}
+                onClick={closeRefundModal}
                 className="text-gray-500 hover:text-gray-700"
               >
                 <X className="h-5 w-5" />
@@ -3146,6 +3201,23 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                   <p className="font-medium">Maklumat Pelarasan</p>
                   <p className="mt-1">Pelarasan harga akan mengurangkan hasil invois dan baki dompet. Amaun mestilah {'<='} RM{financialSummary.finalTotal.toFixed(2)}</p>
                 </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Jenis Adjustment *</label>
+                <select
+                  value={refundType}
+                  onChange={(e) => setRefundType(e.target.value)}
+                  className="flex h-10 w-full items-center justify-between rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="goodwill">Goodwill (Gerak Budi / Diskaun)</option>
+                  <option value="correction">Correction (Pembetulan)</option>
+                  <option value="cancel">Cancel (Pembatalan)</option>
+                  <option value="return" disabled>Return (guna butang Return Item)</option>
+                </select>
+                <p className="text-xs text-gray-600">
+                  Jenis adjustment wajib dipilih sebelum simpan.
+                </p>
               </div>
 
               {/* Adjustment Amount */}
@@ -3198,7 +3270,7 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
             <div className="border-t p-4 flex gap-3 justify-end">
               <Button
                 variant="outline"
-                onClick={() => setShowRefundModal(false)}
+                onClick={closeRefundModal}
                 disabled={processRefund.isPending}
                 className="h-10"
               >
@@ -3206,7 +3278,7 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
               </Button>
               <Button
                 onClick={handleProcessRefund}
-                disabled={processRefund.isPending || !refundAmount}
+                disabled={processRefund.isPending || !refundAmount || !refundType}
                 className="bg-amber-600 hover:bg-amber-700 h-10"
               >
                 {processRefund.isPending ? 'Sedang Memproses...' : 'Simpan Pelarasan'}

@@ -96,7 +96,8 @@ const SalesPage = ({ items }) => {
             channel_fee_amount,
             courier_payment_mode,
             adjustment_total,
-            invoice_fees(id, amount, amount_override)
+            invoice_fees(id, amount, amount_override),
+            invoice_refunds(refund_type, type, amount, reason, note)
           )
         `)
         .order('created_at', { ascending: false });

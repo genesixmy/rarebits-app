@@ -114,6 +114,7 @@ export const useInvoices = (filters = {}) => {
           refunds(id, amount, reason, notes, issued_at, created_at),
           invoice_refunds(
             id,
+            type,
             refund_type,
             amount,
             reason,
@@ -214,6 +215,7 @@ export const useInvoiceDetail = (invoiceId) => {
           refunds(id, amount, reason, notes, issued_at, created_at),
           invoice_refunds(
             id,
+            type,
             refund_type,
             amount,
             reason,
@@ -1298,7 +1300,7 @@ export const useReverseInvoicePayment = () => {
 };
 
 /**
- * Mutation to process goodwill adjustment for a paid invoice
+ * Mutation to process non-stock invoice adjustments (goodwill/correction/cancel)
  * Pattern B: Non-destructive adjustment that keeps invoice as paid
  */
 export const useProcessRefund = () => {
@@ -1314,10 +1316,20 @@ export const useProcessRefund = () => {
   const userId = authData?.session?.user?.id;
 
   return useMutation({
-    mutationFn: async ({ invoiceId, refundAmount, reason, notes }) => {
+    mutationFn: async ({ invoiceId, refundAmount, reason, notes, adjustmentType }) => {
       if (!userId) throw new Error('User not authenticated');
+      const normalizedAdjustmentType = String(adjustmentType || '').trim().toLowerCase();
+      if (!normalizedAdjustmentType) {
+        throw new Error('Jenis adjustment wajib dipilih.');
+      }
 
-      console.log('[useProcessRefund] Processing refund:', { invoiceId, refundAmount, reason, notes });
+      console.log('[useProcessRefund] Processing refund:', {
+        invoiceId,
+        refundAmount,
+        reason,
+        notes,
+        adjustmentType: normalizedAdjustmentType,
+      });
 
       const { data, error } = await supabase.rpc('process_refund', {
         p_invoice_id: invoiceId,
@@ -1325,6 +1337,7 @@ export const useProcessRefund = () => {
         p_refund_amount: refundAmount,
         p_reason: reason,
         p_notes: notes,
+        p_adjustment_type: normalizedAdjustmentType,
       });
 
       if (error) {

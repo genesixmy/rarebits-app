@@ -27,3 +27,17 @@ Core definitions used:
 - Shipping cost is deducted once via shared shipping-profit formula.
 - Customer totals remain customer-facing (`final_total` fallback logic), not reduced by platform fee.
 
+## FIN-AUDIT-2c (Adjustment Type Normalization)
+- Added migration `supabase/migrations/20260228000043_fin_audit_adjustment_type_normalization.sql`.
+- Backfills legacy `invoice_refunds` rows with NULL/blank/invalid type to a valid type (`goodwill` fallback, `return` when inventory-affected).
+- Enforces required type via:
+  - `invoice_refunds.refund_type` NOT NULL + allowed check
+  - `invoice_refunds.type` NOT NULL + allowed check
+  - trigger guard that raises `Jenis adjustment wajib dipilih.` when missing
+- Added `process_refund(..., p_adjustment_type)` overload with server validation:
+  - missing type -> fail with clear message
+  - invalid type -> fail
+  - `return` type is blocked in this flow and directed to item-return flow
+- Invoice adjustment modal now requires `Jenis Adjustment` and sends explicit type to RPC.
+- Reporting fallback hardened:
+  - when `invoice.adjustment_total` is 0 but refund rows exist, goodwill can be inferred from `invoice_refunds` (including legacy NULL-type courtesy hints).

@@ -4,6 +4,8 @@ import { getInvoicePlatformFeeTotal } from '@/lib/invoiceFees';
 export const FINANCIAL_SETTLED_INVOICE_STATUSES = new Set(['paid', 'partially_returned', 'returned']);
 
 const EPSILON = 0.0001;
+const ADJUSTMENT_TYPE_HINTS = ['courtesy', 'gerak budi', 'diskaun', 'price adjustment', 'kompensasi'];
+const INVOICE_ADJUSTMENT_TYPES = new Set(['goodwill', 'return', 'cancel', 'correction']);
 
 const toFiniteNumber = (value, fallback = 0) => {
   const parsed = Number.parseFloat(value);
@@ -17,6 +19,46 @@ const toNonNegativeNumber = (value, fallback = 0) => {
 const roundCurrency = (value) => {
   const parsed = toFiniteNumber(value, 0);
   return Math.round(parsed * 100) / 100;
+};
+
+const normalizeAdjustmentType = (value) => {
+  if (typeof value !== 'string') return '';
+  return value.trim().toLowerCase();
+};
+
+const resolveRefundRowAdjustmentType = (refundRow) => {
+  const normalizedType = normalizeAdjustmentType(refundRow?.refund_type || refundRow?.type || '');
+  if (INVOICE_ADJUSTMENT_TYPES.has(normalizedType)) {
+    return normalizedType;
+  }
+
+  const amount = toFiniteNumber(refundRow?.amount, 0);
+  if (amount < 0) return 'goodwill';
+
+  const hint = String(refundRow?.reason || refundRow?.note || refundRow?.notes || '').toLowerCase();
+  if (ADJUSTMENT_TYPE_HINTS.some((keyword) => hint.includes(keyword))) {
+    return 'goodwill';
+  }
+
+  return '';
+};
+
+const getInvoiceGoodwillAdjustmentTotal = (invoiceLike) => {
+  const explicitAdjustmentTotal = toNonNegativeNumber(invoiceLike?.adjustment_total, 0);
+  if (explicitAdjustmentTotal > 0) return explicitAdjustmentTotal;
+
+  const refundRows = Array.isArray(invoiceLike?.invoice_refunds) ? invoiceLike.invoice_refunds : [];
+  if (refundRows.length === 0) return explicitAdjustmentTotal;
+
+  const fallbackGoodwill = refundRows.reduce((sum, refundRow) => {
+    const adjustmentType = resolveRefundRowAdjustmentType(refundRow);
+    if (adjustmentType === 'goodwill' || adjustmentType === 'cancel' || adjustmentType === 'correction') {
+      return sum + Math.abs(toFiniteNumber(refundRow?.amount, 0));
+    }
+    return sum;
+  }, 0);
+
+  return roundCurrency(fallbackGoodwill);
 };
 
 export const getInvoiceFromSaleLine = (saleLine) => {
@@ -185,13 +227,14 @@ export const buildFinancialMetricsFromSalesLines = (saleLines = []) => {
   let goodwillAdjustments = 0;
   let totalCollected = 0;
   let paidInvoiceCount = 0;
-  let refundedInvoiceCount = 0;
+  let partiallyReturnedInvoiceCount = 0;
   let returnedInvoiceCount = 0;
+  const adjustedInvoiceIds = new Set();
 
   invoiceById.forEach((invoice, invoiceId) => {
     const status = String(invoice?.status || '').trim().toLowerCase();
     if (status === 'paid') paidInvoiceCount += 1;
-    if (status === 'partially_returned') refundedInvoiceCount += 1;
+    if (status === 'partially_returned') partiallyReturnedInvoiceCount += 1;
     if (status === 'returned') returnedInvoiceCount += 1;
 
     const shippingSnapshot = getInvoiceShippingBreakdown(invoice);
@@ -206,9 +249,12 @@ export const buildFinancialMetricsFromSalesLines = (saleLines = []) => {
     invoicePlatformFeeById.set(invoiceId, platformFee);
     platformFeeTotal += platformFee;
 
-    const goodwill = toNonNegativeNumber(invoice?.adjustment_total, 0);
+    const goodwill = getInvoiceGoodwillAdjustmentTotal(invoice);
     invoiceGoodwillById.set(invoiceId, goodwill);
     goodwillAdjustments += goodwill;
+    if (goodwill > EPSILON && status !== 'partially_returned' && status !== 'returned') {
+      adjustedInvoiceIds.add(invoiceId);
+    }
 
     const fallbackOriginal = (invoiceItemSubtotalById.get(invoiceId) || 0) + shippingSnapshot.shippingCharged;
     const collected = resolveInvoiceCollectedSummary(invoice, fallbackOriginal);
@@ -235,8 +281,10 @@ export const buildFinancialMetricsFromSalesLines = (saleLines = []) => {
     soldInvoiceCount: soldInvoiceIds.size,
     totalQuantitySold,
     paidInvoiceCount,
-    refundedInvoiceCount,
+    refundedInvoiceCount: partiallyReturnedInvoiceCount,
+    partiallyReturnedInvoiceCount,
     returnedInvoiceCount,
+    adjustedInvoiceCount: adjustedInvoiceIds.size,
     invoiceItemSubtotalById,
     invoicePlatformFeeById,
     invoiceGoodwillById,
