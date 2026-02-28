@@ -11,36 +11,13 @@ import { useTheme } from '@/contexts/ThemeProvider';
 import { useToast } from '@/components/ui/use-toast';
 import ClientFormModal from './ClientFormModal';
 import { COURIER_PAYMENT_MODES, resolveCourierPaymentModeForInvoice } from '@/lib/shipping';
+import { getInvoicePlatformFeeTotal } from '@/lib/invoiceFees';
+import {
+  FINANCIAL_SETTLED_INVOICE_STATUSES,
+  resolveInvoiceCollectedSummary,
+} from '@/lib/financialDefinitions';
 
-const resolveInvoiceTotals = (invoiceLike, fallbackOriginal = 0) => {
-  const fallback = Math.max(parseFloat(fallbackOriginal) || 0, 0);
-  const totalAmountRaw = parseFloat(invoiceLike?.total_amount);
-  const totalAmount = Number.isFinite(totalAmountRaw) && totalAmountRaw >= 0
-    ? totalAmountRaw
-    : fallback;
-
-  const adjustmentRaw = parseFloat(invoiceLike?.adjustment_total);
-  const adjustmentTotal = Number.isFinite(adjustmentRaw) && adjustmentRaw > 0
-    ? adjustmentRaw
-    : 0;
-
-  const returnedRaw = parseFloat(invoiceLike?.returned_total);
-  const returnedTotal = Number.isFinite(returnedRaw) && returnedRaw > 0
-    ? returnedRaw
-    : 0;
-
-  const finalRaw = parseFloat(invoiceLike?.final_total);
-  const finalTotal = Number.isFinite(finalRaw)
-    ? Math.max(Math.min(finalRaw, totalAmount), 0)
-    : Math.max(totalAmount - adjustmentTotal - returnedTotal, 0);
-
-  return {
-    totalAmount,
-    adjustmentTotal,
-    returnedTotal,
-    finalTotal,
-  };
-};
+const normalizeText = (value) => (typeof value === 'string' ? value.trim() : '');
 
 const fetchClientDetails = async (clientId) => {
   const { data: client, error: clientError } = await supabase
@@ -62,7 +39,7 @@ const fetchClientDetails = async (clientId) => {
       cost_price,
       line_total,
       item:items(id, name, category, cost_price),
-      invoice:invoices(*)
+      invoice:invoices(*, invoice_fees(id, amount, amount_override))
     `)
     .order('created_at', { ascending: false });
 
@@ -71,7 +48,7 @@ const fetchClientDetails = async (clientId) => {
   const paidItems = (invoiceItems || [])
     .filter((invItem) =>
       invItem.invoice?.client_id === clientId &&
-      ['paid', 'partially_returned', 'returned'].includes(invItem.invoice?.status) &&
+      FINANCIAL_SETTLED_INVOICE_STATUSES.has(invItem.invoice?.status) &&
       invItem.invoice?.user_id === client.user_id
     );
 
@@ -158,11 +135,11 @@ const fetchClientDetails = async (clientId) => {
       const category = isManual ? 'Manual' : (invItem.item?.category || 'Lain-lain');
       const invoiceId = invItem.invoice?.id;
       const invoiceRevenue = invoiceId ? (revenueByInvoice.get(invoiceId) || 0) : 0;
-      const invoiceChannelFee = Math.max(parseFloat(invItem.invoice?.channel_fee_amount) || 0, 0);
-      const channelFeeShare = invoiceRevenue > 0
-        ? (totalRevenue / invoiceRevenue) * invoiceChannelFee
+      const invoicePlatformFee = getInvoicePlatformFeeTotal(invItem.invoice);
+      const platformFeeShare = invoiceRevenue > 0
+        ? (totalRevenue / invoiceRevenue) * invoicePlatformFee
         : 0;
-      const profitAmount = totalRevenue - totalCost - channelFeeShare;
+      const profitAmount = totalRevenue - totalCost - platformFeeShare;
 
       return {
         id: invItem.id,
@@ -180,7 +157,7 @@ const fetchClientDetails = async (clientId) => {
   const purchases = Array.from(invoiceSummaryById.values())
     .map((summary) => {
       const fallbackOriginal = summary.items_amount + summary.shipping_collected;
-      const totals = resolveInvoiceTotals(summary, fallbackOriginal);
+      const totals = resolveInvoiceCollectedSummary(summary, fallbackOriginal);
 
       return {
         ...summary,
@@ -250,17 +227,22 @@ const ClientDetailPage = () => {
     const shippingCollected = purchases.reduce((sum, purchase) => sum + (parseFloat(purchase.shipping_collected) || 0), 0);
     const totalPaidToSeller = purchases.reduce((sum, purchase) => sum + (parseFloat(purchase.total_paid) || 0), 0);
 
-    const platformBreakdown = client.items.reduce((acc, item) => {
-      (item.sold_platforms || []).forEach(platform => {
-        const existing = acc.find(p => p.name === platform);
-        if (existing) {
-          existing.value += 1;
-        } else {
-          acc.push({ name: platform, value: 1 });
-        }
+    const platformStats = client.items.reduce((acc, item) => {
+      (item.sold_platforms || []).forEach((platform) => {
+        const rawPlatformName = normalizeText(platform);
+        const looksLikeFeeAggregateLabel = /^\d+\s+caj\s+platform$/i.test(rawPlatformName);
+        const platformName = looksLikeFeeAggregateLabel ? 'Manual' : (rawPlatformName || 'Manual');
+        acc[platformName] = (acc[platformName] || 0) + 1;
       });
       return acc;
-    }, []);
+    }, {});
+
+    const platformBreakdown = Object.entries(platformStats)
+      .map(([name, jumlah]) => ({ name, jumlah }))
+      .sort((a, b) => {
+        if (b.jumlah !== a.jumlah) return b.jumlah - a.jumlah;
+        return a.name.localeCompare(b.name, 'ms', { sensitivity: 'base' });
+      });
 
     const categoryMap = new Map((categories || []).map(cat => [cat.name, cat.color]));
 
@@ -445,8 +427,13 @@ const ClientDetailPage = () => {
                       <CartesianGrid strokeDasharray="3 3" stroke={gridColor} vertical={false} />
                       <XAxis dataKey="name" stroke={tickColor} tick={{ fill: tickColor, fontSize: 12 }} />
                       <YAxis stroke={tickColor} tick={{ fill: tickColor, fontSize: 12 }} allowDecimals={false} />
-                      <Tooltip cursor={{ fill: isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.02)' }} contentStyle={{ backgroundColor: tooltipBg, borderColor: tooltipBorder, borderRadius: '0.5rem' }} itemStyle={{ color: tooltipTextColor }} />
-                      <Bar dataKey="value" name="Jumlah" barSize={30} radius={[4, 4, 0, 0]}>
+                      <Tooltip
+                        cursor={{ fill: isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.02)' }}
+                        contentStyle={{ backgroundColor: tooltipBg, borderColor: tooltipBorder, borderRadius: '0.5rem' }}
+                        itemStyle={{ color: tooltipTextColor }}
+                        formatter={(value) => [`${value} jualan`]}
+                      />
+                      <Bar dataKey="jumlah" name="Jumlah" barSize={30} radius={[4, 4, 0, 0]}>
                          {stats.platformBreakdown.map((entry, index) => <Cell key={`cell-${index}`} fill={defaultPlatformColors[index % defaultPlatformColors.length]} />)}
                       </Bar>
                     </BarChart>

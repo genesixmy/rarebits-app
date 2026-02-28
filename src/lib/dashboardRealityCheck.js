@@ -1,4 +1,5 @@
 import { COURIER_PAYMENT_MODES, resolveCourierPaymentModeForInvoice } from '@/lib/shipping';
+import { getInvoicePlatformFeeTotal } from '@/lib/invoiceFees';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -159,7 +160,7 @@ const aggregateWindowMetrics = (rows, window) => {
     }
 
     if (!channelFeeByInvoice.has(invoiceId)) {
-      channelFeeByInvoice.set(invoiceId, toNonNegativeNumber(invoice?.channel_fee_amount, 0));
+      channelFeeByInvoice.set(invoiceId, getInvoicePlatformFeeTotal(invoice));
     }
 
     if (!shippingByInvoice.has(invoiceId)) {

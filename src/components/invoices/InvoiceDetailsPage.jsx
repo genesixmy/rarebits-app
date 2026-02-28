@@ -2172,8 +2172,27 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
     : Boolean(shipment && (shipment.courier_paid || shippingCostValue > 0));
   const shippingProfitValue = shippingChargedAmount - shippingCostValue;
   const channelFeeAmount = Math.max(parseFloat(invoice.channel_fee_amount) || 0, 0);
+  const invoiceFeeLines = Array.isArray(invoice?.invoice_fees)
+    ? [...invoice.invoice_fees].sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0))
+    : [];
+  const invoiceFeeRows = invoiceFeeLines.map((fee) => {
+    const autoAmount = Math.max(parseFloat(fee?.amount) || 0, 0);
+    const overrideRaw = parseFloat(fee?.amount_override);
+    const hasOverride = Number.isFinite(overrideRaw) && overrideRaw >= 0;
+    const manualAmount = hasOverride ? overrideRaw : null;
+    return {
+      ...fee,
+      auto_amount: autoAmount,
+      amount_override: manualAmount,
+      effective_amount: hasOverride ? manualAmount : autoAmount,
+      is_overridden: hasOverride,
+    };
+  });
+  const invoiceFeeTotal = invoiceFeeLines.length > 0
+    ? invoiceFeeRows.reduce((sum, fee) => sum + Math.max(parseFloat(fee?.effective_amount) || 0, 0), 0)
+    : channelFeeAmount;
   const financialSummary = getInvoiceFinancialSummary(invoice);
-  const netAfterChannelFee = financialSummary.finalTotal - channelFeeAmount;
+  const netAfterChannelFee = financialSummary.finalTotal - invoiceFeeTotal;
   const hasTrackingNumber = normalizeWhitespaceText(shipment?.tracking_no || deliveryForm.trackingNo || '').length > 0;
   const invoiceRefunds = Array.isArray(invoice?.invoice_refunds)
     ? [...invoice.invoice_refunds].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
@@ -2530,9 +2549,31 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                 <div className="flex justify-between text-sm">
                   <span>Caj Platform (tolak untung):</span>
                   <span className="font-medium">
-                    - {formatCurrency(channelFeeAmount)}
+                    - {formatCurrency(invoiceFeeTotal)}
                   </span>
                 </div>
+                {invoiceFeeRows.length > 0 && (
+                  <div className="space-y-1 rounded-lg bg-muted/40 p-2 text-xs text-muted-foreground">
+                    {invoiceFeeRows.map((fee) => (
+                      <div key={fee.id || `${fee.name}-${fee.created_at}`} className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <span className="truncate">{fee.name}</span>
+                          {fee.is_overridden && (
+                            <span className="ml-2 inline-flex rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">
+                              Manual
+                            </span>
+                          )}
+                          {fee.is_overridden && (
+                            <p className="mt-0.5 text-[11px] text-muted-foreground">
+                              Auto {formatCurrency(fee.auto_amount)} -> Manual {formatCurrency(fee.amount_override)}
+                            </p>
+                          )}
+                        </div>
+                        <span className="font-medium text-foreground">- {formatCurrency(fee.effective_amount)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {!isPlatformCourierMode && (
                   <div className="flex justify-between text-sm">
                     <span>Caj Pos Dikutip:</span>

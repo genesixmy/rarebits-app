@@ -10,6 +10,10 @@ import { useToast } from '@/components/ui/use-toast';
 import { supabase } from '@/lib/customSupabaseClient';
 import ClientFormModal from './ClientFormModal';
 import {
+  FINANCIAL_SETTLED_INVOICE_STATUSES,
+  resolveInvoiceCollectedSummary,
+} from '@/lib/financialDefinitions';
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -26,31 +30,6 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 
-const resolveInvoiceFinalTotal = (invoiceLike, fallbackOriginal = 0) => {
-  const fallback = Math.max(parseFloat(fallbackOriginal) || 0, 0);
-  const totalAmountRaw = parseFloat(invoiceLike?.total_amount);
-  const totalAmount = Number.isFinite(totalAmountRaw) && totalAmountRaw >= 0
-    ? totalAmountRaw
-    : fallback;
-
-  const adjustmentRaw = parseFloat(invoiceLike?.adjustment_total);
-  const adjustmentTotal = Number.isFinite(adjustmentRaw) && adjustmentRaw > 0
-    ? adjustmentRaw
-    : 0;
-
-  const returnedRaw = parseFloat(invoiceLike?.returned_total);
-  const returnedTotal = Number.isFinite(returnedRaw) && returnedRaw > 0
-    ? returnedRaw
-    : 0;
-
-  const finalRaw = parseFloat(invoiceLike?.final_total);
-  const finalTotal = Number.isFinite(finalRaw)
-    ? Math.max(Math.min(finalRaw, totalAmount), 0)
-    : Math.max(totalAmount - adjustmentTotal - returnedTotal, 0);
-
-  return finalTotal;
-};
-
 const fetchClientsWithStats = async (userId) => {
   const { data: clients, error: clientsError } = await supabase
     .from('clients')
@@ -63,7 +42,7 @@ const fetchClientsWithStats = async (userId) => {
     .from('invoices')
     .select('*')
     .eq('user_id', userId)
-    .in('status', ['paid', 'partially_returned', 'returned'])
+    .in('status', Array.from(FINANCIAL_SETTLED_INVOICE_STATUSES))
     .not('client_id', 'is', null)
     .order('created_at', { ascending: false });
   if (invoicesError) throw invoicesError;
@@ -81,7 +60,7 @@ const fetchClientsWithStats = async (userId) => {
     }
 
     acc[clientId].purchases += 1;
-    acc[clientId].totalSpend += resolveInvoiceFinalTotal(invoice);
+    acc[clientId].totalSpend += resolveInvoiceCollectedSummary(invoice).finalTotal;
 
     return acc;
   }, {});

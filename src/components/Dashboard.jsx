@@ -1,18 +1,30 @@
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Checkbox } from '@/components/ui/checkbox';
 import {
   Tooltip as UiTooltip,
   TooltipContent as UiTooltipContent,
   TooltipProvider as UiTooltipProvider,
   TooltipTrigger as UiTooltipTrigger,
 } from '@/components/ui/tooltip';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import { useToast } from '@/components/ui/use-toast';
 import { Loader2,
   Package, 
   Truck,
+  Bell,
   TrendingUp, 
   TrendingDown,
   BarChart3,
@@ -25,14 +37,11 @@ import { Loader2,
   ArrowRight,
   SlidersHorizontal,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  X
 } from 'lucide-react';
-import { Cell, Tooltip, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid } from 'recharts';
+import { Cell, Tooltip, ResponsiveContainer, PieChart, Pie } from 'recharts';
 import { cn } from '@/lib/utils';
-import {
-  COURIER_PAYMENT_MODES,
-  resolveCourierPaymentModeForInvoice,
-} from '@/lib/shipping';
 import { useTheme } from '@/contexts/ThemeProvider';
 import { supabase } from '@/lib/customSupabaseClient';
 import { resolveTransactionClassification, TRANSACTION_CLASSIFICATIONS } from '@/components/wallet/transactionClassification';
@@ -44,6 +53,19 @@ import {
   getItemAvailableQuantity,
 } from '@/lib/dashboardHealth';
 import { calculateRealityCheck } from '@/lib/dashboardRealityCheck';
+import {
+  buildCompletedReminderOccurrenceSet,
+  expandRemindersOccurrencesInWindow,
+  isReminderRecurring,
+  isDateKeyWithinRange,
+  shiftDateKeyByDays,
+} from '@/components/reminders/reminderCalendarUtils';
+import {
+  buildFinancialMetricsFromSalesLines,
+  getSaleLineFinancialBreakdown,
+  getSaleLineItemSubtotal,
+  getSaleLineNetQuantity,
+} from '@/lib/financialDefinitions';
 
 const getInitialDateRange = () => {
   const today = new Date();
@@ -67,14 +89,67 @@ const getInitialDateRange = () => {
   };
 };
 
+const getLocalDateKey = (date = new Date()) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
 const SETTLED_INVOICE_STATUSES = new Set(['paid', 'partially_returned', 'returned']);
 const NEXT_STEP_PENDING_COMPLETED_STATUSES = new Set(['delivered', 'completed']);
+const NEXT_STEP_URGENCY_THRESHOLDS = {
+  pending_shipping: { warning: 1, critical: 4 },
+  risk_stock: { warning: 1, critical: 6 },
+  clearance_candidate: { warning: 1, critical: 4 },
+};
 
 const normalizeLowerText = (value) => (typeof value === 'string' ? value.trim().toLowerCase() : '');
 const normalizeText = (value) => (typeof value === 'string' ? value.trim() : '');
 const parsePositiveNumber = (value) => {
   const parsed = Number.parseFloat(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+};
+
+const normalizeHexColor = (value) => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  const shortMatch = /^#([0-9a-fA-F]{3})$/.exec(trimmed);
+  if (shortMatch) {
+    const [r, g, b] = shortMatch[1].split('');
+    return `#${r}${r}${g}${g}${b}${b}`.toLowerCase();
+  }
+
+  const longMatch = /^#([0-9a-fA-F]{6})$/.exec(trimmed);
+  if (longMatch) return `#${longMatch[1].toLowerCase()}`;
+  return null;
+};
+
+const hexToRgb = (hexColor) => {
+  const normalized = normalizeHexColor(hexColor);
+  if (!normalized) return null;
+  const value = normalized.slice(1);
+  return {
+    r: Number.parseInt(value.slice(0, 2), 16),
+    g: Number.parseInt(value.slice(2, 4), 16),
+    b: Number.parseInt(value.slice(4, 6), 16),
+  };
+};
+
+const rgbToHex = ({ r, g, b }) => {
+  const toHex = (channel) => Math.max(0, Math.min(255, Math.round(channel))).toString(16).padStart(2, '0');
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+};
+
+const mixHexColor = (baseHex, targetRgb, ratio) => {
+  const baseRgb = hexToRgb(baseHex);
+  if (!baseRgb) return baseHex;
+  const safeRatio = Math.max(0, Math.min(1, ratio));
+  return rgbToHex({
+    r: baseRgb.r + ((targetRgb.r - baseRgb.r) * safeRatio),
+    g: baseRgb.g + ((targetRgb.g - baseRgb.g) * safeRatio),
+    b: baseRgb.b + ((targetRgb.b - baseRgb.b) * safeRatio),
+  });
 };
 
 const getInvoiceRecordFromRow = (row) => (row?.invoices && typeof row.invoices === 'object' ? row.invoices : row);
@@ -151,62 +226,55 @@ export const computeNextSteps = ({ invoices, inventory }) => {
   };
 };
 
-const getInvoiceFinancialSummary = (invoice, fallbackOriginal = 0) => {
-  const fallback = Math.max(parseFloat(fallbackOriginal) || 0, 0);
-  const totalAmountRaw = parseFloat(invoice?.total_amount);
-  const totalAmount = Number.isFinite(totalAmountRaw) && totalAmountRaw >= 0
-    ? totalAmountRaw
-    : fallback;
+const getUrgency = (type, count) => {
+  const safeCount = Number.isFinite(count) ? Math.max(0, count) : 0;
+  const threshold = NEXT_STEP_URGENCY_THRESHOLDS[type];
+  if (!threshold) {
+    return { variant: 'neutral', label: '' };
+  }
 
-  const adjustmentRaw = parseFloat(invoice?.adjustment_total);
-  const adjustmentTotal = Number.isFinite(adjustmentRaw) && adjustmentRaw > 0
-    ? adjustmentRaw
-    : 0;
+  if (safeCount >= threshold.critical) {
+    if (type === 'pending_shipping') return { variant: 'critical', label: 'Urgent' };
+    if (type === 'risk_stock') return { variant: 'critical', label: 'Modal berisiko' };
+    return { variant: 'critical', label: 'Clearance sekarang' };
+  }
 
-  const returnedRaw = parseFloat(invoice?.returned_total);
-  const returnedTotal = Number.isFinite(returnedRaw) && returnedRaw > 0
-    ? returnedRaw
-    : 0;
+  if (safeCount >= threshold.warning) {
+    if (type === 'pending_shipping') return { variant: 'warning', label: 'Perlu tindakan' };
+    if (type === 'risk_stock') return { variant: 'warning', label: 'Perlu semak' };
+    return { variant: 'warning', label: 'Boleh clearance' };
+  }
 
-  const finalRaw = parseFloat(invoice?.final_total);
-  const finalTotal = Number.isFinite(finalRaw)
-    ? Math.max(Math.min(finalRaw, totalAmount), 0)
-    : Math.max(totalAmount - adjustmentTotal - returnedTotal, 0);
-
-  return {
-    totalAmount,
-    finalTotal,
-    adjustmentTotal,
-    returnedTotal,
-  };
+  if (type === 'risk_stock') return { variant: 'neutral', label: 'Sihat' };
+  return { variant: 'neutral', label: 'Tiada' };
 };
 
 const getHealthTone = (label) => {
   if (label === 'Strong') {
     return {
-      fillClass: 'bg-emerald-500',
+      fillClass: 'brand-gradient',
       chipClass: 'bg-emerald-100 text-emerald-700',
-      batteryClass: 'border-emerald-300',
+      batteryClass: 'border-primary/30',
     };
   }
   if (label === 'Stable') {
     return {
-      fillClass: 'bg-sky-500',
-      chipClass: 'bg-sky-100 text-sky-700',
-      batteryClass: 'border-sky-300',
+      fillClass: 'brand-gradient',
+      chipClass: 'bg-green-100 text-green-700',
+      batteryClass: 'border-primary/30',
     };
   }
   if (label === 'Weak') {
     return {
-      fillClass: 'bg-amber-500',
-      chipClass: 'bg-amber-100 text-amber-700',
-      batteryClass: 'border-amber-300',
+      fillClass: 'brand-gradient',
+      chipClass: 'bg-emerald-100 text-emerald-700',
+      batteryClass: 'border-primary/30',
     };
   }
   return {
-    fillClass: 'bg-rose-500',
-    chipClass: 'bg-rose-100 text-rose-700',
-    batteryClass: 'border-rose-300',
+    fillClass: 'brand-gradient',
+    chipClass: 'bg-green-100 text-green-800',
+    batteryClass: 'border-primary/30',
   };
 };
 
@@ -214,26 +282,26 @@ const getDeadCapitalTone = (deadCapitalPct) => {
   if (deadCapitalPct > 20) {
     return {
       label: 'Tinggi',
-      chipClass: 'border-rose-200 bg-rose-100 text-rose-700',
-      fillClass: 'bg-rose-500',
-      batteryClass: 'border-rose-300',
+      chipClass: 'border-emerald-300 bg-emerald-200 text-emerald-900',
+      fillClass: 'brand-gradient',
+      batteryClass: 'border-primary/30',
     };
   }
 
   if (deadCapitalPct >= 10) {
     return {
       label: 'Waspada',
-      chipClass: 'border-amber-200 bg-amber-100 text-amber-700',
-      fillClass: 'bg-amber-500',
-      batteryClass: 'border-amber-300',
+      chipClass: 'border-teal-300 bg-teal-100 text-teal-800',
+      fillClass: 'brand-gradient',
+      batteryClass: 'border-primary/30',
     };
   }
 
   return {
     label: 'Sihat',
-    chipClass: 'border-emerald-200 bg-emerald-100 text-emerald-700',
-    fillClass: 'bg-emerald-500',
-    batteryClass: 'border-emerald-300',
+    chipClass: 'border-green-200 bg-green-100 text-green-700',
+    fillClass: 'brand-gradient',
+    batteryClass: 'border-primary/30',
   };
 };
 
@@ -243,14 +311,14 @@ const formatSignedPercent = (value) => {
 };
 
 const getRevenueChipTone = (value) => {
-  if (!Number.isFinite(value)) return 'bg-indigo-100 text-indigo-700 border-indigo-200';
-  if (value >= 0) return 'bg-indigo-100 text-indigo-700 border-indigo-200';
-  return 'bg-indigo-50 text-indigo-700 border-indigo-200';
+  if (!Number.isFinite(value)) return 'bg-slate-100 text-slate-600 border-slate-200';
+  if (value >= 0) return 'bg-primary/10 text-primary border-primary/30';
+  return 'bg-rose-50 text-rose-700 border-rose-200';
 };
 
 const getProfitChipTone = (value) => {
-  if (!Number.isFinite(value)) return 'bg-emerald-100 text-emerald-700 border-emerald-200';
-  if (value >= 0) return 'bg-emerald-100 text-emerald-700 border-emerald-200';
+  if (!Number.isFinite(value)) return 'bg-slate-100 text-slate-600 border-slate-200';
+  if (value >= 0) return 'bg-primary/10 text-primary border-primary/30';
   return 'bg-rose-100 text-rose-700 border-rose-200';
 };
 
@@ -258,13 +326,13 @@ const getRealityOverallBadge = (severity) => {
   if (severity === 'ALERT') {
     return {
       label: 'ALERT',
-      className: 'bg-rose-100 text-rose-700 border-rose-200',
+      className: 'bg-rose-50 text-rose-700 border-rose-200',
     };
   }
   if (severity === 'GOOD') {
     return {
       label: 'GOOD',
-      className: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+      className: 'bg-primary/10 text-primary border-primary/30',
     };
   }
   return {
@@ -276,22 +344,28 @@ const getRealityOverallBadge = (severity) => {
 const getRealityInsightTone = (severity) => {
   if (severity === 'ALERT') {
     return {
-      card: 'border-rose-200 bg-rose-50/75',
-      iconWrap: 'bg-rose-100 text-rose-700',
-      suggestionWrap: 'border-rose-200 bg-white/85 text-rose-700',
+      card: 'bg-white border-rose-200/80 border-l-4 border-l-rose-300',
+      iconWrap: 'border border-rose-200 bg-rose-50 text-rose-600',
+      suggestionWrap: 'border-rose-200 bg-rose-50/60 text-slate-700',
+      tipWrap: 'border-amber-200 bg-amber-50/70 text-slate-700',
+      tipIcon: 'text-amber-600',
     };
   }
   if (severity === 'GOOD') {
     return {
-      card: 'border-emerald-200 bg-emerald-50/75',
-      iconWrap: 'bg-emerald-100 text-emerald-700',
-      suggestionWrap: 'border-emerald-200 bg-white/85 text-emerald-700',
+      card: 'bg-white border-primary/30 border-l-4 border-l-primary/60',
+      iconWrap: 'border border-primary/30 bg-primary/10 text-primary',
+      suggestionWrap: 'border-primary/25 bg-primary/5 text-slate-700',
+      tipWrap: 'border-primary/25 bg-cyan-50/70 text-slate-700',
+      tipIcon: 'text-primary',
     };
   }
   return {
-    card: 'border-amber-200 bg-amber-50/75',
-    iconWrap: 'bg-amber-100 text-amber-700',
-    suggestionWrap: 'border-amber-200 bg-white/85 text-amber-700',
+    card: 'bg-white border-amber-200/80 border-l-4 border-l-amber-300',
+    iconWrap: 'border border-amber-200 bg-amber-50 text-amber-700',
+    suggestionWrap: 'border-amber-200 bg-amber-50/60 text-slate-700',
+    tipWrap: 'border-amber-200 bg-amber-50/70 text-slate-700',
+    tipIcon: 'text-amber-600',
   };
 };
 
@@ -313,22 +387,69 @@ const GlassCard = ({ className, children, ...props }) => (
   </Card>
 );
 
-const KpiCard = ({ title, value, subtext, icon: Icon, toneClass = 'bg-slate-100 text-slate-700' }) => (
-  <GlassCard className="overflow-hidden">
+const KpiCard = ({
+  title,
+  value,
+  subtext,
+  icon: Icon,
+  toneClass = 'bg-slate-100 text-slate-700',
+  tooltip,
+  onClick,
+  ariaLabel,
+}) => (
+  <GlassCard
+    className={cn(
+      'overflow-hidden',
+      typeof onClick === 'function' && 'cursor-pointer transition-colors hover:border-primary/40'
+    )}
+    role={typeof onClick === 'function' ? 'button' : undefined}
+    tabIndex={typeof onClick === 'function' ? 0 : undefined}
+    onClick={onClick}
+    onKeyDown={typeof onClick === 'function'
+      ? (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onClick();
+        }
+      }
+      : undefined}
+    aria-label={ariaLabel}
+  >
     <CardContent className="space-y-2.5 p-4">
       <div className="flex items-center justify-between gap-2">
-        <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500">{title}</p>
+        <div className="inline-flex min-w-0 items-center gap-1.5">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500">{title}</p>
+          {tooltip ? (
+            <UiTooltip>
+              <UiTooltipTrigger asChild>
+                <button
+                  type="button"
+                  className="inline-flex h-4 w-4 items-center justify-center rounded-full text-slate-400 hover:text-slate-600"
+                  aria-label={`Info ${title}`}
+                >
+                  <Info className="h-3.5 w-3.5" />
+                </button>
+              </UiTooltipTrigger>
+              <UiTooltipContent side="top" className="max-w-[240px] text-xs leading-relaxed">
+                {tooltip}
+              </UiTooltipContent>
+            </UiTooltip>
+          ) : null}
+        </div>
         <span className={cn('inline-flex h-8 w-8 items-center justify-center rounded-xl', toneClass)}>
           <Icon className="h-4 w-4" />
         </span>
       </div>
       <p className="text-[1.55rem] font-semibold leading-none tracking-tight text-slate-900">{value}</p>
-      <p className="truncate text-xs text-slate-500">{subtext}</p>
+      <p className="text-xs leading-snug text-slate-500">{subtext}</p>
     </CardContent>
   </GlassCard>
 );
 
 const getActionBadgeClasses = (tone) => {
+  if (tone === 'critical') {
+    return 'border-rose-200 bg-rose-100 text-rose-800';
+  }
   if (tone === 'warning') {
     return 'border-amber-200 bg-amber-100 text-amber-800';
   }
@@ -338,42 +459,119 @@ const getActionBadgeClasses = (tone) => {
   return 'border-slate-200 bg-slate-100 text-slate-600';
 };
 
-const ActionRow = ({ label, description, value, valueTone = 'neutral', to, tooltip }) => (
-  <Link
-    to={to}
-    className="group flex items-center justify-between gap-3 rounded-xl px-2 py-2.5 transition-colors hover:bg-slate-100/70"
-  >
-    <div className="min-w-0">
-      <div className="flex items-center gap-1.5">
-        <p className="text-sm font-semibold text-slate-900">{label}</p>
-        {tooltip ? (
-          <UiTooltip>
-            <UiTooltipTrigger asChild>
-              <button
-                type="button"
-                className="inline-flex h-4 w-4 items-center justify-center rounded-full text-slate-400 hover:text-slate-500"
-                onClick={(event) => event.preventDefault()}
-                aria-label={`Info ${label}`}
-              >
-                <Info className="h-3.5 w-3.5" />
-              </button>
-            </UiTooltipTrigger>
-            <UiTooltipContent side="top" className="max-w-[220px] text-xs">
-              {tooltip}
-            </UiTooltipContent>
-          </UiTooltip>
-        ) : null}
-      </div>
-      <p className="truncate text-xs text-slate-500">{description}</p>
-    </div>
-    <div className="inline-flex shrink-0 items-center gap-1.5">
-      <span className={cn('rounded-full border px-2 py-0.5 text-[11px] font-semibold shadow-sm', getActionBadgeClasses(valueTone))}>
-        {value}
-      </span>
-      <ArrowRight className="h-3.5 w-3.5 text-slate-400 transition-transform group-hover:translate-x-0.5" />
-    </div>
-  </Link>
+const getQuickActionIcon = (label) => {
+  const normalized = normalizeLowerText(label);
+  if (normalized.includes('invois')) return Receipt;
+  if (normalized.includes('reminder')) return Bell;
+  if (normalized.includes('penghantaran')) return Truck;
+  if (normalized.includes('clearance')) return BarChart3;
+  return Package;
+};
+
+const REMINDER_PRIORITY_SCORE = {
+  high: 3,
+  normal: 2,
+  low: 1,
+};
+
+const resolveReminderSourceId = (reminder) => (
+  reminder?.source_reminder_id || reminder?.reminder_id || reminder?.id || null
 );
+
+const getReminderPriorityMeta = (priority) => {
+  const normalized = normalizeLowerText(priority);
+  if (normalized === 'high') {
+    return { label: 'High', className: 'border-rose-200 bg-rose-100 text-rose-700' };
+  }
+  if (normalized === 'low') {
+    return { label: 'Low', className: 'border-slate-200 bg-slate-100 text-slate-700' };
+  }
+  return { label: 'Normal', className: 'border-indigo-200 bg-indigo-100 text-indigo-700' };
+};
+
+const ActionRow = ({
+  label,
+  description,
+  value,
+  valueTone = 'neutral',
+  valueCount,
+  valueLabel,
+  valueAriaLabel,
+  to,
+  tooltip,
+  onClick,
+}) => {
+  const ActionIcon = getQuickActionIcon(label);
+  const badgeText = valueCount !== undefined
+    ? `${valueCount}${valueLabel ? ` ${valueLabel}` : ''}`.trim()
+    : value;
+  const cardClassName = 'group relative flex min-h-[132px] flex-col items-center justify-center gap-2 rounded-2xl border border-slate-200/90 bg-white px-3 py-4 text-center shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md';
+  const rowContent = (
+    <>
+      {badgeText ? (
+        <span
+          className={cn(
+            'absolute right-2 top-2 inline-flex max-w-[calc(100%-16px)] truncate rounded-full border px-2 py-0.5 text-[10px] font-semibold shadow-sm',
+            getActionBadgeClasses(valueTone)
+          )}
+          aria-label={valueAriaLabel}
+        >
+          {badgeText}
+        </span>
+      ) : null}
+      {tooltip ? (
+        <UiTooltip>
+          <UiTooltipTrigger asChild>
+            <button
+              type="button"
+              className="absolute left-2 top-2 inline-flex h-5 w-5 items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+              }}
+              aria-label={`Info ${label}`}
+            >
+              <Info className="h-3.5 w-3.5" />
+            </button>
+          </UiTooltipTrigger>
+          <UiTooltipContent side="top" className="max-w-[220px] text-xs">
+            {tooltip}
+          </UiTooltipContent>
+        </UiTooltip>
+      ) : null}
+      <span className="inline-flex h-11 w-11 items-center justify-center rounded-full text-white brand-gradient">
+        <ActionIcon className="h-5 w-5" />
+      </span>
+      <p className="line-clamp-2 text-sm font-semibold text-slate-900">{label}</p>
+      <p className="line-clamp-2 text-[11px] leading-snug text-slate-500">{description}</p>
+    </>
+  );
+
+  if (typeof onClick === 'function') {
+    return (
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={onClick}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            onClick();
+          }
+        }}
+        className={cn(cardClassName, 'cursor-pointer')}
+      >
+        {rowContent}
+      </div>
+    );
+  }
+
+  return (
+    <Link to={to} className={cardClassName}>
+      {rowContent}
+    </Link>
+  );
+};
 
 const InsightCard = ({ title, badge, action, children, className }) => (
   <GlassCard className={cn('overflow-hidden', className)}>
@@ -414,7 +612,7 @@ const DashboardHero = ({ userDisplayName, summaryText, priorityLine }) => (
       </div>
 
       <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-white/80 bg-white/75 p-2.5 shadow-sm backdrop-blur-sm">
-        <Button asChild variant="outline" size="sm" className="h-9 rounded-xl border-white/80 bg-white/80 px-3">
+        <Button asChild variant="outline" size="sm" className="h-9 rounded-xl border-white/80 bg-white/80 px-3 transition-colors hover:border-primary/40 hover:bg-white hover:text-primary">
           <Link to="/inventory" className="inline-flex items-center gap-1.5">
             <Plus className="h-3.5 w-3.5" />
             Tambah Item
@@ -426,7 +624,7 @@ const DashboardHero = ({ userDisplayName, summaryText, priorityLine }) => (
             Invois Baru
           </Link>
         </Button>
-        <Button asChild variant="outline" size="sm" className="h-9 rounded-xl border-white/80 bg-white/80 px-3">
+        <Button asChild variant="outline" size="sm" className="h-9 rounded-xl border-white/80 bg-white/80 px-3 transition-colors hover:border-primary/40 hover:bg-white hover:text-primary">
           <Link to="/invoices?status=paid&shipping_state=pending" className="inline-flex items-center gap-1.5">
             <Truck className="h-3.5 w-3.5" />
             Semak Penghantaran
@@ -443,7 +641,7 @@ const DashboardNextSteps = ({ steps }) => (
       <CardTitle className="text-[17px] font-semibold text-slate-900">Apa perlu buat seterusnya</CardTitle>
     </CardHeader>
     <CardContent className="pt-0 sm:pt-1">
-      <div className="divide-y divide-white/80">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
         {steps.map((step) => (
           <ActionRow
             key={step.label}
@@ -451,8 +649,12 @@ const DashboardNextSteps = ({ steps }) => (
             description={step.description}
             value={step.value}
             valueTone={step.valueTone}
+            valueCount={step.valueCount}
+            valueLabel={step.valueLabel}
+            valueAriaLabel={step.valueAriaLabel}
             to={step.to}
             tooltip={step.tooltip}
+            onClick={step.onClick}
           />
         ))}
       </div>
@@ -460,12 +662,105 @@ const DashboardNextSteps = ({ steps }) => (
   </GlassCard>
 );
 
+const DashboardReminderPreviewModal = ({
+  open,
+  onClose,
+  todayReminders,
+  overdueCount,
+  onToggleCompleted,
+  isToggling,
+}) => {
+  if (!open) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-[1px]"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+      role="presentation"
+    >
+      <div
+        className="w-full max-w-lg overflow-hidden rounded-2xl border border-white/80 bg-white shadow-2xl"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Reminder Hari Ini"
+      >
+        <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+          <div className="flex items-center gap-2">
+            <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-violet-100 text-violet-700">
+              <Bell className="h-4 w-4" />
+            </span>
+            <p className="text-base font-semibold text-slate-900">Reminder Hari Ini</p>
+          </div>
+          <Button type="button" variant="ghost" size="icon" className="h-8 w-8" onClick={onClose}>
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+
+        <div className="max-h-[60vh] space-y-3 overflow-y-auto px-4 py-3">
+          {overdueCount > 0 ? (
+            <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+              {overdueCount} reminder lewat - semak sekarang.
+            </div>
+          ) : null}
+
+          {todayReminders.length > 0 ? (
+            todayReminders.map((reminder) => {
+              const priorityMeta = getReminderPriorityMeta(reminder.priority);
+              return (
+                <div key={reminder.occurrence_key || reminder.id} className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2.5">
+                  <div className="min-w-0 space-y-1">
+                    <p className="truncate text-sm font-semibold text-slate-900">{reminder.title}</p>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className={cn('inline-flex rounded-full border px-2 py-0.5 text-[11px] font-medium', priorityMeta.className)}>
+                        {priorityMeta.label}
+                      </span>
+                      {isReminderRecurring(reminder) ? (
+                        <span className="inline-flex rounded-full border border-violet-200 bg-violet-100 px-2 py-0.5 text-[11px] font-medium text-violet-700">
+                          Ulang
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                  <label className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600">
+                    <Checkbox
+                      checked={Boolean(reminder.is_completed)}
+                      onCheckedChange={(checked) => onToggleCompleted(reminder, checked === true)}
+                      disabled={isToggling}
+                    />
+                    Selesai
+                  </label>
+                </div>
+              );
+            })
+          ) : (
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+              Tiada reminder untuk hari ini.
+            </div>
+          )}
+        </div>
+
+        <div className="flex flex-col-reverse gap-2 border-t border-slate-100 px-4 py-3 sm:flex-row sm:justify-end">
+          <Button type="button" variant="outline" onClick={onClose}>
+            Tutup
+          </Button>
+          <Button asChild className="bg-primary text-primary-foreground hover:bg-primary/90">
+            <Link to="/reminders">Lihat Semua</Link>
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const DashboardKpiGrid = ({
   filteredStats,
   netProfitPercentText,
   businessWalletBalance,
   totalUnitStock,
   soldUnitMovementPercent,
+  onOpenProfitDetail,
 }) => {
   const cards = [
     {
@@ -473,16 +768,20 @@ const DashboardKpiGrid = ({
       title: 'Revenue Item',
       value: formatRM(filteredStats.totalRevenue),
       subtext: `${filteredStats.soldItemsCount} jualan`,
+      tooltip: `Revenue Item = jualan barang (line item) selepas refund return item, tidak termasuk caj pos dan tidak tolak pelarasan goodwill. Jumlah Kutipan (akhir invois, termasuk pos): ${formatRM(filteredStats.totalCollected)}.`,
       icon: Wallet,
       tone: 'bg-emerald-100 text-emerald-700',
     },
     {
       key: 'profit',
-      title: 'Untung Sebenar',
+      title: 'Untung Bersih',
       value: formatRM(filteredStats.totalProfit),
-      subtext: netProfitPercentText,
+      subtext: `${netProfitPercentText} - Klik untuk lihat pecahan`,
+      tooltip: `Untung Bersih = Untung Item + Untung Pos - Caj Platform - Pelarasan. Caj Platform tempoh ini: ${formatRM(filteredStats.totalPlatformFees)}.`,
       icon: TrendingUp,
       tone: 'bg-violet-100 text-violet-700',
+      onClick: onOpenProfitDetail,
+      ariaLabel: 'Lihat butiran untung bersih',
     },
     {
       key: 'wallet',
@@ -512,6 +811,9 @@ const DashboardKpiGrid = ({
           subtext={card.subtext}
           icon={card.icon}
           toneClass={card.tone}
+          tooltip={card.tooltip}
+          onClick={card.onClick}
+          ariaLabel={card.ariaLabel}
         />
       ))}
     </div>
@@ -597,20 +899,60 @@ const DashboardInsightsSidebar = ({
   isDeadCapitalTooltipOpen,
   setIsDeadCapitalTooltipOpen,
   platformBarData,
+  categoryBarData,
   filteredSalesCount,
   defaultColors,
-  isDark,
-  tickColor,
-  gridColor,
+  categoryColorMap,
+  categoryPalette,
   tooltipBg,
   tooltipBorder,
   tooltipTextColor,
 }) => {
   const [showDeadItems, setShowDeadItems] = useState(false);
+  const [salesBreakdownView, setSalesBreakdownView] = useState('platform');
+  const [hoveredBreakdown, setHoveredBreakdown] = useState(null);
   // Mirror Business Health style: fuller bar means healthier stock mix.
   const deadCapitalProgressWidth = deadCapitalMetrics.hasStockValue
     ? Math.max(0, Math.min(100 - (deadCapitalMetrics.deadPercent || 0), 100))
     : 0;
+  const activeBreakdownData = salesBreakdownView === 'category' ? categoryBarData : platformBarData;
+  const isCategoryView = salesBreakdownView === 'category';
+  const salesBreakdownTitle = isCategoryView ? 'Kategori Jualan' : 'Platform Jualan';
+  const salesBreakdownActionLabel = isCategoryView ? 'Platform' : 'Kategori';
+  const salesBreakdownEmptyMessage = filteredSalesCount > 0
+    ? (isCategoryView ? 'Kategori belum dapat dirumuskan.' : 'Platform belum dapat dirumuskan.')
+    : (isCategoryView ? 'Belum ada data kategori dalam tempoh ini.' : 'Belum ada data platform dalam tempoh ini.');
+  const activeBreakdownTotal = activeBreakdownData.reduce(
+    (sum, entry) => sum + (parseFloat(entry?.jumlah) || 0),
+    0
+  );
+  const activeBreakdownPalette = Array.isArray(categoryPalette) && categoryPalette.length > 0
+    ? categoryPalette
+    : defaultColors;
+  const activeBreakdownDonutData = activeBreakdownData.map((entry, index) => {
+    const value = parseFloat(entry?.jumlah) || 0;
+    const percent = activeBreakdownTotal > 0 ? (value / activeBreakdownTotal) * 100 : 0;
+    const normalizedName = normalizeLowerText(entry?.name);
+    const categoryMappedColor = normalizedName ? categoryColorMap?.get(normalizedName) : null;
+    const baseColor = categoryMappedColor || activeBreakdownPalette[index % activeBreakdownPalette.length];
+    const gradientIdSafeName = `${entry?.name || 'lain-lain'}-${index}`.replace(/[^a-zA-Z0-9_-]/g, '-');
+    const gradientId = `insight-${isCategoryView ? 'kategori' : 'platform'}-${gradientIdSafeName}`;
+    const gradientStart = mixHexColor(baseColor, { r: 255, g: 255, b: 255 }, 0.35);
+    const gradientEnd = mixHexColor(baseColor, { r: 15, g: 23, b: 42 }, 0.18);
+    return {
+      name: entry?.name || 'Lain-lain',
+      value,
+      percent,
+      color: baseColor,
+      gradientId,
+      gradientStart,
+      gradientEnd,
+    };
+  });
+  const centerDisplayValue = hoveredBreakdown ? hoveredBreakdown.value : activeBreakdownTotal;
+  const centerDisplayLabel = hoveredBreakdown
+    ? hoveredBreakdown.name
+    : 'jualan';
 
   return (
   <div className="space-y-4">
@@ -680,9 +1022,9 @@ const DashboardInsightsSidebar = ({
             <p className="text-xs text-slate-600">
               {formatRM(deadCapitalMetrics.deadValue)} / {formatRM(deadCapitalMetrics.totalStockValue)}
             </p>
-            <div className="relative h-2 overflow-hidden rounded-full border border-emerald-300 bg-slate-100">
+            <div className={cn('relative h-2 overflow-hidden rounded-full border bg-slate-100', deadCapitalTone.batteryClass)}>
               <div
-                className="absolute inset-y-0 left-0 rounded-full bg-emerald-500 transition-all duration-300"
+                className={cn('absolute inset-y-0 left-0 rounded-full transition-all duration-300', deadCapitalTone.fillClass)}
                 style={{ width: `${deadCapitalProgressWidth}%` }}
               />
             </div>
@@ -691,9 +1033,9 @@ const DashboardInsightsSidebar = ({
                 <p className="font-semibold text-rose-700">Dead</p>
                 <p className="text-rose-800">{formatRM(deadCapitalMetrics.deadValue)}</p>
               </div>
-              <div className="rounded-lg border border-emerald-100 bg-emerald-50/70 px-2 py-1.5">
-                <p className="font-semibold text-emerald-700">Active</p>
-                <p className="text-emerald-800">{formatRM(deadCapitalMetrics.activeValue)}</p>
+              <div className="rounded-lg border border-teal-200 bg-teal-50/80 px-2 py-1.5">
+                <p className="font-semibold text-teal-700">Active</p>
+                <p className="text-teal-900">{formatRM(deadCapitalMetrics.activeValue)}</p>
               </div>
             </div>
             <p className="text-[11px] text-slate-500">
@@ -748,36 +1090,97 @@ const DashboardInsightsSidebar = ({
     </InsightCard>
 
     <InsightCard
-      title="Platform Jualan"
+      title={salesBreakdownTitle}
       action={
-        <Link to="/sales" className="text-xs font-medium text-primary hover:underline">
-          Tukar ke kategori
-        </Link>
+        <button
+          type="button"
+          className="inline-flex h-8 items-center rounded-xl border-0 px-3 text-[11px] font-semibold text-white brand-gradient brand-gradient-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+          onClick={() => setSalesBreakdownView((prev) => (prev === 'platform' ? 'category' : 'platform'))}
+        >
+          {salesBreakdownActionLabel}
+        </button>
       }
     >
       <div>
-        {platformBarData.length > 0 ? (
-          <ResponsiveContainer width="100%" height={170}>
-            <BarChart data={platformBarData} margin={{ top: 8, right: 8, left: -12, bottom: 4 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke={gridColor} vertical={false} />
-              <XAxis dataKey="name" stroke={tickColor} tick={{ fill: tickColor, fontSize: 11 }} />
-              <YAxis stroke={tickColor} tick={{ fill: tickColor, fontSize: 11 }} allowDecimals={false} />
-              <Tooltip
-                cursor={{ fill: isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.02)' }}
-                contentStyle={{ backgroundColor: tooltipBg, borderColor: tooltipBorder, borderRadius: '0.5rem' }}
-                itemStyle={{ color: tooltipTextColor }}
-                labelStyle={{ color: tooltipTextColor, fontWeight: 'bold' }}
-                formatter={(value) => [`${value} jualan`]}
-              />
-              <Bar dataKey="jumlah" barSize={20} radius={[5, 5, 0, 0]}>
-                {platformBarData.map((entry, index) => (
-                  <Cell key={`platform-cell-${entry.name}-${index}`} fill={defaultColors[index % defaultColors.length]} />
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
+        {activeBreakdownData.length > 0 ? (
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-[170px_1fr] sm:items-center">
+            <div className="relative mx-auto h-[170px] w-[170px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <defs>
+                    {activeBreakdownDonutData.map((entry) => (
+                      <linearGradient key={entry.gradientId} id={entry.gradientId} x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" stopColor={entry.gradientStart} />
+                        <stop offset="100%" stopColor={entry.gradientEnd} />
+                      </linearGradient>
+                    ))}
+                  </defs>
+                  <Pie
+                    data={activeBreakdownDonutData}
+                    dataKey="value"
+                    nameKey="name"
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={46}
+                    outerRadius={72}
+                    paddingAngle={3}
+                    cornerRadius={8}
+                    stroke="none"
+                    onMouseEnter={(_, index) => {
+                      const nextHover = activeBreakdownDonutData[index] || null;
+                      setHoveredBreakdown(nextHover);
+                    }}
+                    onMouseLeave={() => setHoveredBreakdown(null)}
+                  >
+                    {activeBreakdownDonutData.map((entry) => (
+                      <Cell key={`${isCategoryView ? 'category' : 'platform'}-donut-${entry.name}`} fill={`url(#${entry.gradientId})`} />
+                    ))}
+                  </Pie>
+                  <Tooltip
+                    wrapperStyle={{ zIndex: 80 }}
+                    contentStyle={{
+                      backgroundColor: '#ffffff',
+                      border: '1px solid #e2e8f0',
+                      borderRadius: '0.65rem',
+                      padding: '6px 8px',
+                      boxShadow: '0 10px 30px -18px rgba(15, 23, 42, 0.45)',
+                    }}
+                    itemStyle={{ color: tooltipTextColor }}
+                    labelStyle={{ color: tooltipTextColor, fontWeight: 'bold' }}
+                    formatter={(value) => [`${value} jualan`]}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
+              <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+                <div className="max-w-[108px] rounded-2xl border border-white/90 bg-white/90 px-2.5 py-1.5 text-center shadow-sm backdrop-blur-sm">
+                  <p className="truncate text-base font-semibold leading-none text-slate-900">{centerDisplayValue}</p>
+                  <p className="truncate pt-1 text-[11px] leading-none text-slate-500">{centerDisplayLabel}</p>
+                </div>
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              {activeBreakdownDonutData.map((entry) => (
+                <div
+                  key={`${isCategoryView ? 'category' : 'platform'}-donut-row-${entry.name}`}
+                  className="flex items-center justify-between gap-2 rounded-lg border border-slate-200/80 bg-white/80 px-2.5 py-1.5"
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span
+                      className="h-2.5 w-2.5 shrink-0 rounded-full"
+                      style={{ backgroundColor: entry.color }}
+                      aria-hidden="true"
+                    />
+                    <span className="truncate text-xs font-medium text-slate-700">{entry.name}</span>
+                  </div>
+                  <span className="shrink-0 text-xs font-semibold text-slate-900">
+                    {entry.value} ({entry.percent.toFixed(0)}%)
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
         ) : (
-          <EmptyStateMini message={filteredSalesCount > 0 ? 'Platform belum dapat dirumuskan.' : 'Belum ada data platform dalam tempoh ini.'} />
+          <EmptyStateMini message={salesBreakdownEmptyMessage} />
         )}
       </div>
     </InsightCard>
@@ -788,17 +1191,16 @@ const DashboardInsightsSidebar = ({
 const DashboardOperations = ({
   isLoadingSales,
   recentSales,
-  getEffectiveCostPrice,
   revenueByInvoice,
   invoiceFinancialById,
-  channelFeeByInvoice,
+  platformFeeByInvoice,
   shippingByInvoice,
   platformBarData,
+  categoryBarData,
   filteredSalesCount,
   defaultColors,
-  isDark,
-  tickColor,
-  gridColor,
+  categoryColorMap,
+  categoryPalette,
   tooltipBg,
   tooltipBorder,
   tooltipTextColor,
@@ -829,6 +1231,23 @@ const DashboardOperations = ({
     };
   });
 
+  const invoiceGoodwillById = useMemo(() => {
+    const map = new Map();
+    if (invoiceFinancialById instanceof Map) {
+      invoiceFinancialById.forEach((financial, invoiceId) => {
+        map.set(invoiceId, Math.max(parseFloat(financial?.adjustmentTotal) || 0, 0));
+      });
+    }
+    return map;
+  }, [invoiceFinancialById]);
+
+  const lineMetrics = useMemo(() => ({
+    invoiceItemSubtotalById: revenueByInvoice,
+    invoicePlatformFeeById: platformFeeByInvoice,
+    invoiceGoodwillById,
+    invoiceShippingById: shippingByInvoice,
+  }), [revenueByInvoice, platformFeeByInvoice, invoiceGoodwillById, shippingByInvoice]);
+
   return (
   <div className="grid grid-cols-1 gap-5 xl:grid-cols-3">
     <div className="space-y-5 xl:col-span-2">
@@ -838,7 +1257,7 @@ const DashboardOperations = ({
             <CardTitle className="text-[17px] font-semibold text-slate-900">Aktiviti</CardTitle>
             <p className="text-xs text-slate-500">Jualan terkini</p>
           </div>
-          <Button asChild variant="outline" size="sm" className="h-8 rounded-xl border-white/80 bg-white/80">
+          <Button asChild variant="default" size="sm" className="h-8 rounded-xl border-0 px-3 text-white brand-gradient brand-gradient-hover">
             <Link to="/sales">Lihat semua</Link>
           </Button>
         </CardHeader>
@@ -862,40 +1281,35 @@ const DashboardOperations = ({
                   </tr>
                 ) : recentSales.length > 0 ? (
                   recentSales.map((sale, index) => {
-                    const quantity = sale.quantity || 1;
-                    const costPrice = getEffectiveCostPrice(sale);
-                    const totalCost = costPrice * quantity;
-                    const totalRevenue = parseFloat(sale.line_total) || 0;
-                    const invoiceId = sale?.invoices?.id;
-                    const invoiceRevenue = invoiceId ? (revenueByInvoice.get(invoiceId) || 0) : 0;
-                    const invoiceAdjustment = invoiceId ? (invoiceFinancialById.get(invoiceId)?.adjustmentTotal || 0) : 0;
-                    const invoiceChannelFee = invoiceId ? (channelFeeByInvoice.get(invoiceId) || 0) : 0;
-                    const channelFeeShare = invoiceRevenue > 0 ? (totalRevenue / invoiceRevenue) * invoiceChannelFee : 0;
-                    const shippingInvoice = invoiceId ? shippingByInvoice.get(invoiceId) : null;
-                    const shippingCharged = Math.max(parseFloat(shippingInvoice?.shippingCharged) || 0, 0);
-                    const shippingCostPaid = Math.max(parseFloat(shippingInvoice?.shippingCostPaid) || 0, 0);
-                    const shippingChargedShare = invoiceRevenue > 0 ? (totalRevenue / invoiceRevenue) * shippingCharged : 0;
-                    const shippingCostShare = invoiceRevenue > 0 ? (totalRevenue / invoiceRevenue) * shippingCostPaid : 0;
-                    const shippingProfitShare = shippingChargedShare - shippingCostShare;
-                    const adjustmentShare = invoiceRevenue > 0 ? (totalRevenue / invoiceRevenue) * invoiceAdjustment : 0;
-                    const profit = totalRevenue - totalCost - channelFeeShare + shippingProfitShare - adjustmentShare;
+                    const breakdown = getSaleLineFinancialBreakdown(sale, lineMetrics);
+                    const profit = breakdown.netProfit;
                     const isLoss = profit < 0;
 
                     return (
-                      <tr key={`${sale.id}-${index}`} className="border-t">
+                      <tr key={`${sale.id}-${index}`} className="border-t relative group overflow-hidden">
                         <td className="p-3 text-sm font-semibold text-foreground">
-                          {sale.is_manual ? (sale.item_name || 'Item Manual') : (sale.items?.name || 'Item Tidak Dikenali')}
+                          <div className="absolute left-0 top-0 h-full w-1 bg-primary scale-y-0 transition-transform origin-center duration-300 group-hover:scale-y-100" />
+                          <div className="transition-transform duration-300 group-hover:translate-x-2">
+                            {sale.is_manual ? (sale.item_name || 'Item Manual') : (sale.items?.name || 'Item Tidak Dikenali')}
+                          </div>
                         </td>
                         <td className="p-3 text-sm text-muted-foreground">
                           {new Date(sale.invoices?.invoice_date || new Date()).toLocaleDateString()}
                         </td>
                         <td className="p-3">
-                          <span className={cn('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium', isLoss ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700')}>
+                          <span
+                            className={cn(
+                              'inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-medium',
+                              isLoss
+                                ? 'border border-rose-200 bg-rose-50 text-rose-700'
+                                : 'text-white brand-gradient'
+                            )}
+                          >
                             {isLoss ? <XCircle className="h-3 w-3" /> : <CheckCircle className="h-3 w-3" />}
                             {formatRM(Math.abs(profit))}
                           </span>
                         </td>
-                        <td className="p-3 text-right text-sm font-semibold text-foreground">{formatRM(totalRevenue)}</td>
+                        <td className="p-3 text-right text-sm font-semibold text-foreground">{formatRM(breakdown.netRevenueAfterGoodwill)}</td>
                       </tr>
                     );
                   })
@@ -928,16 +1342,16 @@ const DashboardOperations = ({
         </CardHeader>
         <CardContent className="space-y-3 pt-0">
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            <div className="rounded-lg border border-indigo-200/60 bg-indigo-50/60 p-2.5">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-indigo-700">Revenue</p>
-              <p className="mt-0.5 text-lg font-bold text-indigo-900">RM {realityCheckData.thisWeek.revenueTotal.toFixed(2)}</p>
+            <div className="rounded-lg border border-primary/30 bg-white p-2.5">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-primary">Revenue</p>
+              <p className="mt-0.5 text-lg font-bold text-slate-900">RM {realityCheckData.thisWeek.revenueTotal.toFixed(2)}</p>
               <span className={cn("mt-1 inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold", getRevenueChipTone(realityCheckData.revenueChangePct))}>
                 {realityRevenueChipLabel}
               </span>
             </div>
-            <div className="rounded-lg border border-emerald-200/60 bg-emerald-50/60 p-2.5">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-700">Profit</p>
-              <p className="mt-0.5 text-lg font-bold text-emerald-900">RM {realityCheckData.thisWeek.profitTotal.toFixed(2)}</p>
+            <div className="rounded-lg border border-primary/30 bg-white p-2.5">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-primary">Profit</p>
+              <p className="mt-0.5 text-lg font-bold text-slate-900">RM {realityCheckData.thisWeek.profitTotal.toFixed(2)}</p>
               <span className={cn("mt-1 inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold", getProfitChipTone(realityCheckData.profitChangePct))}>
                 {realityProfitChipLabel}
               </span>
@@ -979,28 +1393,14 @@ const DashboardOperations = ({
                   <div className={cn("mt-2 rounded-lg border px-2.5 py-2 text-sm", tone.suggestionWrap)}>
                     <span className="font-semibold">Cadangan:</span> {insight.suggestion}
                   </div>
-
-                  {insight.actions.length > 0 ? (
-                    <div className="mt-2.5 space-y-1.5">
-                      <p className="text-xs font-semibold text-slate-700">Apa anda boleh buat:</p>
-                      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-                        {insight.actions.map((action, actionIndex) => (
-                          <Button
-                            key={`${insight.key}-action-${actionIndex}`}
-                            asChild
-                            size="sm"
-                            variant={action.variant === 'outline' ? 'outline' : 'default'}
-                            className="h-8 justify-start sm:justify-center"
-                          >
-                            <Link to={action.href}>{action.label}</Link>
-                          </Button>
-                        ))}
-                      </div>
-                      <p className="text-[11px] text-slate-500">
-                        Tip: fokus 1 tindakan dulu - perubahan kecil pun beri kesan.
-                      </p>
-                    </div>
-                  ) : null}
+                  <div className={cn("mt-2 rounded-lg border px-2.5 py-2 text-sm", tone.tipWrap)}>
+                    <p className="flex items-start gap-2 leading-snug">
+                      <Info className={cn("mt-0.5 h-4 w-4 shrink-0", tone.tipIcon)} aria-hidden="true" />
+                      <span>
+                        <span className="font-semibold">Tip:</span> fokus 1 tindakan dulu - perubahan kecil pun beri kesan.
+                      </span>
+                    </p>
+                  </div>
                 </div>
               );
             })}
@@ -1024,11 +1424,11 @@ const DashboardOperations = ({
       isDeadCapitalTooltipOpen={isDeadCapitalTooltipOpen}
       setIsDeadCapitalTooltipOpen={setIsDeadCapitalTooltipOpen}
       platformBarData={platformBarData}
+      categoryBarData={categoryBarData}
       filteredSalesCount={filteredSalesCount}
       defaultColors={defaultColors}
-      isDark={isDark}
-      tickColor={tickColor}
-      gridColor={gridColor}
+      categoryColorMap={categoryColorMap}
+      categoryPalette={categoryPalette}
       tooltipBg={tooltipBg}
       tooltipBorder={tooltipBorder}
       tooltipTextColor={tooltipTextColor}
@@ -1037,27 +1437,330 @@ const DashboardOperations = ({
   );
 };
 
-const Dashboard = ({ items, isInventoryLoading = false }) => {
+const DebugMetricRow = ({ label, value, isStrong = false }) => (
+  <div className={cn(
+    'flex items-center justify-between rounded-lg border px-3 py-2 text-sm',
+    isStrong
+      ? 'border-primary/30 bg-gradient-to-r from-cyan-50 to-teal-50'
+      : 'border-primary/20 bg-primary/5'
+  )}>
+    <span className={cn('font-medium', isStrong ? 'text-primary' : 'text-slate-700')}>{label}</span>
+    <span className={cn('font-semibold', isStrong ? 'text-primary' : 'text-slate-900')}>{value}</span>
+  </div>
+);
+
+const DashboardFinancialDebugPanel = ({
+  isOpen,
+  onToggle,
+  metrics,
+}) => (
+  <GlassCard className="border-primary/20">
+    <CardHeader className="pb-2">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center justify-between rounded-xl border border-primary/20 bg-primary/5 px-3 py-2 text-left transition-colors hover:bg-primary/10"
+        aria-expanded={isOpen}
+        aria-label="Toggle Financial Debug panel"
+      >
+        <div>
+          <CardTitle className="text-sm font-semibold text-primary">🛠 Financial Debug (Dev Only)</CardTitle>
+          <p className="mt-0.5 text-xs text-slate-500">Breakdown formula untuk julat tarikh semasa</p>
+        </div>
+        {isOpen ? <ChevronUp className="h-4 w-4 text-primary" /> : <ChevronDown className="h-4 w-4 text-primary" />}
+      </button>
+    </CardHeader>
+
+    {isOpen ? (
+      <CardContent className="space-y-2 pt-0">
+        <DebugMetricRow label="Revenue Item" value={formatRM(metrics.revenueItem)} />
+        <DebugMetricRow label="Shipping Charged" value={formatRM(metrics.shippingCharged)} />
+        <DebugMetricRow label="Platform Fees" value={formatRM(metrics.platformFeeTotal)} />
+        <DebugMetricRow label="Item Cost" value={formatRM(metrics.itemCostTotal)} />
+        <DebugMetricRow label="Shipping Cost" value={formatRM(metrics.shippingCost)} />
+        <DebugMetricRow label="Goodwill Adjustments" value={formatRM(metrics.goodwillAdjustments)} />
+
+        <div className="my-1 border-t border-dashed border-primary/25" />
+        <DebugMetricRow label="Item Profit" value={formatRM(metrics.itemProfit)} />
+        <DebugMetricRow label="Shipping Profit" value={formatRM(metrics.shippingProfit)} />
+        <div className="my-1 border-t border-dashed border-primary/25" />
+        <DebugMetricRow label="Net Profit" value={formatRM(metrics.netProfit)} isStrong />
+
+        <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
+          <DebugMetricRow label="Paid Invoices" value={`${metrics.paidInvoiceCount || 0}`} />
+          <DebugMetricRow label="Refunded Invoices" value={`${metrics.refundedInvoiceCount || 0}`} />
+          <DebugMetricRow label="Returned Invoices" value={`${metrics.returnedInvoiceCount || 0}`} />
+        </div>
+      </CardContent>
+    ) : null}
+  </GlassCard>
+);
+
+const Dashboard = ({ items, user, profile, isInventoryLoading = false }) => {
   const { theme } = useTheme();
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
   const [dateRange, setDateRange] = useState(getInitialDateRange());
   const [isFiltersOpen, setIsFiltersOpen] = useState(false);
-  const [userId, setUserId] = useState(null);
-  const [userDisplayName, setUserDisplayName] = useState('Pengguna');
   const [isDeadCapitalTooltipOpen, setIsDeadCapitalTooltipOpen] = useState(false);
+  const [isReminderPreviewOpen, setIsReminderPreviewOpen] = useState(false);
+  const [isNetProfitDetailOpen, setIsNetProfitDetailOpen] = useState(false);
+  const [isFinancialDebugOpen, setIsFinancialDebugOpen] = useState(false);
+  const userId = user?.id || null;
+  const todayKey = useMemo(() => getLocalDateKey(new Date()), []);
+  const reminderWindowStartKey = useMemo(() => shiftDateKeyByDays(todayKey, -30), [todayKey]);
+  const dashboardReminderQueryKey = ['dashboard-reminders-today', userId, todayKey];
+  const dashboardReminderOccurrenceQueryKey = ['dashboard-reminder-occurrences', userId, todayKey];
+  const userDisplayName = useMemo(() => {
+    const profileUsername = typeof profile?.username === 'string' ? profile.username.trim() : '';
+    if (profileUsername) return profileUsername;
 
-  // Get current user ID
+    const emailName = typeof user?.email === 'string'
+      ? user.email.split('@')[0]?.trim()
+      : '';
+    return emailName || 'Pengguna';
+  }, [profile?.username, user?.email]);
+
   useEffect(() => {
-    const getUser = async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      setUserId(user?.id);
-      const metadataName = user?.user_metadata?.username
-        || user?.user_metadata?.full_name
-        || user?.user_metadata?.name;
-      const emailName = user?.email ? user.email.split('@')[0] : null;
-      setUserDisplayName(metadataName || emailName || 'Pengguna');
+    if (!isReminderPreviewOpen) return undefined;
+
+    const handleEscape = (event) => {
+      if (event.key === 'Escape') {
+        setIsReminderPreviewOpen(false);
+      }
     };
-    getUser();
-  }, []);
+
+    window.addEventListener('keydown', handleEscape);
+    return () => window.removeEventListener('keydown', handleEscape);
+  }, [isReminderPreviewOpen]);
+
+  const { data: dashboardReminderRows = [], isLoading: isLoadingDashboardReminders } = useQuery({
+    queryKey: dashboardReminderQueryKey,
+    queryFn: async () => {
+      if (!userId) return [];
+
+      const { data, error } = await supabase
+        .from('reminders')
+        .select('id, title, start_date, end_date, due_date, recurrence, recurrence_interval, recurrence_until, is_completed, priority, created_at')
+        .eq('user_id', userId)
+        .eq('is_completed', false)
+        .lte('start_date', todayKey)
+        .order('start_date', { ascending: true })
+        .order('due_date', { ascending: true })
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('[Dashboard] Error fetching reminder summary:', error);
+        return [];
+      }
+
+      return data || [];
+    },
+    enabled: !!userId,
+    staleTime: 30 * 1000,
+  });
+
+  const {
+    data: dashboardReminderOccurrenceRows = [],
+    isLoading: isLoadingDashboardReminderOccurrences,
+  } = useQuery({
+    queryKey: dashboardReminderOccurrenceQueryKey,
+    queryFn: async () => {
+      if (!userId) return [];
+
+      const { data, error } = await supabase
+        .from('reminder_occurrences')
+        .select('id, reminder_id, occurrence_date, status, created_at')
+        .eq('user_id', userId)
+        .eq('status', 'completed')
+        .lte('occurrence_date', todayKey)
+        .order('occurrence_date', { ascending: false });
+
+      if (error) {
+        console.error('[Dashboard] Error fetching reminder occurrences:', error);
+        return [];
+      }
+
+      return data || [];
+    },
+    enabled: !!userId,
+    staleTime: 30 * 1000,
+  });
+
+  const {
+    todayReminderCount,
+    overdueReminderCount,
+    next3TodayReminders,
+  } = useMemo(() => {
+    const rows = Array.isArray(dashboardReminderRows) ? dashboardReminderRows : [];
+    const completedOccurrenceSet = buildCompletedReminderOccurrenceSet(dashboardReminderOccurrenceRows);
+    const occurrenceRows = expandRemindersOccurrencesInWindow(rows, {
+      windowStartKey: reminderWindowStartKey,
+      windowEndKey: todayKey,
+      maxOccurrences: 1200,
+      completedOccurrenceSet,
+    });
+
+    const todayRows = occurrenceRows.filter((occurrence) => (
+      !occurrence.is_completed
+      && isDateKeyWithinRange(
+        todayKey,
+        occurrence.occurrence_start_date,
+        occurrence.occurrence_end_date
+      )
+    ));
+
+    const overdueRows = occurrenceRows.filter(
+      (occurrence) => !occurrence.is_completed && occurrence.occurrence_end_date < todayKey
+    );
+
+    const sortedToday = [...todayRows].sort((left, right) => {
+      const leftScore = REMINDER_PRIORITY_SCORE[normalizeLowerText(left?.priority)] || 0;
+      const rightScore = REMINDER_PRIORITY_SCORE[normalizeLowerText(right?.priority)] || 0;
+      if (leftScore !== rightScore) return rightScore - leftScore;
+
+      const leftCreatedAt = new Date(left?.created_at || 0).getTime();
+      const rightCreatedAt = new Date(right?.created_at || 0).getTime();
+      return rightCreatedAt - leftCreatedAt;
+    });
+
+    return {
+      todayReminderCount: sortedToday.length,
+      overdueReminderCount: overdueRows.length,
+      next3TodayReminders: sortedToday.slice(0, 3),
+    };
+  }, [dashboardReminderOccurrenceRows, dashboardReminderRows, reminderWindowStartKey, todayKey]);
+
+  const reminderHeroLine = useMemo(() => {
+    if (isLoadingDashboardReminders || isLoadingDashboardReminderOccurrences) {
+      return 'Menyemak reminder hari ini...';
+    }
+    if (overdueReminderCount > 0) {
+      return `🔴 ${overdueReminderCount} reminder lewat • ${todayReminderCount} untuk hari ini`;
+    }
+    if (todayReminderCount > 0) {
+      return `🟠 ${todayReminderCount} reminder untuk hari ini`;
+    }
+    return '✅ Tiada reminder hari ini';
+  }, [isLoadingDashboardReminderOccurrences, isLoadingDashboardReminders, overdueReminderCount, todayReminderCount]);
+
+  const toggleDashboardReminderMutation = useMutation({
+    mutationFn: async ({ reminder, nextCompleted }) => {
+      const reminderId = resolveReminderSourceId(reminder);
+      if (!reminderId) throw new Error('Reminder tidak sah.');
+
+      const isRecurringToggle = isReminderRecurring(reminder) && Boolean(reminder?.occurrence_start_date);
+      if (isRecurringToggle) {
+        if (nextCompleted) {
+          const { error } = await supabase
+            .from('reminder_occurrences')
+            .upsert([{
+              user_id: userId,
+              reminder_id: reminderId,
+              occurrence_date: reminder.occurrence_start_date,
+              status: 'completed',
+            }], { onConflict: 'user_id,reminder_id,occurrence_date' });
+
+          if (error) throw error;
+          return;
+        }
+
+        const { error } = await supabase
+          .from('reminder_occurrences')
+          .delete()
+          .eq('user_id', userId)
+          .eq('reminder_id', reminderId)
+          .eq('occurrence_date', reminder.occurrence_start_date);
+
+        if (error) throw error;
+        return;
+      }
+
+      const { error } = await supabase
+        .from('reminders')
+        .update({ is_completed: nextCompleted, updated_at: new Date().toISOString() })
+        .eq('id', reminderId)
+        .eq('user_id', userId);
+
+      if (error) throw error;
+    },
+    onMutate: async ({ reminder, nextCompleted }) => {
+      const reminderId = resolveReminderSourceId(reminder);
+      const isRecurringToggle = isReminderRecurring(reminder) && Boolean(reminder?.occurrence_start_date);
+
+      await queryClient.cancelQueries({ queryKey: dashboardReminderQueryKey });
+      await queryClient.cancelQueries({ queryKey: dashboardReminderOccurrenceQueryKey });
+      const previousRows = queryClient.getQueryData(dashboardReminderQueryKey);
+      const previousOccurrenceRows = queryClient.getQueryData(dashboardReminderOccurrenceQueryKey);
+
+      if (isRecurringToggle && reminderId) {
+        queryClient.setQueryData(dashboardReminderOccurrenceQueryKey, (currentRows) => {
+          const rows = Array.isArray(currentRows) ? [...currentRows] : [];
+          const existingIndex = rows.findIndex((row) => (
+            String(row?.reminder_id) === String(reminderId)
+            && String(row?.occurrence_date) === String(reminder.occurrence_start_date)
+            && String(row?.status || '').toLowerCase() === 'completed'
+          ));
+
+          if (nextCompleted) {
+            if (existingIndex === -1) {
+              rows.unshift({
+                id: `optimistic-${reminderId}-${reminder.occurrence_start_date}`,
+                reminder_id: reminderId,
+                occurrence_date: reminder.occurrence_start_date,
+                status: 'completed',
+                created_at: new Date().toISOString(),
+              });
+            }
+            return rows;
+          }
+
+          if (existingIndex >= 0) {
+            rows.splice(existingIndex, 1);
+          }
+          return rows;
+        });
+      } else if (reminderId) {
+        queryClient.setQueryData(dashboardReminderQueryKey, (currentRows) => {
+          if (!Array.isArray(currentRows)) return [];
+          if (nextCompleted === true) {
+            return currentRows.filter((row) => row.id !== reminderId);
+          }
+          return currentRows.map((row) => (
+            row.id === reminderId
+              ? { ...row, is_completed: nextCompleted, updated_at: new Date().toISOString() }
+              : row
+          ));
+        });
+      }
+
+      return { previousRows, previousOccurrenceRows };
+    },
+    onError: (error, _variables, context) => {
+      if (context?.previousRows) {
+        queryClient.setQueryData(dashboardReminderQueryKey, context.previousRows);
+      }
+      if (context?.previousOccurrenceRows) {
+        queryClient.setQueryData(dashboardReminderOccurrenceQueryKey, context.previousOccurrenceRows);
+      }
+      toast({
+        title: 'Gagal kemas kini reminder',
+        description: error?.message || 'Sila cuba lagi.',
+        variant: 'destructive',
+      });
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['dashboard-reminders-today', userId] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-reminder-occurrences', userId] });
+      queryClient.invalidateQueries({ queryKey: ['reminders', userId] });
+      queryClient.invalidateQueries({ queryKey: ['reminder-occurrences', userId] });
+    },
+  });
+
+  const handleToggleReminderFromDashboard = (reminder, nextCompleted) => {
+    if (nextCompleted !== true || !userId) return;
+    toggleDashboardReminderMutation.mutate({ reminder, nextCompleted: true });
+  };
 
   // Fetch invoice items (all sales records) instead of items table
   const { data: invoiceItems = [], isLoading: isLoadingSales } = useQuery({
@@ -1078,8 +1781,12 @@ const Dashboard = ({ items, isInventoryLoading = false }) => {
           item_name,
           items(id, name, category, cost_price, user_id),
           invoice_item_returns(returned_quantity, refund_amount, returned_unit_price, returned_cost_price),
-          invoices(*)
-        `);
+          invoices(
+            *,
+            invoice_fees(id, amount, amount_override)
+          )
+        `)
+        .order('created_at', { ascending: false });
 
       if (error) {
         console.error('[Dashboard] Error fetching invoice items:', error);
@@ -1127,6 +1834,27 @@ const Dashboard = ({ items, isInventoryLoading = false }) => {
       }));
     },
     enabled: !!userId
+  });
+
+  const { data: dashboardCategories = [] } = useQuery({
+    queryKey: ['dashboard-categories', userId],
+    queryFn: async () => {
+      if (!userId) return [];
+
+      const { data, error } = await supabase
+        .from('categories')
+        .select('name, color')
+        .eq('user_id', userId);
+
+      if (error) {
+        console.error('[Dashboard] Error fetching categories:', error);
+        return [];
+      }
+
+      return data || [];
+    },
+    enabled: !!userId,
+    staleTime: 5 * 60 * 1000,
   });
 
   // Fetch Business wallet IDs
@@ -1305,11 +2033,11 @@ const Dashboard = ({ items, isInventoryLoading = false }) => {
       return parsed >= cutoff;
     });
 
-    const soldQty30d = rows.reduce((sum, sale) => sum + getNetSoldQuantityForSale(sale), 0);
+    const soldQty30d = rows.reduce((sum, sale) => sum + getSaleLineNetQuantity(sale), 0);
 
     const categorySales30d = rows.reduce((acc, sale) => {
       const category = sale.is_manual ? 'Manual' : (sale.items?.category || 'Lain-lain');
-      acc[category] = (acc[category] || 0) + getNetItemRevenueForSale(sale);
+      acc[category] = (acc[category] || 0) + getSaleLineItemSubtotal(sale);
       return acc;
     }, {});
 
@@ -1400,154 +2128,34 @@ const Dashboard = ({ items, isInventoryLoading = false }) => {
 
   const filteredSales = getFilteredSales();
 
-  // Legacy safety: some old invoice lines may not have snapshot cost_price populated.
-  // For non-manual items, fallback to item.cost_price when line cost is 0/null.
-  const getEffectiveCostPrice = (sale) => {
-    const lineCostPrice = parseFloat(sale?.cost_price);
-    const hasLineCost = Number.isFinite(lineCostPrice) && lineCostPrice > 0;
-    if (hasLineCost) return lineCostPrice;
-
-    if (!sale?.is_manual) {
-      const itemFallbackCost = parseFloat(sale?.items?.cost_price);
-      if (Number.isFinite(itemFallbackCost) && itemFallbackCost >= 0) {
-        return itemFallbackCost;
-      }
-    }
-
-    if (Number.isFinite(lineCostPrice) && lineCostPrice >= 0) {
-      return lineCostPrice;
-    }
-
-    return 0;
-  };
-
-  function getInvoiceItemReturnEntries(sale) {
-    return Array.isArray(sale?.invoice_item_returns) ? sale.invoice_item_returns : [];
-  }
-
-  function getReturnedQuantityForSale(sale) {
-    return getInvoiceItemReturnEntries(sale).reduce((sum, entry) => {
-      const qty = parseFloat(entry?.returned_quantity);
-      return sum + (Number.isFinite(qty) && qty > 0 ? qty : 0);
-    }, 0);
-  }
-
-  function getReturnedRefundTotalForSale(sale) {
-    return getInvoiceItemReturnEntries(sale).reduce((sum, entry) => {
-      const amount = parseFloat(entry?.refund_amount);
-      return sum + (Number.isFinite(amount) && amount > 0 ? amount : 0);
-    }, 0);
-  }
-
-  function getNetSoldQuantityForSale(sale) {
-    const soldQty = Math.max(parseFloat(sale?.quantity) || 0, 0);
-    const returnedQty = getReturnedQuantityForSale(sale);
-    return Math.max(soldQty - returnedQty, 0);
-  }
-
-  function getNetItemRevenueForSale(sale) {
-    const lineRevenue = parseFloat(sale?.line_total);
-    const baseRevenue = Number.isFinite(lineRevenue) ? lineRevenue : 0;
-    return baseRevenue - getReturnedRefundTotalForSale(sale);
-  }
-
-  // Calculate stats from invoice_items
-  const totalCost = filteredSales.reduce((sum, sale) => {
-    const costPrice = getEffectiveCostPrice(sale);
-    const cost = costPrice * getNetSoldQuantityForSale(sale);
-    return sum + cost;
-  }, 0);
-
-  const shippingByInvoice = filteredSales.reduce((acc, sale) => {
-    const invoice = sale?.invoices;
-    if (!invoice?.id || acc.has(invoice.id)) return acc;
-
-    const paymentMode = resolveCourierPaymentModeForInvoice(invoice);
-    const isPlatformMode = paymentMode === COURIER_PAYMENT_MODES.PLATFORM;
-    const shippingCharged = isPlatformMode ? 0 : Math.max(parseFloat(invoice.shipping_charged) || 0, 0);
-    const shipment = invoice.shipment || null;
-    const shippingCost = isPlatformMode ? 0 : Math.max(parseFloat(shipment?.shipping_cost) || 0, 0);
-    const isCourierPaid = isPlatformMode ? true : Boolean(shipment?.courier_paid);
-    const shippingCostPaid = isCourierPaid ? shippingCost : 0;
-
-    acc.set(invoice.id, {
-      shippingCharged,
-      shippingCostPaid,
-      isCourierPaid,
-    });
-
-    return acc;
-  }, new Map());
-
-  const totalShippingCharged = Array.from(shippingByInvoice.values()).reduce((sum, value) => sum + value.shippingCharged, 0);
-  const totalShippingCost = Array.from(shippingByInvoice.values()).reduce((sum, value) => sum + value.shippingCostPaid, 0);
-  const totalShippingProfit = totalShippingCharged - totalShippingCost;
-  const shippingPendingCount = Array.from(shippingByInvoice.values()).filter(
-    (value) => value.shippingCharged > 0 && !value.isCourierPaid
-  ).length;
-
-  const channelFeeByInvoice = filteredSales.reduce((acc, sale) => {
-    const invoice = sale?.invoices;
-    if (!invoice?.id || acc.has(invoice.id)) return acc;
-    acc.set(invoice.id, Math.max(parseFloat(invoice.channel_fee_amount) || 0, 0));
-    return acc;
-  }, new Map());
-  const totalChannelFees = Array.from(channelFeeByInvoice.values()).reduce((sum, fee) => sum + fee, 0);
-
-  const totalItemProfit = filteredSales.reduce((sum, sale) => {
-    const revenue = getNetItemRevenueForSale(sale);
-    const costPrice = getEffectiveCostPrice(sale);
-    const cost = costPrice * getNetSoldQuantityForSale(sale);
-    return sum + (revenue - cost);
-  }, 0) - totalChannelFees;
-
-  const revenueByInvoice = filteredSales.reduce((acc, sale) => {
-    const invoiceId = sale?.invoices?.id;
-    if (!invoiceId) return acc;
-    const revenue = getNetItemRevenueForSale(sale);
-    acc.set(invoiceId, (acc.get(invoiceId) || 0) + revenue);
-    return acc;
-  }, new Map());
-
-  const invoiceFinancialById = filteredSales.reduce((acc, sale) => {
-    const invoice = sale?.invoices;
-    const invoiceId = invoice?.id;
-    if (!invoiceId || acc.has(invoiceId)) return acc;
-
-    const itemRevenue = revenueByInvoice.get(invoiceId) || 0;
-    const shippingCharged = shippingByInvoice.get(invoiceId)?.shippingCharged || 0;
-    const fallbackOriginal = itemRevenue + shippingCharged;
-
-    acc.set(invoiceId, getInvoiceFinancialSummary(invoice, fallbackOriginal));
-    return acc;
-  }, new Map());
-
-  const totalFinalRevenue = Array.from(invoiceFinancialById.values()).reduce(
-    (sum, values) => sum + (values.finalTotal || 0),
-    0
+  // Source-of-truth financial aggregation shared with Sales page.
+  const financialMetrics = useMemo(
+    () => buildFinancialMetricsFromSalesLines(filteredSales),
+    [filteredSales]
   );
-  const totalAdjustments = Array.from(invoiceFinancialById.values()).reduce(
-    (sum, values) => sum + (values.adjustmentTotal || 0),
-    0
-  );
+
+  const totalCost = financialMetrics.itemCostTotal;
+  const shippingByInvoice = financialMetrics.invoiceShippingById;
+  const platformFeeByInvoice = financialMetrics.invoicePlatformFeeById;
+  const revenueByInvoice = financialMetrics.invoiceItemSubtotalById;
+  const invoiceFinancialById = financialMetrics.invoiceCollectedById;
 
   const filteredStats = {
-    totalRevenue: totalFinalRevenue,
-    totalCost: totalCost,
+    totalRevenue: financialMetrics.revenueItem,
+    totalCollected: financialMetrics.totalCollected,
+    totalCost,
     totalExpenses: parseFloat(businessExpenses.total) || 0,
-    totalShippingCharged: totalShippingCharged,
-    totalShippingCost: totalShippingCost,
-    totalShippingProfit: totalShippingProfit,
-    shippingPendingCount: shippingPendingCount,
+    totalShippingCharged: financialMetrics.shippingCharged,
+    totalShippingCost: financialMetrics.shippingCost,
+    totalShippingProfit: financialMetrics.shippingProfit,
+    shippingPendingCount: financialMetrics.shippingPendingCount,
     totalRefunds: parseFloat(totalRefunds) || 0,
-    totalAdjustments: totalAdjustments,
-    totalChannelFees: totalChannelFees,
-    totalItemProfit: totalItemProfit,
-    totalProfit: totalItemProfit + totalShippingProfit - totalAdjustments,
-    soldItemsCount: filteredSales.length,
-    totalQuantitySold: filteredSales.reduce((sum, sale) => {
-      return sum + getNetSoldQuantityForSale(sale);
-    }, 0)
+    totalAdjustments: financialMetrics.goodwillAdjustments,
+    totalPlatformFees: financialMetrics.platformFeeTotal,
+    totalItemProfit: financialMetrics.itemProfit,
+    totalProfit: financialMetrics.netProfit,
+    soldItemsCount: financialMetrics.soldInvoiceCount,
+    totalQuantitySold: financialMetrics.totalQuantitySold,
   };
 
   const totalAvailableUnits = items.reduce((sum, item) => {
@@ -1562,30 +2170,71 @@ const Dashboard = ({ items, isInventoryLoading = false }) => {
     ? (filteredStats.totalProfit / filteredStats.totalRevenue) * 100
     : 0;
   const netProfitPercentText = `${netProfitPercentage >= 0 ? 'Untung' : 'Rugi'} ${Math.abs(netProfitPercentage).toFixed(1)}%`;
+  const itemProfitBeforePlatform = filteredStats.totalItemProfit;
 
-  // Calculate platform stats from invoice platform field
-  const platformStats = filteredSales.reduce((acc, sale) => {
-    if (getNetSoldQuantityForSale(sale) <= 0) return acc;
-    const platform = sale.invoices?.platform || 'Manual';
-    acc[platform] = (acc[platform] || 0) + 1;
-    return acc;
-  }, {});
+  const categoryColorMap = useMemo(() => {
+    const map = new Map();
 
-  console.log('[Dashboard] Platform stats calculated:', { 
-    filteredSalesCount: filteredSales.length, 
-    platformStats,
-    platformBarData: Object.entries(platformStats).map(([name, value]) => ({ name, jumlah: value }))
-  });
+    (dashboardCategories || []).forEach((category) => {
+      const normalizedName = normalizeLowerText(category?.name);
+      const normalizedColor = normalizeHexColor(category?.color);
 
-  const platformBarData = Object.entries(platformStats).map(([name, value]) => ({ name, jumlah: value }));
+      if (!normalizedName || !normalizedColor) return;
+      map.set(normalizedName, normalizedColor);
+    });
+
+    return map;
+  }, [dashboardCategories]);
+
+  const categoryPalette = useMemo(() => {
+    if (!(categoryColorMap instanceof Map)) return [];
+    return Array.from(categoryColorMap.values());
+  }, [categoryColorMap]);
+
+  const { platformBarData, categoryBarData } = useMemo(() => {
+    const platformStats = {};
+    const categoryStats = {};
+
+    filteredSales.forEach((sale) => {
+      if (getSaleLineNetQuantity(sale) <= 0) return;
+
+      const rawPlatformName = normalizeText(sale.invoices?.platform);
+      const looksLikeFeeAggregateLabel = /^\d+\s+caj\s+platform$/i.test(rawPlatformName);
+      const platformName = looksLikeFeeAggregateLabel ? 'Manual' : (rawPlatformName || 'Manual');
+      platformStats[platformName] = (platformStats[platformName] || 0) + 1;
+
+      const categoryName = sale.is_manual
+        ? 'Manual'
+        : (normalizeText(sale.items?.category) || 'Lain-lain');
+      categoryStats[categoryName] = (categoryStats[categoryName] || 0) + 1;
+    });
+
+    const toBarData = (stats) => (
+      Object.entries(stats)
+        .map(([name, jumlah]) => ({ name, jumlah }))
+        .sort((a, b) => {
+          if (b.jumlah !== a.jumlah) return b.jumlah - a.jumlah;
+          return a.name.localeCompare(b.name, 'ms', { sensitivity: 'base' });
+        })
+    );
+
+    return {
+      platformBarData: toBarData(platformStats),
+      categoryBarData: toBarData(categoryStats),
+    };
+  }, [filteredSales]);
   
   const defaultColors = ['#3b82f6', '#10b981', '#f97316', '#a855f7', '#ef4444', '#6366f1', '#f43f5e'];
 
   const recentSales = filteredSales
-    .filter((sale) => getNetSoldQuantityForSale(sale) > 0)
+    .filter((sale) => {
+      const netQty = getSaleLineNetQuantity(sale);
+      const netRevenue = getSaleLineItemSubtotal(sale);
+      return netQty > 0 || Math.abs(netRevenue) > 0.0001;
+    })
     .sort((a, b) => {
-      const aTime = a.invoices?.updated_at || a.invoices?.created_at || a.invoices?.invoice_date || 0;
-      const bTime = b.invoices?.updated_at || b.invoices?.created_at || b.invoices?.invoice_date || 0;
+      const aTime = a.invoices?.invoice_date || a.invoices?.created_at || 0;
+      const bTime = b.invoices?.invoice_date || b.invoices?.created_at || 0;
       return new Date(bTime) - new Date(aTime);
     })
     .slice(0, 5);
@@ -1598,7 +2247,7 @@ const Dashboard = ({ items, isInventoryLoading = false }) => {
   const riskStockCount = nextStepMetrics.riskStockCount || 0;
   const clearanceCount = nextStepMetrics.clearanceCount || 0;
 
-  const hasNoSalesInRange = filteredSales.length === 0;
+  const hasNoSalesInRange = filteredStats.soldItemsCount === 0;
 
   const heroSummaryText = useMemo(() => {
     if (hasNoSalesInRange) {
@@ -1612,13 +2261,49 @@ const Dashboard = ({ items, isInventoryLoading = false }) => {
     return `Revenue tempoh ini ${formatRM(filteredStats.totalRevenue)} dan profit ${formatRM(filteredStats.totalProfit)}.`;
   }, [filteredStats.totalProfit, filteredStats.totalRevenue, hasNoSalesInRange, pendingShippingCount, riskStockCount]);
 
-  const priorityLine = useMemo(
-    () => `Hari ini: ${filteredStats.soldItemsCount} jualan | ${pendingShippingCount || 0} perlu pos | ${riskStockCount || 0} stok risiko`,
-    [filteredStats.soldItemsCount, pendingShippingCount, riskStockCount]
-  );
+  const pendingShippingUrgency = getUrgency('pending_shipping', pendingShippingCount);
+  const riskStockUrgency = getUrgency('risk_stock', riskStockCount);
+  const clearanceUrgency = getUrgency('clearance_candidate', clearanceCount);
+  const reminderStepConfig = useMemo(() => {
+    if (isLoadingDashboardReminders || isLoadingDashboardReminderOccurrences) {
+      return {
+        description: 'Memuatkan status reminder...',
+        value: '...',
+        valueTone: 'neutral',
+        valueAriaLabel: 'Semak Reminder, data masih dimuatkan',
+      };
+    }
 
-  const riskCountDisplay = isInventoryLoading ? '—' : `${riskStockCount}`;
-  const clearanceCountDisplay = isInventoryLoading ? '—' : `${clearanceCount}`;
+    if (overdueReminderCount > 0) {
+      return {
+        description: 'Ada reminder lewat yang perlu tindakan.',
+        valueCount: `${overdueReminderCount}`,
+        valueLabel: 'lewat',
+        valueTone: 'critical',
+        valueAriaLabel: `Semak Reminder, ${overdueReminderCount} lewat`,
+      };
+    }
+
+    if (todayReminderCount > 0) {
+      return {
+        description: 'Semak tugasan untuk hari ini.',
+        valueCount: `${todayReminderCount}`,
+        valueLabel: 'hari ini',
+        valueTone: 'warning',
+        valueAriaLabel: `Semak Reminder, ${todayReminderCount} hari ini`,
+      };
+    }
+
+    return {
+      description: 'Tiada reminder perlu tindakan sekarang.',
+      value: 'Tiada',
+      valueTone: 'neutral',
+      valueAriaLabel: 'Semak Reminder, tiada reminder aktif',
+    };
+  }, [isLoadingDashboardReminderOccurrences, isLoadingDashboardReminders, overdueReminderCount, todayReminderCount]);
+
+  const riskCountDisplay = isInventoryLoading ? '-' : `${riskStockCount}`;
+  const clearanceCountDisplay = isInventoryLoading ? '-' : `${clearanceCount}`;
 
   const dashboardSteps = useMemo(() => ([
     {
@@ -1629,32 +2314,70 @@ const Dashboard = ({ items, isInventoryLoading = false }) => {
       valueTone: 'primary',
     },
     {
+      label: 'Semak Reminder',
+      description: reminderStepConfig.description,
+      onClick: () => setIsReminderPreviewOpen(true),
+      to: '/reminders',
+      value: reminderStepConfig.value,
+      valueCount: reminderStepConfig.valueCount,
+      valueLabel: reminderStepConfig.valueLabel,
+      valueAriaLabel: reminderStepConfig.valueAriaLabel,
+      valueTone: reminderStepConfig.valueTone,
+    },
+    {
       label: 'Semak Stok Risiko',
       description: 'Item aging 60+ hari.',
       to: '/inventory?filter=risk',
-      value: riskCountDisplay,
-      valueTone: !isInventoryLoading && riskStockCount > 0 ? 'warning' : 'neutral',
+      valueCount: riskCountDisplay,
+      valueLabel: isInventoryLoading ? '' : riskStockUrgency.label,
+      valueAriaLabel: isInventoryLoading
+        ? 'Semak Stok Risiko, data belum dimuatkan'
+        : `Semak Stok Risiko, ${riskStockCount}, ${riskStockUrgency.label.toLowerCase()}`,
+      valueTone: isInventoryLoading ? 'neutral' : riskStockUrgency.variant,
       tooltip: 'Stok melebihi 60 hari tanpa jualan.',
     },
     {
       label: 'Cadang Clearance',
       description: 'Calon item untuk jualan pelepasan.',
       to: '/inventory?filter=aging_60',
-      value: clearanceCountDisplay,
-      valueTone: !isInventoryLoading && clearanceCount > 0 ? 'warning' : 'neutral',
+      valueCount: clearanceCountDisplay,
+      valueLabel: isInventoryLoading ? '' : clearanceUrgency.label,
+      valueAriaLabel: isInventoryLoading
+        ? 'Cadang Clearance, data belum dimuatkan'
+        : `Cadang Clearance, ${clearanceCount}, ${clearanceUrgency.label.toLowerCase()}`,
+      valueTone: isInventoryLoading ? 'neutral' : clearanceUrgency.variant,
     },
     {
       label: 'Semak Penghantaran',
       description: 'Lihat order yang belum dipos.',
       to: '/invoices?status=paid&shipping_state=pending',
-      value: pendingShippingCount > 0 ? `${pendingShippingCount}` : 'Tiada',
-      valueTone: pendingShippingCount > 0 ? 'warning' : 'neutral',
+      valueCount: `${pendingShippingCount}`,
+      valueLabel: pendingShippingUrgency.label,
+      valueAriaLabel: `Semak Penghantaran, ${pendingShippingCount}, ${pendingShippingUrgency.label.toLowerCase()}`,
+      valueTone: pendingShippingUrgency.variant,
     },
-  ]), [clearanceCount, clearanceCountDisplay, isInventoryLoading, pendingShippingCount, riskCountDisplay, riskStockCount]);
+  ]), [
+    clearanceCount,
+    clearanceCountDisplay,
+    clearanceUrgency.label,
+    clearanceUrgency.variant,
+    isInventoryLoading,
+    reminderStepConfig.description,
+    reminderStepConfig.value,
+    reminderStepConfig.valueAriaLabel,
+    reminderStepConfig.valueCount,
+    reminderStepConfig.valueLabel,
+    reminderStepConfig.valueTone,
+    pendingShippingCount,
+    pendingShippingUrgency.label,
+    pendingShippingUrgency.variant,
+    riskCountDisplay,
+    riskStockCount,
+    riskStockUrgency.label,
+    riskStockUrgency.variant,
+  ]);
 
   const isDark = theme === 'dark';
-  const tickColor = isDark ? '#9ca3af' : '#6b7281';
-  const gridColor = isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.05)';
   const tooltipBg = isDark ? '#1f2937' : '#ffffff';
   const tooltipBorder = isDark ? '#374151' : '#e5e7eb';
   const tooltipTextColor = isDark ? '#f3f4f6' : '#111827';
@@ -1665,7 +2388,7 @@ const Dashboard = ({ items, isInventoryLoading = false }) => {
         <DashboardHero
           userDisplayName={userDisplayName}
           summaryText={heroSummaryText}
-          priorityLine={priorityLine}
+          priorityLine={reminderHeroLine}
         />
 
         <DashboardKpiGrid
@@ -1674,7 +2397,46 @@ const Dashboard = ({ items, isInventoryLoading = false }) => {
           businessWalletBalance={businessWalletBalance}
           totalUnitStock={totalUnitStock}
           soldUnitMovementPercent={soldUnitMovementPercent}
+          onOpenProfitDetail={() => setIsNetProfitDetailOpen(true)}
         />
+
+        <AlertDialog open={isNetProfitDetailOpen} onOpenChange={setIsNetProfitDetailOpen}>
+          <AlertDialogContent className="max-w-md border-primary/20 bg-white">
+            <AlertDialogHeader>
+              <AlertDialogTitle className="text-primary">Butiran Untung Bersih</AlertDialogTitle>
+              <AlertDialogDescription>
+                Formula: Untung Item + Untung Pos - Caj Platform - Pelarasan
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-sm">
+                <span className="font-medium text-slate-700">Untung Item</span>
+                <span className="font-semibold text-slate-900">{formatRM(itemProfitBeforePlatform)}</span>
+              </div>
+              <div className="flex items-center justify-between rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-sm">
+                <span className="font-medium text-slate-700">Caj Platform</span>
+                <span className="font-semibold text-slate-900">{formatRM(filteredStats.totalPlatformFees)}</span>
+              </div>
+              <div className="flex items-center justify-between rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-sm">
+                <span className="font-medium text-slate-700">Pelarasan</span>
+                <span className="font-semibold text-slate-900">{formatRM(filteredStats.totalAdjustments)}</span>
+              </div>
+              <div className="flex items-center justify-between rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-sm">
+                <span className="font-medium text-slate-700">Untung Pos</span>
+                <span className="font-semibold text-slate-900">{formatRM(filteredStats.totalShippingProfit)}</span>
+              </div>
+              <div className="mt-1 flex items-center justify-between rounded-lg border border-primary/30 bg-gradient-to-r from-cyan-50 to-teal-50 px-3 py-2.5 text-sm">
+                <span className="font-semibold text-primary">Untung Bersih</span>
+                <span className="font-bold text-primary">{formatRM(filteredStats.totalProfit)}</span>
+              </div>
+            </div>
+            <AlertDialogFooter>
+              <AlertDialogAction className="border-0 text-white brand-gradient brand-gradient-hover">
+                Tutup
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
 
         {hasNoSalesInRange ? (
           <GlassCard className="border-indigo-100/80">
@@ -1686,6 +2448,15 @@ const Dashboard = ({ items, isInventoryLoading = false }) => {
 
         <DashboardNextSteps steps={dashboardSteps} />
 
+        <DashboardReminderPreviewModal
+          open={isReminderPreviewOpen}
+          onClose={() => setIsReminderPreviewOpen(false)}
+          todayReminders={next3TodayReminders}
+          overdueCount={overdueReminderCount}
+          isToggling={toggleDashboardReminderMutation.isPending}
+          onToggleCompleted={handleToggleReminderFromDashboard}
+        />
+
         <DashboardFiltersBar
           dateRange={dateRange}
           setDateRange={setDateRange}
@@ -1696,17 +2467,16 @@ const Dashboard = ({ items, isInventoryLoading = false }) => {
         <DashboardOperations
           isLoadingSales={isLoadingSales}
           recentSales={recentSales}
-          getEffectiveCostPrice={getEffectiveCostPrice}
           revenueByInvoice={revenueByInvoice}
           invoiceFinancialById={invoiceFinancialById}
-          channelFeeByInvoice={channelFeeByInvoice}
+          platformFeeByInvoice={platformFeeByInvoice}
           shippingByInvoice={shippingByInvoice}
           platformBarData={platformBarData}
+          categoryBarData={categoryBarData}
           filteredSalesCount={filteredSales.length}
           defaultColors={defaultColors}
-          isDark={isDark}
-          tickColor={tickColor}
-          gridColor={gridColor}
+          categoryColorMap={categoryColorMap}
+          categoryPalette={categoryPalette}
           tooltipBg={tooltipBg}
           tooltipBorder={tooltipBorder}
           tooltipTextColor={tooltipTextColor}
@@ -1725,10 +2495,19 @@ const Dashboard = ({ items, isInventoryLoading = false }) => {
           isDeadCapitalTooltipOpen={isDeadCapitalTooltipOpen}
           setIsDeadCapitalTooltipOpen={setIsDeadCapitalTooltipOpen}
         />
+
+        {import.meta.env.DEV ? (
+          <DashboardFinancialDebugPanel
+            isOpen={isFinancialDebugOpen}
+            onToggle={() => setIsFinancialDebugOpen((prev) => !prev)}
+            metrics={financialMetrics}
+          />
+        ) : null}
       </div>
     </UiTooltipProvider>
   );
 };
 
 export default Dashboard;
+
 

@@ -9,6 +9,7 @@ import AddItemForm from '@/components/AddItemForm';
 import LoginPage from '@/components/LoginPage';
 import SettingsPage from '@/components/SettingsPage';
 import SalesPage from '@/components/SalesPage';
+import RemindersPage from '@/components/reminders/RemindersPage';
 import ClientsPage from '@/components/clients/ClientsPage';
 import ClientDetailPage from '@/components/clients/ClientDetailPage';
 import WalletPage from '@/components/wallet/WalletPage';
@@ -1272,7 +1273,7 @@ function App() {
   const pageTitle = {
     '/': 'Papan Pemuka', '/inventory': 'Inventori', '/sales': 'Jualan',
     '/invoices': 'Invois', '/catalogs': 'Katalog', '/inventory/catalogs': 'Katalog',
-    '/clients': 'Pelanggan', '/wallet': 'Wallet', '/settings': 'Tetapan'
+    '/clients': 'Pelanggan', '/wallet': 'Wallet', '/settings': 'Tetapan', '/reminders': 'Reminder'
   }[location.pathname] || 'Papan Pemuka';
 
   return (
@@ -1289,7 +1290,18 @@ function App() {
             transition={{ duration: 0.2 }}
           >
             <Routes>
-              <Route path="/" element={<Dashboard items={items} categories={categories} isInventoryLoading={isLoadingItems} />} />
+              <Route
+                path="/"
+                element={
+                  <Dashboard
+                    items={items}
+                    categories={categories}
+                    user={user}
+                    profile={profile}
+                    isInventoryLoading={isLoadingItems}
+                  />
+                }
+              />
               <Route path="/inventory" element={
                 <div className="space-y-6">
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1312,8 +1324,13 @@ function App() {
                         <div className="flex flex-col gap-2">
                           <label className="text-xs font-medium text-muted-foreground">Cari Item</label>
                           <div className="relative">
-                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground w-4 h-4" />
-                            <Input placeholder="Cari nama, SKU, kategori atau lokasi..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="pl-10 h-10" />
+                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-cyan-500" />
+                            <Input
+                              placeholder="Cari nama, SKU, kategori atau lokasi..."
+                              value={searchTerm}
+                              onChange={(e) => setSearchTerm(e.target.value)}
+                              className="h-10 rounded-full border-cyan-300 bg-white pl-10 pr-4 font-medium text-cyan-700 placeholder:text-slate-400 focus-visible:ring-cyan-300"
+                            />
                           </div>
                         </div>
                         <div className="flex flex-col gap-2">
@@ -1380,6 +1397,7 @@ function App() {
                 </div>
               } />
               <Route path="/sales" element={<SalesPage items={items} />} />
+              <Route path="/reminders" element={<RemindersPage user={user} />} />
               <Route path="/invoices" element={<InvoiceListPage />} />
               <Route path="/invoices/create" element={<InvoiceFormPage />} />
               <Route path="/invoices/:invoiceId" element={<InvoiceDetailsPage />} />

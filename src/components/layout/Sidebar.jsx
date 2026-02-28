@@ -2,7 +2,7 @@ import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { Home, Package, Receipt, Settings, Users, Wallet, FileText, Link2 } from 'lucide-react';
+import { Home, Package, Receipt, Settings, Users, Wallet, FileText, Link2, Bell } from 'lucide-react';
 
 const Sidebar = ({ isSidebarOpen, setSidebarOpen }) => {
   const location = useLocation();
@@ -22,6 +22,7 @@ const Sidebar = ({ isSidebarOpen, setSidebarOpen }) => {
       ],
     },
     { path: '/sales', label: 'Jualan', icon: <Receipt className="w-5 h-5" /> },
+    { path: '/reminders', label: 'Reminder', icon: <Bell className="w-5 h-5" /> },
     { path: '/invoices', label: 'Invois', icon: <FileText className="w-5 h-5" /> },
     { path: '/clients', label: 'Pelanggan', icon: <Users className="w-5 h-5" /> },
     { path: '/wallet', label: 'Wallet', icon: <Wallet className="w-5 h-5" /> },
@@ -47,10 +48,10 @@ const Sidebar = ({ isSidebarOpen, setSidebarOpen }) => {
                   variant="ghost"
                   onClick={() => setSidebarOpen(false)}
                   className={cn(
-                    "w-full justify-start gap-3 text-base h-12 rounded-lg",
+                    "h-12 w-full justify-start gap-3 rounded-lg border border-transparent text-base transition-colors",
                     isActive(item.path)
-                      ? "bg-primary/10 text-primary hover:bg-primary/10 font-semibold"
-                      : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+                      ? "border-primary/20 bg-primary/10 font-semibold text-primary hover:bg-primary/15 hover:text-cyan-700"
+                      : "text-muted-foreground hover:border-primary/40 hover:bg-white hover:text-primary"
                   )}
                 >
                   <Link to={item.path}>
@@ -68,10 +69,10 @@ const Sidebar = ({ isSidebarOpen, setSidebarOpen }) => {
                         variant="ghost"
                         onClick={() => setSidebarOpen(false)}
                         className={cn(
-                          "h-10 w-full justify-start gap-2 rounded-lg text-sm",
+                          "h-10 w-full justify-start gap-2 rounded-lg border border-transparent text-sm transition-colors",
                           isActive(child.path)
-                            ? "bg-primary/10 text-primary hover:bg-primary/10 font-semibold"
-                            : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+                            ? "border-primary/20 bg-primary/10 font-semibold text-primary hover:bg-primary/15 hover:text-cyan-700"
+                            : "text-muted-foreground hover:border-primary/40 hover:bg-white hover:text-primary"
                         )}
                       >
                         <Link to={child.path}>

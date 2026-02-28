@@ -6,11 +6,22 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
 import { Calendar, ChevronLeft, ChevronRight, CheckCircle, XCircle, Download, FileText, Loader2, Wallet, Truck, TrendingUp } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { useToast } from '@/components/ui/use-toast';
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/customSupabaseClient';
-import { COURIER_PAYMENT_MODES, resolveCourierPaymentModeForInvoice } from '@/lib/shipping';
+import {
+  buildFinancialMetricsFromSalesLines,
+  getSaleLineFinancialBreakdown,
+} from '@/lib/financialDefinitions';
 
 const getInitialDateRange = () => {
   const today = new Date();
@@ -42,6 +53,7 @@ const SalesPage = ({ items }) => {
   const [dateRange, setDateRange] = useState(getInitialDateRange());
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(10);
+  const [isNetProfitDetailOpen, setIsNetProfitDetailOpen] = useState(false);
 
   // Get current user
   const { data: authData } = useQuery({
@@ -74,7 +86,18 @@ const SalesPage = ({ items }) => {
           item_name,
           invoice_item_returns(returned_quantity, refund_amount),
           item:items(id, name, category, cost_price),
-          invoice:invoices(id, invoice_date, status, user_id, shipping_charged, shipment_id, channel_fee_amount, courier_payment_mode, adjustment_total)
+          invoice:invoices(
+            id,
+            invoice_date,
+            status,
+            user_id,
+            shipping_charged,
+            shipment_id,
+            channel_fee_amount,
+            courier_payment_mode,
+            adjustment_total,
+            invoice_fees(id, amount, amount_override)
+          )
         `)
         .order('created_at', { ascending: false });
 
@@ -171,13 +194,8 @@ const SalesPage = ({ items }) => {
           actual_sold_amount: netRevenue,
           date_sold: invItem.invoice.invoice_date,
           invoice_id: invItem.invoice_id,
+          invoice: invItem.invoice,
           status: invItem.invoice.status,
-          invoice_shipping_charged: Math.max(parseFloat(invItem.invoice?.shipping_charged) || 0, 0),
-          invoice_shipping_cost: Math.max(parseFloat(invItem.invoice?.shipment?.shipping_cost) || 0, 0),
-          invoice_shipping_cost_recorded: Boolean(invItem.invoice?.shipment?.courier_paid),
-          invoice_channel_fee: Math.max(parseFloat(invItem.invoice?.channel_fee_amount) || 0, 0),
-          invoice_courier_payment_mode: resolveCourierPaymentModeForInvoice(invItem.invoice),
-          invoice_adjustment_total: Math.max(parseFloat(invItem.invoice?.adjustment_total) || 0, 0),
         });
       })
       .filter((row) => row.quantity_sold > 0 || Math.abs(row.actual_sold_amount) > 0.0001);
@@ -198,77 +216,23 @@ const SalesPage = ({ items }) => {
     return filtered.sort((a, b) => new Date(b.date_sold) - new Date(a.date_sold));
   }, [soldItems, dateRange]);
 
-  const revenueByInvoice = useMemo(() => {
-    return filteredSoldItems.reduce((acc, item) => {
-      if (!item.invoice_id) return acc;
-      const revenue = item.actual_sold_amount
-        ? parseFloat(item.actual_sold_amount)
-        : (parseFloat(item.selling_price) || 0) * (item.quantity_sold || item.invoice_quantity || 1);
-      acc.set(item.invoice_id, (acc.get(item.invoice_id) || 0) + (Number.isFinite(revenue) ? revenue : 0));
-      return acc;
-    }, new Map());
-  }, [filteredSoldItems]);
+  const financialMetrics = useMemo(
+    () => buildFinancialMetricsFromSalesLines(filteredSoldItems),
+    [filteredSoldItems]
+  );
 
-  const salesSummary = useMemo(() => {
-    const shippingByInvoice = new Map();
-    const channelFeeByInvoice = new Map();
-    const adjustmentByInvoice = new Map();
-    let revenueItem = 0;
-    let itemProfit = 0;
-
-    filteredSoldItems.forEach((item) => {
-      const quantitySold = item.quantity_sold || item.invoice_quantity || 1;
-      const costPrice = parseFloat(item.cost_price) || 0;
-      const totalCost = costPrice * quantitySold;
-      const totalRevenue = item.actual_sold_amount
-        ? parseFloat(item.actual_sold_amount)
-        : (parseFloat(item.selling_price) || 0) * quantitySold;
-
-      revenueItem += totalRevenue;
-      itemProfit += totalRevenue - totalCost;
-
-      if (item.invoice_id && !shippingByInvoice.has(item.invoice_id)) {
-        const isPlatformMode = item.invoice_courier_payment_mode === COURIER_PAYMENT_MODES.PLATFORM;
-        shippingByInvoice.set(item.invoice_id, {
-          charged: isPlatformMode ? 0 : Math.max(parseFloat(item.invoice_shipping_charged) || 0, 0),
-          cost: isPlatformMode ? 0 : Math.max(parseFloat(item.invoice_shipping_cost) || 0, 0),
-          costRecorded: isPlatformMode ? true : Boolean(item.invoice_shipping_cost_recorded),
-        });
-      }
-
-      if (item.invoice_id && !channelFeeByInvoice.has(item.invoice_id)) {
-        channelFeeByInvoice.set(item.invoice_id, Math.max(parseFloat(item.invoice_channel_fee) || 0, 0));
-      }
-
-      if (item.invoice_id && !adjustmentByInvoice.has(item.invoice_id)) {
-        adjustmentByInvoice.set(item.invoice_id, Math.max(parseFloat(item.invoice_adjustment_total) || 0, 0));
-      }
-    });
-
-    const shippingCollected = Array.from(shippingByInvoice.values()).reduce((sum, value) => sum + value.charged, 0);
-    const shippingCost = Array.from(shippingByInvoice.values()).reduce(
-      (sum, value) => sum + (value.costRecorded ? value.cost : 0),
-      0
-    );
-    const shippingProfit = shippingCollected - shippingCost;
-    const shippingPending = Array.from(shippingByInvoice.values()).filter(
-      (value) => value.charged > 0 && !value.costRecorded
-    ).length;
-    const totalChannelFees = Array.from(channelFeeByInvoice.values()).reduce((sum, fee) => sum + fee, 0);
-    const totalAdjustments = Array.from(adjustmentByInvoice.values()).reduce((sum, amount) => sum + amount, 0);
-
-    return {
-      revenueItem: Math.max(revenueItem - totalAdjustments, 0),
-      shippingCollected,
-      shippingCost,
-      shippingProfit,
-      totalChannelFees,
-      totalAdjustments,
-      netProfit: itemProfit - totalChannelFees + shippingProfit - totalAdjustments,
-      shippingPending,
-      itemProfit,
-    };
-  }, [filteredSoldItems]);
+  const salesSummary = useMemo(() => ({
+    revenueItem: financialMetrics.revenueItem,
+    soldInvoiceCount: financialMetrics.soldInvoiceCount,
+    shippingCollected: financialMetrics.shippingCharged,
+    shippingCost: financialMetrics.shippingCost,
+    shippingProfit: financialMetrics.shippingProfit,
+    totalPlatformFees: financialMetrics.platformFeeTotal,
+    totalAdjustments: financialMetrics.goodwillAdjustments,
+    netProfit: financialMetrics.netProfit,
+    shippingPending: financialMetrics.shippingPendingCount,
+    itemProfit: financialMetrics.itemProfit,
+  }), [financialMetrics]);
 
   const totalPages = Math.ceil(filteredSoldItems.length / itemsPerPage);
   const indexOfLastItem = currentPage * itemsPerPage;
@@ -331,18 +295,30 @@ const SalesPage = ({ items }) => {
           <div className="flex flex-col sm:flex-row gap-4 w-full">
             <div className="flex-1">
               <label htmlFor="start-date" className="block text-xs font-medium text-muted-foreground mb-2">Tarikh Mula</label>
-              <Input id="start-date" type="date" value={dateRange.startDate} onChange={(e) => setDateRange(prev => ({ ...prev, startDate: e.target.value }))} className="w-full h-10" />
+              <Input
+                id="start-date"
+                type="date"
+                value={dateRange.startDate}
+                onChange={(e) => setDateRange(prev => ({ ...prev, startDate: e.target.value }))}
+                className="h-10 w-full rounded-full border-cyan-300 bg-white px-4 font-medium text-cyan-700 focus-visible:ring-cyan-300"
+              />
             </div>
             <div className="flex-1">
               <label htmlFor="end-date" className="block text-xs font-medium text-muted-foreground mb-2">Tarikh Akhir</label>
-              <Input id="end-date" type="date" value={dateRange.endDate} onChange={(e) => setDateRange(prev => ({ ...prev, endDate: e.target.value }))} className="w-full h-10" />
+              <Input
+                id="end-date"
+                type="date"
+                value={dateRange.endDate}
+                onChange={(e) => setDateRange(prev => ({ ...prev, endDate: e.target.value }))}
+                className="h-10 w-full rounded-full border-cyan-300 bg-white px-4 font-medium text-cyan-700 focus-visible:ring-cyan-300"
+              />
             </div>
             <div className="flex items-end">
               <Button 
-                variant="outline"
+                variant="default"
                 size="default"
                 onClick={() => setDateRange({ startDate: '', endDate: '' })} 
-                className="whitespace-nowrap w-full sm:w-auto h-10"
+                className="h-10 w-full whitespace-nowrap border-0 text-white brand-gradient brand-gradient-hover sm:w-auto"
               >
                 Tetapkan Semula
               </Button>
@@ -351,7 +327,7 @@ const SalesPage = ({ items }) => {
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-6">
         <Card>
           <CardContent className="pt-5">
             <div className="flex items-center gap-3">
@@ -361,6 +337,7 @@ const SalesPage = ({ items }) => {
               <div>
                 <p className="text-xs font-medium text-muted-foreground">Revenue Item</p>
                 <p className="text-lg font-semibold">RM{salesSummary.revenueItem.toFixed(2)}</p>
+                <p className="text-[11px] text-muted-foreground">{salesSummary.soldInvoiceCount} jualan</p>
               </div>
             </div>
           </CardContent>
@@ -410,15 +387,38 @@ const SalesPage = ({ items }) => {
         <Card>
           <CardContent className="pt-5">
             <div className="flex items-center gap-3">
+              <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-cyan-100">
+                <FileText className="h-4 w-4 text-cyan-600" />
+              </span>
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">Caj Platform</p>
+                <p className="text-lg font-semibold">RM{salesSummary.totalPlatformFees.toFixed(2)}</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card
+          role="button"
+          tabIndex={0}
+          onClick={() => setIsNetProfitDetailOpen(true)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              setIsNetProfitDetailOpen(true);
+            }
+          }}
+          className="cursor-pointer transition-colors hover:border-primary/40"
+          aria-label="Lihat butiran untung bersih"
+        >
+          <CardContent className="pt-5">
+            <div className="flex items-center gap-3">
               <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-violet-100">
                 <TrendingUp className="h-4 w-4 text-violet-600" />
               </span>
               <div>
                 <p className="text-xs font-medium text-muted-foreground">Untung Bersih</p>
                 <p className="text-lg font-semibold">RM{salesSummary.netProfit.toFixed(2)}</p>
-                <p className="text-[11px] text-muted-foreground">
-                  Item RM{salesSummary.itemProfit.toFixed(2)} | Fee RM{salesSummary.totalChannelFees.toFixed(2)} | Pelarasan RM{salesSummary.totalAdjustments.toFixed(2)} | Pos RM{salesSummary.shippingProfit.toFixed(2)}
-                </p>
+                <p className="text-[11px] text-primary">Klik untuk lihat pecahan</p>
               </div>
             </div>
           </CardContent>
@@ -429,11 +429,11 @@ const SalesPage = ({ items }) => {
         <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <CardTitle>Hasil Jualan</CardTitle>
           <Button 
-            variant="outline" 
+            variant="default" 
             size="default"
             onClick={exportToCSV} 
             disabled={!filteredSoldItems || filteredSoldItems.length === 0}
-            className="gap-2 h-10 flex-1 sm:flex-initial"
+            className="flex-1 h-10 gap-2 border-0 text-white brand-gradient brand-gradient-hover sm:flex-initial"
           >
             <Download className="w-5 h-5" /> 
             <span>Eksport CSV</span>
@@ -460,37 +460,14 @@ const SalesPage = ({ items }) => {
                   </thead>
                   <tbody>
                     {currentItems.map(item => {
-                      const quantitySold = item.quantity_sold || item.invoice_quantity || 1;
-                      const costPrice = parseFloat(item.cost_price) || 0;
-                      const totalCost = costPrice * quantitySold;
-                      // If actual_sold_amount exists, it's already the total for all units
-                      // If not, multiply selling_price by quantity
-                      const totalRevenue = item.actual_sold_amount ? parseFloat(item.actual_sold_amount) : (parseFloat(item.selling_price) || 0) * quantitySold;
-                      const invoiceRevenue = item.invoice_id ? (revenueByInvoice.get(item.invoice_id) || 0) : 0;
-                      const invoiceChannelFee = Math.max(parseFloat(item.invoice_channel_fee) || 0, 0);
-                      const invoiceAdjustment = Math.max(parseFloat(item.invoice_adjustment_total) || 0, 0);
-                      const channelFeeShare = invoiceRevenue > 0
-                        ? (totalRevenue / invoiceRevenue) * invoiceChannelFee
-                        : 0;
-                      const shippingCharged = Math.max(parseFloat(item.invoice_shipping_charged) || 0, 0);
-                      const isPlatformMode = item.invoice_courier_payment_mode === COURIER_PAYMENT_MODES.PLATFORM;
-                      const shippingCostPaid = item.invoice_shipping_cost_recorded
-                        ? Math.max(parseFloat(item.invoice_shipping_cost) || 0, 0)
-                        : 0;
-                      const effectiveShippingCharged = isPlatformMode ? 0 : shippingCharged;
-                      const effectiveShippingCostPaid = isPlatformMode ? 0 : shippingCostPaid;
-                      const shippingChargedShare = invoiceRevenue > 0
-                        ? (totalRevenue / invoiceRevenue) * effectiveShippingCharged
-                        : 0;
-                      const shippingCostShare = invoiceRevenue > 0
-                        ? (totalRevenue / invoiceRevenue) * effectiveShippingCostPaid
-                        : 0;
-                      const shippingProfitShare = shippingChargedShare - shippingCostShare;
-                      const adjustmentShare = invoiceRevenue > 0
-                        ? (totalRevenue / invoiceRevenue) * invoiceAdjustment
-                        : 0;
-                      const netRevenueAfterAdjustment = totalRevenue - adjustmentShare;
-                      const profit = netRevenueAfterAdjustment - totalCost - channelFeeShare + shippingProfitShare;
+                      const breakdown = getSaleLineFinancialBreakdown(item, financialMetrics);
+                      const shippingSnapshot = item.invoice_id
+                        ? (financialMetrics.invoiceShippingById.get(item.invoice_id) || {
+                          shippingCharged: 0,
+                          shippingCostPaid: 0,
+                        })
+                        : { shippingCharged: 0, shippingCostPaid: 0 };
+                      const profit = breakdown.netProfit;
                       const isLoss = profit < 0;
                       return (
                         <tr key={item.id} className="border-t relative group overflow-hidden">
@@ -502,7 +479,13 @@ const SalesPage = ({ items }) => {
                            </td>
                            <td className="p-4 text-muted-foreground">{new Date(item.date_sold).toLocaleDateString()}</td>
                            <td className="p-4">
-                             <div className={cn("inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium", isLoss ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700")}>
+                             <div
+                               className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium ${
+                                 isLoss
+                                   ? 'border border-rose-200 bg-rose-50 text-rose-700'
+                                   : 'text-white brand-gradient'
+                               }`}
+                             >
                                {isLoss ? <XCircle className="w-3 h-3" /> : <CheckCircle className="w-3 h-3" />}
                                RM {Math.abs(profit).toFixed(2)}
                              </div>
@@ -511,9 +494,9 @@ const SalesPage = ({ items }) => {
                              {item.invoice_id ? (
                                <Button
                                  size="sm"
-                                 variant="outline"
+                                 variant="default"
                                  onClick={() => navigate(`/invoices/${item.invoice_id}`)}
-                                 className="gap-2"
+                                 className="gap-2 border-0 text-white brand-gradient brand-gradient-hover"
                                >
                                  <FileText className="w-4 h-4" />
                                  Lihat
@@ -522,10 +505,10 @@ const SalesPage = ({ items }) => {
                                <span className="text-muted-foreground text-xs">-</span>
                              )}
                            </td>
-                          <td className="p-4 text-right font-semibold text-foreground">RM{netRevenueAfterAdjustment.toFixed(2)}</td>
+                          <td className="p-4 text-right font-semibold text-foreground">RM{breakdown.netRevenueAfterGoodwill.toFixed(2)}</td>
                            <td className="p-4 text-right text-xs text-muted-foreground">
-                             <div>Caj RM{effectiveShippingCharged.toFixed(2)}</div>
-                             <div>Kos RM{effectiveShippingCostPaid.toFixed(2)}</div>
+                             <div>Caj RM{shippingSnapshot.shippingCharged.toFixed(2)}</div>
+                             <div>Kos RM{shippingSnapshot.shippingCostPaid.toFixed(2)}</div>
                            </td>
                         </tr>
                       );
@@ -577,6 +560,44 @@ const SalesPage = ({ items }) => {
           </CardFooter>
         )}
       </Card>
+
+      <AlertDialog open={isNetProfitDetailOpen} onOpenChange={setIsNetProfitDetailOpen}>
+        <AlertDialogContent className="max-w-md border-primary/20 bg-white">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-primary">Butiran Untung Bersih</AlertDialogTitle>
+            <AlertDialogDescription>
+              Formula: Untung Item + Untung Pos - Caj Platform - Pelarasan
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-sm">
+              <span className="font-medium text-slate-700">Item</span>
+              <span className="font-semibold text-slate-900">RM{salesSummary.itemProfit.toFixed(2)}</span>
+            </div>
+            <div className="flex items-center justify-between rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-sm">
+              <span className="font-medium text-slate-700">Caj Platform</span>
+              <span className="font-semibold text-slate-900">RM{salesSummary.totalPlatformFees.toFixed(2)}</span>
+            </div>
+            <div className="flex items-center justify-between rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-sm">
+              <span className="font-medium text-slate-700">Pelarasan</span>
+              <span className="font-semibold text-slate-900">RM{salesSummary.totalAdjustments.toFixed(2)}</span>
+            </div>
+            <div className="flex items-center justify-between rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-sm">
+              <span className="font-medium text-slate-700">Pos</span>
+              <span className="font-semibold text-slate-900">RM{salesSummary.shippingProfit.toFixed(2)}</span>
+            </div>
+            <div className="mt-1 flex items-center justify-between rounded-lg border border-primary/30 bg-gradient-to-r from-cyan-50 to-teal-50 px-3 py-2.5 text-sm">
+              <span className="font-semibold text-primary">Untung Bersih</span>
+              <span className="font-bold text-primary">RM{salesSummary.netProfit.toFixed(2)}</span>
+            </div>
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogAction className="border-0 text-white brand-gradient brand-gradient-hover">
+              Tutup
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </motion.div>
   );
 };

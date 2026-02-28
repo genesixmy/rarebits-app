@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useLocation } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/customSupabaseClient';
 import {
   useInvoiceDetail,
@@ -13,16 +13,21 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Trash2, Plus, X, ChevronLeft, ChevronDown, ChevronUp, Star } from 'lucide-react';
 import { format } from 'date-fns';
 import { ms } from 'date-fns/locale';
 import toast from 'react-hot-toast';
 import {
-  SALES_CHANNEL_FEE_TYPES,
-  calculateSalesChannelFee,
-  formatSalesChannelFeeLabel,
-  normalizeSalesChannelFeeType,
-} from '@/lib/salesChannels';
+  PLATFORM_FEE_TYPES,
+  buildInvoiceFeeSnapshots,
+  calculatePlatformFeeAmount,
+  formatPlatformFeeRuleLabel,
+  getPlatformFeeAppliesToLabel,
+  getPlatformFeeBaseAmount,
+  normalizePlatformFeeAppliesTo,
+  normalizePlatformFeeType,
+} from '@/lib/platformFees';
 import {
   COURIER_PAYMENT_MODES,
   isDeliveryRequired,
@@ -90,6 +95,9 @@ const parseNonNegativeNumber = (value, fallback = 0) => {
 
 const roundCurrencyAmount = (value) => Math.round(parseNonNegativeNumber(value, 0) * 100) / 100;
 const SHIPPING_CHARGED_CAP = 9999;
+const SETTLED_INVOICE_STATUSES = new Set(['paid', 'partially_returned', 'returned']);
+const INVOICE_READ_SYNC_MAX_ATTEMPTS = 6;
+const INVOICE_READ_SYNC_DELAY_MS = 180;
 
 const getLineQuantity = (item) => Math.max(parseInt(item?.quantity, 10) || 1, 1);
 
@@ -150,13 +158,61 @@ const getReservationSummaryByCustomer = (item, clientNameById) => {
   return { total, entries: Array.from(map.values()) };
 };
 
+const formatRM = (value) => `RM ${formatCurrency(value)}`;
+
+const normalizeInvoiceFeeSnapshot = (snapshot, baseAmounts) => {
+  const feeType = normalizePlatformFeeType(snapshot?.fee_type);
+  const appliesTo = normalizePlatformFeeAppliesTo(snapshot?.applies_to);
+  const feeValue = roundCurrencyAmount(snapshot?.fee_value);
+  const normalizedBaseAmount = getPlatformFeeBaseAmount(appliesTo, baseAmounts);
+  const amount = calculatePlatformFeeAmount(normalizedBaseAmount, {
+    fee_type: feeType,
+    fee_value: feeValue,
+  });
+
+  return {
+    fee_rule_id: snapshot?.fee_rule_id || null,
+    name: String(snapshot?.name || '').trim() || 'Platform Fee',
+    fee_type: feeType,
+    applies_to: appliesTo,
+    fee_value: feeValue,
+    base_amount: normalizedBaseAmount,
+    amount,
+  };
+};
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const buildFeeOverrideMap = (snapshots = []) => (
+  (Array.isArray(snapshots) ? snapshots : []).reduce((acc, snapshot) => {
+    const ruleId = snapshot?.fee_rule_id;
+    const parsedOverride = Number.parseFloat(snapshot?.amount_override);
+    if (!ruleId || !Number.isFinite(parsedOverride) || parsedOverride < 0) return acc;
+    acc[ruleId] = roundCurrencyAmount(parsedOverride);
+    return acc;
+  }, {})
+);
+
+const getEffectiveFeeAmount = (snapshot) => {
+  const parsedOverride = Number.parseFloat(snapshot?.amount_override);
+  if (Number.isFinite(parsedOverride) && parsedOverride >= 0) {
+    return roundCurrencyAmount(parsedOverride);
+  }
+  return roundCurrencyAmount(snapshot?.amount);
+};
+
 const InvoiceFormPage = () => {
   const navigate = useNavigate();
   const location = useLocation();
+  const queryClient = useQueryClient();
   const { invoiceId } = useParams();
   const [selectedClientId, setSelectedClientId] = useState('');
   const [notes, setNotes] = useState('');
-  const [selectedSalesChannelId, setSelectedSalesChannelId] = useState('');
+  const [selectedFeeRuleIds, setSelectedFeeRuleIds] = useState([]);
+  const [savedInvoiceFees, setSavedInvoiceFees] = useState([]);
+  const [feeOverridesByRuleId, setFeeOverridesByRuleId] = useState({});
+  const [editingFeeOverrideRuleId, setEditingFeeOverrideRuleId] = useState(null);
+  const [feeOverrideInput, setFeeOverrideInput] = useState('');
   const [shippingMethod, setShippingMethod] = useState(SHIPPING_METHODS.WALK_IN);
   const [courierPaymentMode, setCourierPaymentMode] = useState(COURIER_PAYMENT_MODES.SELLER);
   const [shippingChargedInput, setShippingChargedInput] = useState('0.00');
@@ -175,6 +231,8 @@ const InvoiceFormPage = () => {
   const [expandedItemIds, setExpandedItemIds] = useState([]);
   const [quickAddSkippedCount, setQuickAddSkippedCount] = useState(0);
   const customerFieldFocusRef = useRef(null);
+  const selectedFeeRuleIdsRef = useRef([]);
+  const feeOverridesByRuleIdRef = useRef({});
 
   // Get current user
   const { data: authData } = useQuery({
@@ -187,13 +245,13 @@ const InvoiceFormPage = () => {
 
   const userId = authData?.session?.user?.id;
 
-  // Fetch configured sales channels for the user.
-  const { data: salesChannels = [] } = useQuery({
-    queryKey: ['sales-channels', userId],
+  // Fetch configured platform fee rules for the user.
+  const { data: platformFeeRules = [] } = useQuery({
+    queryKey: ['platform-fee-rules', userId],
     queryFn: async () => {
       const { data, error } = await supabase
-        .from('sales_channels')
-        .select('id, name, fee_type, fee_value')
+        .from('platform_fee_rules')
+        .select('id, name, fee_type, applies_to, fee_value, is_active')
         .eq('user_id', userId);
 
       if (error) throw error;
@@ -275,11 +333,14 @@ const InvoiceFormPage = () => {
       : [];
     bulkItems.forEach((entry) => applyPayloadEntry(entry));
 
+    const hasStructuredQuickAdd = bulkItems.length > 0 || Boolean(location.state?.quickAddItem);
     if (location.state?.quickAddItem) {
       applyPayloadEntry(location.state.quickAddItem);
     }
 
-    if (location.state?.itemId) {
+    // `itemId` is legacy fallback only. Avoid double-counting when
+    // modern quick-add payload (`quickAddItem` / `quickAddItems`) already exists.
+    if (!hasStructuredQuickAdd && location.state?.itemId) {
       applyPayloadEntry(null, location.state.itemId);
     }
 
@@ -331,7 +392,8 @@ const InvoiceFormPage = () => {
     },
     enabled: !!userId,
     staleTime: 0,
-    cacheTime: 0,
+    gcTime: 0,
+    refetchOnMount: 'always',
   });
 
   // Fetch existing invoice if editing
@@ -342,22 +404,55 @@ const InvoiceFormPage = () => {
     if (existingInvoice) {
       setSelectedClientId(existingInvoice.client_id);
       setNotes(existingInvoice.notes || '');
-      setSelectedSalesChannelId(existingInvoice.sales_channel_id || '');
       setShippingMethod(resolveShippingMethodForInvoice(existingInvoice));
       setCourierPaymentMode(resolveCourierPaymentModeForInvoice(existingInvoice));
       setShippingChargedInput(roundCurrencyAmount(existingInvoice.shipping_charged || 0).toFixed(2));
       setShippingChargedError('');
-      setSelectedItems(
-        existingInvoice.invoice_items?.map((ii) => ({
-          ...ii.item,
+      const existingFees = Array.isArray(existingInvoice.invoice_fees)
+        ? [...existingInvoice.invoice_fees].sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0))
+        : [];
+      setSavedInvoiceFees(existingFees);
+      const initialFeeRuleIds = [...new Set(existingFees.map((fee) => fee.fee_rule_id).filter(Boolean))];
+      const initialOverrides = buildFeeOverrideMap(existingFees);
+      selectedFeeRuleIdsRef.current = initialFeeRuleIds;
+      feeOverridesByRuleIdRef.current = initialOverrides;
+      setSelectedFeeRuleIds(initialFeeRuleIds);
+      setFeeOverridesByRuleId(initialOverrides);
+      setEditingFeeOverrideRuleId(null);
+      setFeeOverrideInput('');
+      const existingInvoiceItems = Array.isArray(existingInvoice.invoice_items)
+        ? existingInvoice.invoice_items
+        : [];
+
+      const existingInventoryItems = existingInvoiceItems
+        .filter((ii) => !ii?.is_manual && ii?.item_id)
+        .map((ii) => ({
+          ...(ii.item || {}),
+          id: ii.item_id,
+          name: ii.item?.name || ii.item_name || 'Item',
           invoice_item_id: ii.id,
-          unit_price: ii.unit_price,
-          selling_price: ii.unit_price,
-          cost_price: ii.cost_price ?? 0,
-          quantity: ii.quantity,
-          line_total: ii.line_total,
-        })) || []
-      );
+          unit_price: parseNonNegativeNumber(ii.unit_price, 0),
+          selling_price: parseNonNegativeNumber(ii.unit_price, 0),
+          cost_price: parseNonNegativeNumber(ii.cost_price, 0),
+          quantity: Math.max(parseInt(ii.quantity, 10) || 1, 1),
+          line_total: roundCurrencyAmount(ii.line_total || 0),
+        }));
+
+      const existingManualItems = existingInvoiceItems
+        .filter((ii) => ii?.is_manual || !ii?.item_id)
+        .map((ii, index) => ({
+          id: `manual-row-${ii.id || index}`,
+          invoice_item_id: ii.id,
+          name: ii.item_name || ii.item?.name || 'Manual Item',
+          selling_price: parseNonNegativeNumber(ii.unit_price, 0),
+          cost_price: parseNonNegativeNumber(ii.cost_price, 0),
+          quantity: Math.max(parseInt(ii.quantity, 10) || 1, 1),
+          category: 'Manual',
+          is_manual: true,
+        }));
+
+      setSelectedItems(existingInventoryItems);
+      setManualItems(existingManualItems);
     }
   }, [existingInvoice]);
 
@@ -625,16 +720,102 @@ const InvoiceFormPage = () => {
     shippingMethod,
     shippingCharged,
   });
-  const total = subtotal + shippingCharged;
-
-  const selectedSalesChannel = useMemo(
-    () => salesChannels.find((channel) => channel.id === selectedSalesChannelId) || null,
-    [salesChannels, selectedSalesChannelId]
+  const platformFeeBaseAmounts = useMemo(() => ({
+    item_subtotal: roundCurrencyAmount(subtotal),
+    shipping_charged: roundCurrencyAmount(shippingCharged),
+    total_collected: roundCurrencyAmount(subtotal + shippingCharged),
+  }), [shippingCharged, subtotal]);
+  const total = platformFeeBaseAmounts.total_collected;
+  const feeRuleById = useMemo(
+    () => new Map((platformFeeRules || []).map((rule) => [rule.id, rule])),
+    [platformFeeRules]
   );
-  const channelFeePreview = calculateSalesChannelFee(subtotal, selectedSalesChannel);
-  const channelFeeLabel = formatSalesChannelFeeLabel(selectedSalesChannel);
+  const selectedFeeRules = useMemo(
+    () => selectedFeeRuleIds.map((ruleId) => feeRuleById.get(ruleId)).filter(Boolean),
+    [selectedFeeRuleIds, feeRuleById]
+  );
+  useEffect(() => {
+    selectedFeeRuleIdsRef.current = selectedFeeRuleIds;
+  }, [selectedFeeRuleIds]);
+  useEffect(() => {
+    feeOverridesByRuleIdRef.current = feeOverridesByRuleId;
+  }, [feeOverridesByRuleId]);
+  const selectableFeeRules = useMemo(
+    () => (platformFeeRules || []).filter((rule) => Boolean(rule.is_active) || selectedFeeRuleIds.includes(rule.id)),
+    [platformFeeRules, selectedFeeRuleIds]
+  );
+  const computedFeeSnapshots = useMemo(
+    () => buildInvoiceFeeSnapshots(selectedFeeRules, platformFeeBaseAmounts),
+    [platformFeeBaseAmounts, selectedFeeRules]
+  );
+  const isSettledInvoice = SETTLED_INVOICE_STATUSES.has(existingInvoice?.status || '');
+  const liveFeeBreakdownRows = useMemo(
+    () => computedFeeSnapshots.map((snapshot) => {
+      const ruleId = snapshot?.fee_rule_id;
+      const overrideValue = ruleId ? feeOverridesByRuleId[ruleId] : null;
+      const hasOverride = Number.isFinite(overrideValue) && overrideValue >= 0;
+      const amountOverride = hasOverride ? roundCurrencyAmount(overrideValue) : null;
+      return {
+        ...snapshot,
+        amount_override: amountOverride,
+        effective_amount: amountOverride ?? roundCurrencyAmount(snapshot.amount),
+      };
+    }),
+    [computedFeeSnapshots, feeOverridesByRuleId]
+  );
+  const feeBreakdownRows = useMemo(() => {
+    if (isSettledInvoice && Array.isArray(savedInvoiceFees) && savedInvoiceFees.length > 0) {
+      return savedInvoiceFees.map((snapshot) => {
+        const effectiveAmount = getEffectiveFeeAmount(snapshot);
+        return {
+          ...snapshot,
+          amount: roundCurrencyAmount(snapshot?.amount),
+          amount_override: Number.isFinite(Number.parseFloat(snapshot?.amount_override))
+            ? roundCurrencyAmount(snapshot.amount_override)
+            : null,
+          effective_amount: effectiveAmount,
+        };
+      });
+    }
+    if (isSettledInvoice) {
+      const legacyFeeAmount = roundCurrencyAmount(existingInvoice?.channel_fee_amount);
+      if (legacyFeeAmount > 0) {
+        return [{
+          fee_rule_id: null,
+          name: 'Caj Platform',
+          fee_type: PLATFORM_FEE_TYPES.FLAT,
+          applies_to: 'item_subtotal',
+          fee_value: legacyFeeAmount,
+          base_amount: roundCurrencyAmount(existingInvoice?.subtotal || 0),
+          amount: legacyFeeAmount,
+          amount_override: null,
+          effective_amount: legacyFeeAmount,
+        }];
+      }
+    }
+    return liveFeeBreakdownRows;
+  }, [
+    existingInvoice?.channel_fee_amount,
+    existingInvoice?.subtotal,
+    isSettledInvoice,
+    liveFeeBreakdownRows,
+    savedInvoiceFees,
+  ]);
+  const platformFeeTotal = useMemo(
+    () => roundCurrencyAmount(
+      (feeBreakdownRows || []).reduce(
+        (sum, snapshot) => sum + parseNonNegativeNumber(snapshot?.effective_amount, 0),
+        0
+      )
+    ),
+    [feeBreakdownRows]
+  );
+  const platformLabel = useMemo(() => {
+    const current = String(existingInvoice?.platform || '').trim();
+    return current || 'Manual';
+  }, [existingInvoice?.platform]);
   const grossProfitPreview = subtotal - totalCostPreview;
-  const netProfitPreview = grossProfitPreview - channelFeePreview;
+  const netProfitPreview = grossProfitPreview - platformFeeTotal;
 
   const handleAddItem = (item, quantityOverride = 1, options = { closeSelector: true }) => {
     // Start with quantity 1, max is item's available quantity
@@ -963,7 +1144,358 @@ const InvoiceFormPage = () => {
     return { ok: true };
   };
 
+  const handleFeeRuleToggle = (ruleId, checked) => {
+    if (!ruleId || isSettledInvoice) return;
+    setSelectedFeeRuleIds((prev) => {
+      let nextIds = prev;
+      if (checked) {
+        nextIds = prev.includes(ruleId) ? prev : [...prev, ruleId];
+      } else {
+        nextIds = prev.filter((id) => id !== ruleId);
+        setFeeOverridesByRuleId((prevOverrides) => {
+          if (!(ruleId in prevOverrides)) return prevOverrides;
+          const nextOverrides = { ...prevOverrides };
+          delete nextOverrides[ruleId];
+          feeOverridesByRuleIdRef.current = nextOverrides;
+          return nextOverrides;
+        });
+        if (editingFeeOverrideRuleId === ruleId) {
+          setEditingFeeOverrideRuleId(null);
+          setFeeOverrideInput('');
+        }
+      }
+      selectedFeeRuleIdsRef.current = nextIds;
+      return nextIds;
+    });
+  };
+
+  const handleOpenFeeOverrideEditor = (snapshot) => {
+    if (isSettledInvoice) return;
+    const ruleId = snapshot?.fee_rule_id;
+    if (!ruleId) return;
+    const currentEffective = getEffectiveFeeAmount(snapshot);
+    setEditingFeeOverrideRuleId(ruleId);
+    setFeeOverrideInput(currentEffective.toFixed(2));
+  };
+
+  const handleSaveFeeOverride = () => {
+    if (!editingFeeOverrideRuleId || isSettledInvoice) return;
+    const parsed = Number.parseFloat(String(feeOverrideInput).replace(/,/g, '.').trim());
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      toast.error('Amaun override mesti 0 atau lebih.');
+      return;
+    }
+
+    const normalized = roundCurrencyAmount(parsed);
+    setFeeOverridesByRuleId((prev) => {
+      const next = { ...prev, [editingFeeOverrideRuleId]: normalized };
+      feeOverridesByRuleIdRef.current = next;
+      return next;
+    });
+    setEditingFeeOverrideRuleId(null);
+    setFeeOverrideInput('');
+  };
+
+  const handleResetFeeOverride = (ruleId) => {
+    if (!ruleId || isSettledInvoice) return;
+    setFeeOverridesByRuleId((prev) => {
+      if (!(ruleId in prev)) return prev;
+      const next = { ...prev };
+      delete next[ruleId];
+      feeOverridesByRuleIdRef.current = next;
+      return next;
+    });
+    if (editingFeeOverrideRuleId === ruleId) {
+      setEditingFeeOverrideRuleId(null);
+      setFeeOverrideInput('');
+    }
+  };
+
+  const syncInvoiceItemsForEdit = async (targetInvoiceId) => {
+    if (!targetInvoiceId || !userId) return;
+
+    const { data: existingRows, error: existingRowsError } = await supabase
+      .from('invoice_items')
+      .select('id, item_id, is_manual')
+      .eq('invoice_id', targetInvoiceId);
+
+    if (existingRowsError) throw existingRowsError;
+
+    const rows = Array.isArray(existingRows) ? existingRows : [];
+    const existingRowById = new Map(rows.map((row) => [row.id, row]));
+    const keptRowIds = new Set();
+
+    const normalizedInventoryLines = selectedItems
+      .filter((item) => item?.id && !item.is_manual)
+      .map((item) => {
+        const quantity = Math.max(parseInt(item?.quantity, 10) || 1, 1);
+        const unitPrice = parseNonNegativeNumber(item?.unit_price, 0);
+        return {
+          invoice_item_id: item?.invoice_item_id || null,
+          item_id: item.id,
+          quantity,
+          unit_price: unitPrice,
+          cost_price: parseNonNegativeNumber(item?.cost_price, 0),
+          line_total: roundCurrencyAmount(unitPrice * quantity),
+        };
+      });
+
+    for (const line of normalizedInventoryLines) {
+      const rowId = line.invoice_item_id;
+      if (rowId && existingRowById.has(rowId)) {
+        keptRowIds.add(rowId);
+        const { error: updateLineError } = await supabase
+          .from('invoice_items')
+          .update({
+            quantity: line.quantity,
+            unit_price: line.unit_price,
+            cost_price: line.cost_price,
+            line_total: line.line_total,
+          })
+          .eq('id', rowId)
+          .eq('invoice_id', targetInvoiceId);
+
+        if (updateLineError) throw updateLineError;
+        continue;
+      }
+
+      const { data: addResult, error: addError } = await supabase.rpc('add_item_to_invoice', {
+        p_invoice_id: targetInvoiceId,
+        p_item_id: line.item_id,
+        p_quantity: line.quantity,
+        p_unit_price: line.unit_price,
+        p_user_id: userId,
+      });
+
+      if (addError) throw addError;
+      if (!addResult?.[0]?.success) {
+        throw new Error(addResult?.[0]?.message || 'Gagal tambah item ke invois.');
+      }
+    }
+
+    const normalizedManualLines = manualItems.map((item) => {
+      const quantity = Math.max(parseInt(item?.quantity, 10) || 1, 1);
+      const unitPrice = parseNonNegativeNumber(item?.selling_price, 0);
+      return {
+        invoice_item_id: item?.invoice_item_id || null,
+        name: String(item?.name || '').trim() || 'Manual Item',
+        quantity,
+        unit_price: unitPrice,
+        cost_price: parseNonNegativeNumber(item?.cost_price, 0),
+        line_total: roundCurrencyAmount(unitPrice * quantity),
+      };
+    });
+
+    for (const line of normalizedManualLines) {
+      const rowId = line.invoice_item_id;
+      if (rowId && existingRowById.has(rowId)) {
+        keptRowIds.add(rowId);
+        const { error: updateLineError } = await supabase
+          .from('invoice_items')
+          .update({
+            item_id: null,
+            is_manual: true,
+            item_name: line.name,
+            quantity: line.quantity,
+            unit_price: line.unit_price,
+            cost_price: line.cost_price,
+            line_total: line.line_total,
+          })
+          .eq('id', rowId)
+          .eq('invoice_id', targetInvoiceId);
+
+        if (updateLineError) throw updateLineError;
+        continue;
+      }
+
+      const { data: addResult, error: addError } = await supabase.rpc('add_manual_item_to_invoice', {
+        p_invoice_id: targetInvoiceId,
+        p_item_name: line.name,
+        p_quantity: line.quantity,
+        p_unit_price: line.unit_price,
+        p_cost_price: line.cost_price,
+        p_user_id: userId,
+      });
+
+      if (addError) throw addError;
+      if (!addResult?.[0]?.success) {
+        throw new Error(addResult?.[0]?.message || 'Gagal tambah item manual ke invois.');
+      }
+    }
+
+    const rowsToDelete = rows.filter((row) => !keptRowIds.has(row.id));
+    const inventoryRowsToDelete = rowsToDelete.filter((row) => row?.item_id);
+    const manualRowIdsToDelete = rowsToDelete
+      .filter((row) => !row?.item_id)
+      .map((row) => row.id);
+
+    for (const row of inventoryRowsToDelete) {
+      const { data: removeResult, error: removeError } = await supabase.rpc('remove_item_from_invoice', {
+        p_invoice_id: targetInvoiceId,
+        p_item_id: row.item_id,
+        p_user_id: userId,
+      });
+
+      if (removeError) throw removeError;
+      if (!removeResult?.[0]?.success) {
+        throw new Error(removeResult?.[0]?.message || 'Gagal padam item dari invois.');
+      }
+    }
+
+    if (manualRowIdsToDelete.length > 0) {
+      const { error: deleteManualRowsError } = await supabase
+        .from('invoice_items')
+        .delete()
+        .eq('invoice_id', targetInvoiceId)
+        .in('id', manualRowIdsToDelete);
+
+      if (deleteManualRowsError) throw deleteManualRowsError;
+    }
+  };
+
+  const replaceInvoiceFeeSnapshots = async (targetInvoiceId) => {
+    if (!targetInvoiceId || !userId) return;
+
+    const { data: invoiceRow, error: invoiceError } = await supabase
+      .from('invoices')
+      .select('id, subtotal, shipping_charged, status')
+      .eq('id', targetInvoiceId)
+      .eq('user_id', userId)
+      .single();
+
+    if (invoiceError) throw invoiceError;
+    if (SETTLED_INVOICE_STATUSES.has(invoiceRow.status)) {
+      throw new Error('Invois dibayar tidak boleh ubah caj platform.');
+    }
+
+    const normalizedSubtotal = roundCurrencyAmount(invoiceRow.subtotal || 0);
+    const normalizedShippingCharged = roundCurrencyAmount(invoiceRow.shipping_charged || 0);
+    const baseAmounts = {
+      item_subtotal: normalizedSubtotal,
+      shipping_charged: normalizedShippingCharged,
+      total_collected: roundCurrencyAmount(normalizedSubtotal + normalizedShippingCharged),
+    };
+    const selectedRuleIds = selectedFeeRuleIdsRef.current || [];
+    const selectedRules = selectedRuleIds
+      .map((ruleId) => feeRuleById.get(ruleId))
+      .filter(Boolean);
+    const baseSnapshots = buildInvoiceFeeSnapshots(selectedRules, baseAmounts);
+    const overrides = feeOverridesByRuleIdRef.current || {};
+    const snapshotsToStore = baseSnapshots.map((snapshot) => {
+      const normalizedSnapshot = normalizeInvoiceFeeSnapshot(snapshot, baseAmounts);
+      const ruleId = normalizedSnapshot.fee_rule_id;
+      const overrideValue = ruleId ? overrides[ruleId] : null;
+      const hasOverride = Number.isFinite(overrideValue) && overrideValue >= 0;
+      return {
+        ...normalizedSnapshot,
+        amount_override: hasOverride ? roundCurrencyAmount(overrideValue) : null,
+      };
+    });
+    const feeTotal = roundCurrencyAmount(
+      snapshotsToStore.reduce((sum, snapshot) => sum + getEffectiveFeeAmount(snapshot), 0)
+    );
+
+    const { error: deleteError } = await supabase
+      .from('invoice_fees')
+      .delete()
+      .eq('invoice_id', targetInvoiceId)
+      .eq('user_id', userId);
+
+    if (deleteError) throw deleteError;
+
+    if (snapshotsToStore.length > 0) {
+      const payload = snapshotsToStore.map((snapshot) => ({
+        invoice_id: targetInvoiceId,
+        user_id: userId,
+        fee_rule_id: snapshot.fee_rule_id,
+        name: snapshot.name,
+        fee_type: snapshot.fee_type,
+        applies_to: snapshot.applies_to,
+        fee_value: snapshot.fee_value,
+        base_amount: snapshot.base_amount,
+        amount: snapshot.amount,
+        amount_override: snapshot.amount_override,
+      }));
+
+      const { error: insertError } = await supabase
+        .from('invoice_fees')
+        .insert(payload);
+
+      if (insertError) throw insertError;
+    }
+
+    const { error: invoiceUpdateError } = await supabase
+      .from('invoices')
+      .update({
+        channel_fee_amount: feeTotal,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', targetInvoiceId)
+      .eq('user_id', userId)
+      .select('id')
+      .single();
+
+    if (invoiceUpdateError) throw invoiceUpdateError;
+
+    setSavedInvoiceFees(snapshotsToStore);
+    setSelectedFeeRuleIds(
+      [...new Set(snapshotsToStore.map((snapshot) => snapshot.fee_rule_id).filter(Boolean))]
+    );
+    const persistedOverrides = buildFeeOverrideMap(snapshotsToStore);
+    feeOverridesByRuleIdRef.current = persistedOverrides;
+    setFeeOverridesByRuleId(persistedOverrides);
+  };
+
+  const waitForInvoiceReadConsistency = async (targetInvoiceId, expected = {}) => {
+    if (!targetInvoiceId || !userId) return;
+
+    const expectedShipping = roundCurrencyAmount(expected.shippingCharged);
+    const expectedFeeTotal = roundCurrencyAmount(expected.channelFeeAmount);
+    const expectedTotalAmount = Number.isFinite(expected.totalAmount)
+      ? roundCurrencyAmount(expected.totalAmount)
+      : null;
+    const expectedFeeCount = Number.isFinite(expected.feeCount) ? Math.max(Math.trunc(expected.feeCount), 0) : null;
+
+    for (let attempt = 0; attempt < INVOICE_READ_SYNC_MAX_ATTEMPTS; attempt += 1) {
+      const { data, error } = await supabase
+        .from('invoices')
+        .select('id, shipping_charged, channel_fee_amount, total_amount, invoice_fees(id)')
+        .eq('id', targetInvoiceId)
+        .eq('user_id', userId)
+        .single();
+
+      if (!error && data) {
+        const shippingMatched = roundCurrencyAmount(data.shipping_charged || 0) === expectedShipping;
+        const feeTotalMatched = roundCurrencyAmount(data.channel_fee_amount || 0) === expectedFeeTotal;
+        const totalMatched = expectedTotalAmount === null
+          ? true
+          : roundCurrencyAmount(data.total_amount || 0) === expectedTotalAmount;
+        const feeRows = Array.isArray(data.invoice_fees) ? data.invoice_fees : [];
+        const feeCountMatched = expectedFeeCount === null ? true : feeRows.length === expectedFeeCount;
+
+        if (shippingMatched && feeTotalMatched && feeCountMatched && totalMatched) {
+          return;
+        }
+      }
+
+      await wait(INVOICE_READ_SYNC_DELAY_MS * (attempt + 1));
+    }
+
+    console.warn('[InvoiceFormPage] Timed out waiting for invoice read consistency', {
+      invoiceId: targetInvoiceId,
+      expectedShipping,
+      expectedFeeTotal,
+      expectedTotalAmount,
+      expectedFeeCount,
+    });
+  };
+
   const handleSaveInvoice = async () => {
+    if (invoiceId && isSettledInvoice) {
+      toast.error('Invois dibayar tidak boleh disunting');
+      return;
+    }
+
     if (selectedItems.length === 0 && manualItems.length === 0) {
       toast.error('Sila tambahkan sekurang-kurangnya satu item');
       return;
@@ -1003,6 +1535,8 @@ const InvoiceFormPage = () => {
       shippingMethod: resolvedShippingMethod,
       shippingCharged: normalizedShipping.value,
     });
+    const invoiceTaxAmount = roundCurrencyAmount(existingInvoice?.tax_amount || 0);
+    const expectedTotalAmount = roundCurrencyAmount(subtotal + normalizedShipping.value + invoiceTaxAmount);
     if (resolvedShippingMethod !== shippingMethod) {
       setShippingMethod(resolvedShippingMethod);
     }
@@ -1018,14 +1552,16 @@ const InvoiceFormPage = () => {
           throw new Error('User tidak sah');
         }
 
-        const { error: updateInvoiceError } = await supabase
+        await syncInvoiceItemsForEdit(invoiceId);
+
+        const { data: updatedInvoiceRow, error: updateInvoiceError } = await supabase
           .from('invoices')
           .update({
             client_id: selectedClientId || null,
             notes,
-            platform: selectedSalesChannel?.name || 'Manual',
-            sales_channel_id: selectedSalesChannel?.id || null,
-            channel_fee_amount: channelFeePreview,
+            platform: platformLabel,
+            sales_channel_id: null,
+            channel_fee_amount: platformFeeTotal,
             shipping_method: resolvedShippingMethod,
             courier_payment_mode: resolvedCourierPaymentMode,
             shipping_required: resolvedShippingRequired,
@@ -1033,12 +1569,37 @@ const InvoiceFormPage = () => {
             updated_at: new Date().toISOString(),
           })
           .eq('id', invoiceId)
-          .eq('user_id', userId);
+          .eq('user_id', userId)
+          .select('id, status, shipping_charged, channel_fee_amount, updated_at')
+          .single();
 
         if (updateInvoiceError) {
           throw updateInvoiceError;
         }
+        if (!updatedInvoiceRow?.id) {
+          throw new Error('Gagal kemaskini invois: tiada rekod dikemaskini.');
+        }
 
+        const { data: recalcResult, error: recalcError } = await supabase.rpc('recalculate_invoice_totals', {
+          p_invoice_id: invoiceId,
+          p_user_id: userId,
+        });
+        if (recalcError) {
+          throw recalcError;
+        }
+        if (!recalcResult?.[0]?.success) {
+          throw new Error(recalcResult?.[0]?.message || 'Gagal kemaskini jumlah invois.');
+        }
+
+        await replaceInvoiceFeeSnapshots(invoiceId);
+        await waitForInvoiceReadConsistency(invoiceId, {
+          shippingCharged: normalizedShipping.value,
+          channelFeeAmount: platformFeeTotal,
+          totalAmount: expectedTotalAmount,
+          feeCount: selectedFeeRuleIdsRef.current.length,
+        });
+        queryClient.removeQueries({ queryKey: ['invoice', invoiceId] });
+        queryClient.invalidateQueries({ queryKey: ['invoices'] });
         toast.success('Invois dikemaskini');
         navigate(`/invoices/${invoiceId}`);
       } else {
@@ -1048,14 +1609,27 @@ const InvoiceFormPage = () => {
           selectedItems,
           notes,
           manualItems,
-          platform: selectedSalesChannel?.name || 'Manual',
-          salesChannelId: selectedSalesChannel?.id || null,
-          channelFeeAmount: channelFeePreview,
+          platform: platformLabel,
+          salesChannelId: null,
+          channelFeeAmount: platformFeeTotal,
           shippingMethod: resolvedShippingMethod,
           courierPaymentMode: resolvedCourierPaymentMode,
           shippingCharged: normalizedShipping.value,
           shippingRequired: resolvedShippingRequired,
         });
+
+        if (result?.id) {
+          await replaceInvoiceFeeSnapshots(result.id);
+          await waitForInvoiceReadConsistency(result.id, {
+            shippingCharged: normalizedShipping.value,
+            channelFeeAmount: platformFeeTotal,
+            totalAmount: expectedTotalAmount,
+            feeCount: selectedFeeRuleIdsRef.current.length,
+          });
+          queryClient.removeQueries({ queryKey: ['invoice', result.id] });
+        }
+        queryClient.invalidateQueries({ queryKey: ['invoices'] });
+
         toast.success('Invois berjaya dibuat');
         // Navigate to the newly created invoice details page
         if (result?.id) {
@@ -1725,44 +2299,153 @@ const InvoiceFormPage = () => {
             </CardContent>
           </Card>
 
-          {/* Sales Channel Selection */}
+          {/* Platform Fee Multi Select */}
           <Card>
             <CardHeader>
-              <CardTitle>Platform Jualan</CardTitle>
+              <CardTitle>Caj Platform (Opsyen)</CardTitle>
               <CardDescription>
-                Pilih platform untuk kira caj secara automatik.
+                Pilih lebih daripada satu rule. Setiap fee boleh dikira ikut harga barang, caj pos, atau jumlah kutipan.
               </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-3">
-              <div className="space-y-2">
-                <label htmlFor="sales-channel-select" className="block text-sm font-medium">
-                  Platform
-                </label>
-                <Select
-                  id="sales-channel-select"
-                  value={selectedSalesChannelId}
-                  onChange={(event) => setSelectedSalesChannelId(event.target.value)}
-                >
-                  <option value="">Tanpa Platform (Tiada Caj)</option>
-                  {salesChannels.map((channel) => (
-                    <option key={channel.id} value={channel.id}>
-                      {channel.name}
-                    </option>
-                  ))}
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  {channelFeeLabel}
-                </p>
-              </div>
+            <CardContent className="space-y-4">
+              {selectableFeeRules.length === 0 ? (
+                <div className="rounded-lg border border-dashed p-3 text-sm text-muted-foreground">
+                  Tiada rule caj platform.{' '}
+                  <button
+                    type="button"
+                    onClick={() => navigate('/settings')}
+                    className="font-medium text-primary underline-offset-2 hover:underline"
+                  >
+                    Tambah fee di Settings
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {selectableFeeRules.map((rule) => {
+                    const checked = selectedFeeRuleIds.includes(rule.id);
+                    const isInactive = !rule.is_active;
+                    return (
+                      <label
+                        key={rule.id}
+                        className={`flex items-start gap-3 rounded-lg border p-3 ${checked ? 'border-primary/40 bg-primary/5' : 'border-border/70'} ${isSettledInvoice ? 'cursor-not-allowed opacity-70' : 'cursor-pointer'}`}
+                      >
+                        <Checkbox
+                          checked={checked}
+                          onCheckedChange={(next) => handleFeeRuleToggle(rule.id, next === true)}
+                          disabled={isSettledInvoice}
+                          className="mt-0.5"
+                        />
+                        <span className="min-w-0">
+                          <span className="block text-sm font-medium break-words">
+                            {rule.name}
+                            {isInactive ? ' (Tidak aktif)' : ''}
+                          </span>
+                          <span className="block text-xs text-muted-foreground">
+                            {formatPlatformFeeRuleLabel(rule)} | {getPlatformFeeAppliesToLabel(rule.applies_to)}
+                          </span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
 
               <div className="rounded-lg border bg-secondary/30 p-3">
-                <p className="text-xs text-muted-foreground">Anggaran Caj Platform</p>
-                <p className="text-lg font-semibold">{formatCurrency(channelFeePreview)}</p>
-                {selectedSalesChannel && normalizeSalesChannelFeeType(selectedSalesChannel.fee_type) === SALES_CHANNEL_FEE_TYPES.PERCENTAGE ? (
-                  <p className="text-xs text-muted-foreground">
-                    {selectedSalesChannel.fee_value}% x {formatCurrency(subtotal)}
-                  </p>
-                ) : null}
+                <p className="text-xs text-muted-foreground">Pecahan Caj Platform</p>
+                {feeBreakdownRows.length === 0 ? (
+                  <p className="mt-1 text-sm text-muted-foreground">Tiada caj dipilih.</p>
+                ) : (
+                  <div className="mt-2 space-y-1.5 text-sm">
+                    {feeBreakdownRows.map((snapshot, index) => {
+                      const feeType = normalizePlatformFeeType(snapshot.fee_type);
+                      const appliesTo = normalizePlatformFeeAppliesTo(snapshot.applies_to);
+                      const baseLabel = getPlatformFeeAppliesToLabel(appliesTo);
+                      const lineKey = `${snapshot.fee_rule_id || snapshot.name}-${index}`;
+                      const baseAmount = roundCurrencyAmount(snapshot.base_amount);
+                      const autoAmount = roundCurrencyAmount(snapshot.amount);
+                      const hasOverride = Number.isFinite(Number.parseFloat(snapshot?.amount_override));
+                      const manualAmount = hasOverride ? roundCurrencyAmount(snapshot.amount_override) : null;
+                      const effectiveAmount = roundCurrencyAmount(snapshot?.effective_amount ?? autoAmount);
+                      const canEditOverride = !isSettledInvoice && Boolean(snapshot?.fee_rule_id);
+                      const isEditingOverride = editingFeeOverrideRuleId === snapshot?.fee_rule_id;
+                      return (
+                        <div key={lineKey} className="rounded-md border border-border/60 bg-background/80 p-2">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="min-w-0">
+                              <p className="break-words font-medium text-foreground/90">{snapshot.name}</p>
+                              <p className="text-xs text-muted-foreground break-words">
+                                {feeType === PLATFORM_FEE_TYPES.PERCENTAGE
+                                  ? `${snapshot.fee_value}% x ${baseLabel} ${formatRM(baseAmount)}`
+                                  : `${formatRM(snapshot.fee_value)} x ${baseLabel} ${formatRM(baseAmount)}`
+                                } = {formatRM(autoAmount)}
+                              </p>
+                              {hasOverride && (
+                                <p className="mt-0.5 text-xs text-muted-foreground">
+                                  Auto {formatRM(autoAmount)} -> Manual {formatRM(manualAmount)}
+                                </p>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {hasOverride && (
+                                <span className="inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800">
+                                  Manual
+                                </span>
+                              )}
+                              <span className="font-semibold text-foreground">{formatRM(effectiveAmount)}</span>
+                              {canEditOverride && (
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-7 px-2 text-xs"
+                                  onClick={() => handleOpenFeeOverrideEditor(snapshot)}
+                                >
+                                  Ubah
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                          {canEditOverride && isEditingOverride && (
+                            <div className="mt-2 rounded-md border border-border/70 bg-secondary/30 p-2">
+                              <p className="text-xs font-medium">Amaun sebenar (RM)</p>
+                              <p className="mb-2 text-xs text-muted-foreground">
+                                Gunakan jika platform potong amaun berbeza.
+                              </p>
+                              <div className="flex flex-wrap items-center gap-2">
+                                <Input
+                                  value={feeOverrideInput}
+                                  onChange={(event) => setFeeOverrideInput(event.target.value)}
+                                  inputMode="decimal"
+                                  className="h-8 w-32"
+                                />
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  className="h-8 px-3 text-xs"
+                                  onClick={handleSaveFeeOverride}
+                                >
+                                  Simpan
+                                </Button>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-8 px-3 text-xs"
+                                  onClick={() => handleResetFeeOverride(snapshot.fee_rule_id)}
+                                >
+                                  Reset ke Auto
+                                </Button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                <p className="mt-2 text-sm font-semibold">
+                  Jumlah Caj Platform: {formatRM(platformFeeTotal)}
+                </p>
               </div>
             </CardContent>
           </Card>
@@ -1782,7 +2465,7 @@ const InvoiceFormPage = () => {
                 </div>
                 <div className="flex justify-between text-sm">
                   <span>Caj Platform:</span>
-                  <span className="font-medium">- {formatCurrency(channelFeePreview)}</span>
+                  <span className="font-medium">- {formatCurrency(platformFeeTotal)}</span>
                 </div>
                 {shippingCharged > 0 ? (
                   <div className="flex justify-between text-sm">
@@ -1826,10 +2509,10 @@ const InvoiceFormPage = () => {
               <div className="space-y-2 pt-4 flex flex-col gap-2 w-full">
                 <Button
                   onClick={handleSaveInvoice}
-                  disabled={(selectedItems.length === 0 && manualItems.length === 0) || isSaving}
+                  disabled={(selectedItems.length === 0 && manualItems.length === 0) || isSaving || isSettledInvoice}
                   className="w-full"
                 >
-                  {isSaving ? 'Menyimpan...' : (invoiceId ? 'Kemaskini Invois' : 'Simpan Invois')}
+                  {isSaving ? 'Menyimpan...' : isSettledInvoice ? 'Invois Dibayar (Read-only)' : (invoiceId ? 'Kemaskini Invois' : 'Simpan Invois')}
                 </Button>
                 <Button
                   variant="outline"

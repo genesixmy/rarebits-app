@@ -257,7 +257,7 @@ const InvoiceListPage = () => {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-bold">Senarai Invois</h1>
+          <h1 className="page-title">Senarai Invois</h1>
           <p className="mt-2 text-gray-600">Urus dan lihat semua invois anda</p>
         </div>
         <Button 
@@ -286,114 +286,126 @@ const InvoiceListPage = () => {
       )}
 
       {/* Filters */}
-      <div className="space-y-4 rounded-lg border bg-white p-4">
+      <div className="space-y-4 rounded-2xl border border-slate-200 bg-white p-4 sm:p-5">
         <div className="grid grid-cols-1 gap-4">
           {/* Search */}
           <div className="relative w-full">
-            <Search className="absolute left-3 top-3 h-4 w-4 text-gray-400" />
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-cyan-500" />
             <Input
               placeholder="Cari nombor invois atau pembeli..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="pl-10 w-full"
+              className="h-10 w-full rounded-full border-cyan-300 bg-white pl-10 pr-4 font-medium text-cyan-700 placeholder:text-slate-400 focus-visible:ring-cyan-300"
             />
           </div>
 
-          {/* Status Filter - Dropdown */}
-          <div className="relative w-full">
-            <Button
-              variant="outline"
-              size="default"
-              onClick={() => setShowStatusDropdown(!showStatusDropdown)}
-              className="w-full justify-between h-10"
-            >
-              <span className="text-sm">
-                {statusFilter === '' && 'Semua'}
-                {statusFilter === 'draft' && 'Draf'}
-                {statusFilter === 'finalized' && 'Muktamad'}
-                {statusFilter === 'paid' && 'Dibayar'}
-                {statusFilter === 'partially_returned' && 'Separa Pulang'}
-                {statusFilter === 'returned' && 'Dipulangkan'}
-                {statusFilter === 'cancelled' && 'Dibatalkan'}
-              </span>
-              <ChevronDown className="h-5 w-5" />
-            </Button>
-            {showStatusDropdown && (
-              <div className="absolute left-0 top-full z-10 mt-1 w-full rounded-lg border bg-white shadow-lg">
-                {[
-                  { value: '', label: 'Semua' },
-                  { value: 'draft', label: 'Draf' },
-                  { value: 'finalized', label: 'Muktamad' },
-                  { value: 'paid', label: 'Dibayar' },
-                  { value: 'partially_returned', label: 'Separa Pulang' },
-                  { value: 'returned', label: 'Dipulangkan' },
-                  { value: 'cancelled', label: 'Dibatalkan' },
-                ].map((option) => (
-                  <button
-                    key={option.value}
-                    onClick={() => {
-                      updateUrlFilters({
-                        nextStatus: option.value,
-                        nextShippingState: option.value === 'paid' ? shippingStateFilter : '',
-                      });
-                      setShowStatusDropdown(false);
-                    }}
-                    className={`block w-full px-4 py-2 text-left text-sm hover:bg-gray-100 first:rounded-t-lg last:rounded-b-lg ${
-                      statusFilter === option.value ? 'bg-blue-50 font-medium text-blue-600' : ''
-                    }`}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            {/* Status Filter - Dropdown */}
+            <div className="relative w-full">
+              <Button
+                variant="outline"
+                size="default"
+                onClick={() => {
+                  const nextIsOpen = !showStatusDropdown;
+                  setShowStatusDropdown(nextIsOpen);
+                  if (nextIsOpen) setShowSortDropdown(false);
+                }}
+                className="h-10 w-full justify-between rounded-full border-cyan-300 bg-white px-4 font-medium text-cyan-700 hover:bg-cyan-50 hover:text-cyan-700"
+              >
+                <span className="text-sm">
+                  {statusFilter === '' && 'Semua'}
+                  {statusFilter === 'draft' && 'Draf'}
+                  {statusFilter === 'finalized' && 'Muktamad'}
+                  {statusFilter === 'paid' && 'Dibayar'}
+                  {statusFilter === 'partially_returned' && 'Separa Pulang'}
+                  {statusFilter === 'returned' && 'Dipulangkan'}
+                  {statusFilter === 'cancelled' && 'Dibatalkan'}
+                </span>
+                <ChevronDown className="h-5 w-5 text-cyan-600" />
+              </Button>
+              {showStatusDropdown && (
+                <div className="absolute left-0 top-full z-10 mt-1 w-full overflow-hidden rounded-2xl border border-cyan-200 bg-white shadow-lg">
+                  {[
+                    { value: '', label: 'Semua' },
+                    { value: 'draft', label: 'Draf' },
+                    { value: 'finalized', label: 'Muktamad' },
+                    { value: 'paid', label: 'Dibayar' },
+                    { value: 'partially_returned', label: 'Separa Pulang' },
+                    { value: 'returned', label: 'Dipulangkan' },
+                    { value: 'cancelled', label: 'Dibatalkan' },
+                  ].map((option) => (
+                    <button
+                      key={option.value}
+                      onClick={() => {
+                        updateUrlFilters({
+                          nextStatus: option.value,
+                          nextShippingState: option.value === 'paid' ? shippingStateFilter : '',
+                        });
+                        setShowStatusDropdown(false);
+                        setShowSortDropdown(false);
+                      }}
+                      className={`block w-full px-4 py-2 text-left text-sm hover:bg-cyan-50 ${
+                        statusFilter === option.value ? 'bg-cyan-50 font-medium text-cyan-700' : 'text-slate-700'
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
 
-          {/* Sort - Dropdown */}
-          <div className="relative w-full">
-            <Button
-              variant="outline"
-              size="default"
-              onClick={() => setShowSortDropdown(!showSortDropdown)}
-              className="w-full justify-between h-10"
-            >
-              <span className="text-sm">
-                {[
-                  { value: 'date-desc', label: 'Terbaru' },
-                  { value: 'date-asc', label: 'Tertua' },
-                  { value: 'amount-desc', label: 'Tertinggi' },
-                  { value: 'amount-asc', label: 'Terendah' },
-                  { value: 'buyer-asc', label: 'Pembeli A-Z' },
-                  { value: 'buyer-desc', label: 'Pembeli Z-A' },
-                ].find((opt) => opt.value === sortBy)?.label || 'Isihan'}
-              </span>
-              <ChevronDown className="h-5 w-5" />
-            </Button>
-            {showSortDropdown && (
-              <div className="absolute right-0 top-full z-10 mt-1 w-full rounded-lg border bg-white shadow-lg">
-                {[
-                  { value: 'date-desc', label: 'Terbaru' },
-                  { value: 'date-asc', label: 'Tertua' },
-                  { value: 'amount-desc', label: 'Tertinggi' },
-                  { value: 'amount-asc', label: 'Terendah' },
-                  { value: 'buyer-asc', label: 'Pembeli A-Z' },
-                  { value: 'buyer-desc', label: 'Pembeli Z-A' },
-                ].map((option) => (
-                  <button
-                    key={option.value}
-                    onClick={() => {
-                      setSortBy(option.value);
-                      setShowSortDropdown(false);
-                    }}
-                    className={`block w-full px-4 py-2 text-left text-sm hover:bg-gray-100 first:rounded-t-lg last:rounded-b-lg ${
-                      sortBy === option.value ? 'bg-blue-50 font-medium text-blue-600' : ''
-                    }`}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-            )}
+            {/* Sort - Dropdown */}
+            <div className="relative w-full">
+              <Button
+                variant="outline"
+                size="default"
+                onClick={() => {
+                  const nextIsOpen = !showSortDropdown;
+                  setShowSortDropdown(nextIsOpen);
+                  if (nextIsOpen) setShowStatusDropdown(false);
+                }}
+                className="h-10 w-full justify-between rounded-full border-cyan-300 bg-white px-4 font-medium text-cyan-700 hover:bg-cyan-50 hover:text-cyan-700"
+              >
+                <span className="text-sm">
+                  {[
+                    { value: 'date-desc', label: 'Terbaru' },
+                    { value: 'date-asc', label: 'Tertua' },
+                    { value: 'amount-desc', label: 'Tertinggi' },
+                    { value: 'amount-asc', label: 'Terendah' },
+                    { value: 'buyer-asc', label: 'Pembeli A-Z' },
+                    { value: 'buyer-desc', label: 'Pembeli Z-A' },
+                  ].find((opt) => opt.value === sortBy)?.label || 'Isihan'}
+                </span>
+                <ChevronDown className="h-5 w-5 text-cyan-600" />
+              </Button>
+              {showSortDropdown && (
+                <div className="absolute right-0 top-full z-10 mt-1 w-full overflow-hidden rounded-2xl border border-cyan-200 bg-white shadow-lg">
+                  {[
+                    { value: 'date-desc', label: 'Terbaru' },
+                    { value: 'date-asc', label: 'Tertua' },
+                    { value: 'amount-desc', label: 'Tertinggi' },
+                    { value: 'amount-asc', label: 'Terendah' },
+                    { value: 'buyer-asc', label: 'Pembeli A-Z' },
+                    { value: 'buyer-desc', label: 'Pembeli Z-A' },
+                  ].map((option) => (
+                    <button
+                      key={option.value}
+                      onClick={() => {
+                        setSortBy(option.value);
+                        setShowSortDropdown(false);
+                        setShowStatusDropdown(false);
+                      }}
+                      className={`block w-full px-4 py-2 text-left text-sm hover:bg-cyan-50 ${
+                        sortBy === option.value ? 'bg-cyan-50 font-medium text-cyan-700' : 'text-slate-700'
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -404,20 +416,20 @@ const InvoiceListPage = () => {
             value={dateRange.start}
             onChange={(e) => setDateRange({ ...dateRange, start: e.target.value })}
             placeholder="Dari Tarikh"
-            className="flex-1"
+            className="h-10 flex-1 rounded-full border-cyan-300 bg-white px-4 font-medium text-cyan-700 focus-visible:ring-cyan-300"
           />
           <Input
             type="date"
             value={dateRange.end}
             onChange={(e) => setDateRange({ ...dateRange, end: e.target.value })}
             placeholder="Hingga Tarikh"
-            className="flex-1"
+            className="h-10 flex-1 rounded-full border-cyan-300 bg-white px-4 font-medium text-cyan-700 focus-visible:ring-cyan-300"
           />
           <Button
             variant="outline"
             size="default"
             onClick={() => setDateRange({ start: '', end: '' })}
-            className="whitespace-nowrap w-full sm:w-auto h-10"
+            className="h-10 w-full whitespace-nowrap rounded-full border-cyan-300 bg-white px-4 font-medium text-cyan-700 hover:bg-cyan-50 hover:text-cyan-700 sm:w-auto"
           >
             Kosongkan Tarikh
           </Button>
@@ -487,24 +499,27 @@ const InvoiceListPage = () => {
             {filteredInvoices.map((invoice) => (
               <div
                 key={invoice.id}
-                className="grid grid-cols-12 gap-4 px-4 py-4 cursor-pointer items-center hover:bg-gray-50 transition-colors"
+                className="group relative grid grid-cols-12 gap-4 px-4 py-4 cursor-pointer items-center overflow-hidden"
                 onClick={() => handleViewInvoice(invoice.id)}
               >
                 {/* Invoice Number & Client */}
                 <div className="col-span-4 min-w-0 md:col-span-3">
-                  <p className="font-medium text-sm break-words">
-                    {invoice.refunds && invoice.refunds.length > 0 && (
-                      <span
-                        aria-hidden="true"
-                        className="mr-1.5 inline-block h-2 w-2 rounded-full bg-red-500 align-middle"
-                      />
-                    )}
-                    {invoice.invoice_number}
-                  </p>
-                  <p className="text-xs text-gray-600 break-words">{invoice.client?.name || '-'}</p>
-                  <p className="text-[11px] leading-tight text-gray-500 break-all md:hidden">
-                    {invoice.client?.email || '-'}
-                  </p>
+                  <div className="absolute left-0 top-0 h-full w-1 bg-primary scale-y-0 transition-transform origin-center duration-300 group-hover:scale-y-100" />
+                  <div className="transition-transform duration-300 group-hover:translate-x-2">
+                    <p className="font-medium text-sm break-words">
+                      {invoice.refunds && invoice.refunds.length > 0 && (
+                        <span
+                          aria-hidden="true"
+                          className="mr-1.5 inline-block h-2 w-2 rounded-full bg-red-500 align-middle"
+                        />
+                      )}
+                      {invoice.invoice_number}
+                    </p>
+                    <p className="text-xs text-gray-600 break-words">{invoice.client?.name || '-'}</p>
+                    <p className="text-[11px] leading-tight text-gray-500 break-all md:hidden">
+                      {invoice.client?.email || '-'}
+                    </p>
+                  </div>
                 </div>
 
                 {/* Date */}
@@ -551,7 +566,7 @@ const InvoiceListPage = () => {
 
                 {/* Chevron */}
                 <div className="col-span-1 text-right">
-                  <ChevronRight className="h-4 w-4 text-gray-400" />
+                  <ChevronRight className="h-4 w-4 text-gray-400 transition-transform duration-300 group-hover:translate-x-0.5 group-hover:text-primary" />
                 </div>
               </div>
             ))}

@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Loader2, Plus, MoreVertical, Edit, Trash2, Wallet as WalletIcon, ArrowRightLeft, Repeat, ChevronRight, Briefcase, User, BarChart2, RefreshCw } from 'lucide-react';
+import { Loader2, Plus, MoreVertical, Edit, Trash2, Wallet as WalletIcon, ArrowRightLeft, Repeat, Briefcase, User, BarChart2, RefreshCw } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
 import { supabase } from '@/lib/customSupabaseClient';
 import { useAuth } from '@/contexts/SupabaseAuthContext';
@@ -89,6 +89,16 @@ const AccountTypeFilter = ({ filter, setFilter }) => (
     </div>
 );
 
+const WALLET_PREVIEW_THEMES = [
+  'from-cyan-500 via-sky-500 to-cyan-600',
+  'from-orange-400 via-orange-500 to-amber-500',
+  'from-emerald-400 via-green-500 to-emerald-600',
+  'from-teal-500 via-cyan-500 to-teal-600',
+];
+
+const getWalletPreviewTheme = (index) => (
+  WALLET_PREVIEW_THEMES[index % WALLET_PREVIEW_THEMES.length]
+);
 
 const WalletPage = () => {
   const { user } = useAuth();
@@ -105,6 +115,7 @@ const WalletPage = () => {
   const [deletingWallet, setDeletingWallet] = useState(null);
   const [deletingTransaction, setDeletingTransaction] = useState(null);
   const [accountTypeFilter, setAccountTypeFilter] = useState('Business');
+  const [walletSort, setWalletSort] = useState('newest');
   const [displayLimit, setDisplayLimit] = useState(20);
   const tabFilter = searchParams.get('tab') === 'expenses' ? 'expenses' : '';
 
@@ -215,6 +226,29 @@ const WalletPage = () => {
     if (accountTypeFilter === 'All') return allWallets;
     return allWallets.filter(w => w.account_type === accountTypeFilter);
   }, [allWallets, accountTypeFilter]);
+
+  const sortedFilteredWallets = useMemo(() => (
+    [...filteredWallets].sort((left, right) => {
+      const leftCreatedAt = new Date(left?.created_at || 0).getTime();
+      const rightCreatedAt = new Date(right?.created_at || 0).getTime();
+      const leftBalance = parseFloat(left?.balance) || 0;
+      const rightBalance = parseFloat(right?.balance) || 0;
+
+      if (walletSort === 'oldest' && leftCreatedAt !== rightCreatedAt) {
+        return leftCreatedAt - rightCreatedAt;
+      }
+      if (walletSort === 'balance_high' && leftBalance !== rightBalance) {
+        return rightBalance - leftBalance;
+      }
+      if (walletSort === 'balance_low' && leftBalance !== rightBalance) {
+        return leftBalance - rightBalance;
+      }
+      if (walletSort === 'newest' && leftCreatedAt !== rightCreatedAt) {
+        return rightCreatedAt - leftCreatedAt;
+      }
+      return String(left?.name || '').localeCompare(String(right?.name || ''), 'ms', { sensitivity: 'base' });
+    })
+  ), [filteredWallets, walletSort]);
   
   const filteredWalletIds = useMemo(() => new Set(filteredWallets.map(w => w.id)), [filteredWallets]);
 
@@ -540,11 +574,11 @@ const WalletPage = () => {
           </div>
         )}
 
-        <Card className="overflow-hidden rounded-3xl border border-transparent bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white shadow-[0_20px_45px_-22px_rgba(124,58,237,0.8)]">
+        <Card className="overflow-hidden rounded-3xl border border-transparent bg-gradient-to-r from-cyan-500 to-teal-500 text-white shadow-[0_20px_45px_-22px_rgba(8,145,178,0.65)]">
           <CardHeader className="pb-3">
             <div className="flex items-center gap-3">
-              <span className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-white/95 text-violet-600">
-                <WalletIcon className="h-4 w-4 text-violet-600" />
+              <span className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-white/95 text-cyan-600">
+                <WalletIcon className="h-4 w-4 text-cyan-600" />
               </span>
               <CardTitle className="text-base font-semibold text-white">Jumlah Baki ({accountTypeFilter})</CardTitle>
             </div>
@@ -560,61 +594,98 @@ const WalletPage = () => {
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between">
-            <CardTitle>Senarai Wallet ({accountTypeFilter})</CardTitle>
-            <Button onClick={() => { setEditingWallet(null); setIsWalletModalOpen(true); }} variant="ghost" size="sm">
-                <Plus className="mr-2 h-4 w-4" /> Tambah
-            </Button>
+        <Card className="overflow-hidden border-slate-200/80 bg-slate-50/70 shadow-sm">
+          <CardHeader className="border-b border-slate-200/80 pb-4">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <CardTitle className="text-lg font-semibold text-slate-900">Senarai Wallet</CardTitle>
+                <p className="mt-1 text-sm text-slate-500">
+                  {sortedFilteredWallets.length} akaun dipaparkan ({accountTypeFilter})
+                </p>
+              </div>
+
+              <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+                <Button
+                  onClick={() => { setEditingWallet(null); setIsWalletModalOpen(true); }}
+                  className="w-full rounded-full bg-cyan-500 text-white hover:bg-cyan-600 sm:w-auto"
+                >
+                  <Plus className="mr-2 h-4 w-4" />
+                  Tambah Wallet
+                </Button>
+                <select
+                  value={walletSort}
+                  onChange={(event) => setWalletSort(event.target.value)}
+                  className="h-10 rounded-full border border-cyan-200 bg-white px-4 text-sm font-medium text-cyan-700 outline-none transition focus:border-cyan-400"
+                >
+                  <option value="newest">Terbaharu</option>
+                  <option value="oldest">Terlama</option>
+                  <option value="balance_high">Baki Tertinggi</option>
+                  <option value="balance_low">Baki Terendah</option>
+                </select>
+              </div>
+            </div>
           </CardHeader>
-          <CardContent>
-            {filteredWallets.length > 0 ? (
-              <ul className="space-y-1">
-                {filteredWallets.map(wallet => (
-                  <li key={wallet.id}>
-                      <div className="flex items-center justify-between p-2 -m-2 rounded-lg hover:bg-muted/50 transition-colors group">
-                      <Link to={`/wallet/account/${wallet.id}`} className="flex-1">
-                        <div className="flex items-center gap-3">
-                          <WalletIcon className="w-5 h-5 text-primary" />
-                          <div>
-                            <p className="font-semibold flex items-center gap-2">
-                              {wallet.name}
-                              <span className={cn(
-                                  "text-xs font-semibold px-2 py-0.5 rounded-full",
-                                  wallet.account_type === 'Business' ? "bg-blue-100 text-blue-800" : "bg-purple-100 text-purple-800"
-                              )}>
-                                  {wallet.account_type === 'Business' ? <Briefcase className='inline w-3 h-3 mr-1' /> : <User className='inline w-3 h-3 mr-1' />}
-                                  {wallet.account_type}
-                              </span>
-                            </p>
-                            <p className="text-sm text-muted-foreground">RM {parseFloat(wallet.balance).toFixed(2)}</p>
-                          </div>
-                        </div>
-                      </Link>
-                      <div className='flex items-center'>
-                        <ChevronRight className="w-5 h-5 text-muted-foreground transition-transform group-hover:translate-x-1" />
-                        <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <Button variant="ghost" size="icon" className="h-8 w-8">
-                                <MoreVertical className="h-4 w-4" />
-                              </Button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end">
-                              <DropdownMenuItem onClick={() => { setEditingWallet(wallet); setIsWalletModalOpen(true); }}>
-                                <Edit className="mr-2 h-4 w-4" /> Sunting
-                              </DropdownMenuItem>
-                              <DropdownMenuItem onClick={() => setDeletingWallet(wallet)} className="text-destructive focus:text-destructive focus:bg-destructive/10">
-                                <Trash2 className="mr-2 h-4 w-4" /> Padam
-                              </DropdownMenuItem>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                        </div>
+          <CardContent className="p-0">
+            {sortedFilteredWallets.length > 0 ? (
+              <div className="divide-y divide-slate-200/80">
+                {sortedFilteredWallets.map((wallet, walletIndex) => (
+                  <div key={wallet.id} className="grid grid-cols-1 gap-4 px-4 py-4 sm:grid-cols-[132px_minmax(0,1fr)_auto] sm:items-center">
+                    <Link
+                      to={`/wallet/account/${wallet.id}`}
+                      className={cn(
+                        'group relative block h-[74px] overflow-hidden rounded-2xl bg-gradient-to-br p-3 shadow-sm transition hover:shadow-md',
+                        getWalletPreviewTheme(walletIndex)
+                      )}
+                    >
+                      <span className="pointer-events-none absolute -left-5 top-4 h-14 w-14 rounded-full bg-white/10" />
+                      <span className="pointer-events-none absolute -right-3 -top-5 h-16 w-16 rounded-full bg-white/10" />
+                      <span className="pointer-events-none absolute bottom-0 right-0 h-10 w-16 rounded-tl-3xl bg-white/10" />
+                      <div className="relative z-10 flex h-full flex-col justify-between text-white">
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-white/80">Wallet</p>
+                        <p className="truncate text-sm font-semibold">{wallet.name}</p>
                       </div>
-                  </li>
+                    </Link>
+
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-3 lg:grid-cols-3">
+                      <div className="min-w-0">
+                        <p className="text-xs text-slate-500">Jenis Akaun</p>
+                        <p className="truncate text-sm font-semibold text-slate-900">{wallet.account_type}</p>
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs text-slate-500">Nama Wallet</p>
+                        <p className="truncate text-sm font-semibold text-slate-900">{wallet.name}</p>
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs text-slate-500">Baki</p>
+                        <p className="truncate text-sm font-semibold text-emerald-700">RM {parseFloat(wallet.balance).toFixed(2)}</p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-end gap-1.5">
+                      <Button asChild variant="ghost" size="sm" className="text-cyan-700 hover:bg-cyan-50 hover:text-cyan-800">
+                        <Link to={`/wallet/account/${wallet.id}`}>Lihat Akaun</Link>
+                      </Button>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" size="icon" className="h-8 w-8">
+                            <MoreVertical className="h-4 w-4" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem onClick={() => { setEditingWallet(wallet); setIsWalletModalOpen(true); }}>
+                            <Edit className="mr-2 h-4 w-4" /> Sunting
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => setDeletingWallet(wallet)} className="text-destructive focus:text-destructive focus:bg-destructive/10">
+                            <Trash2 className="mr-2 h-4 w-4" /> Padam
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
+                  </div>
                 ))}
-              </ul>
+              </div>
             ) : (
-              <p className="text-muted-foreground text-center py-4">Tiada wallet ditemui untuk penapis ini.</p>
+              <p className="py-6 text-center text-muted-foreground">Tiada wallet ditemui untuk penapis ini.</p>
             )}
           </CardContent>
         </Card>

@@ -106,8 +106,9 @@ const TransactionList = ({ transactions, wallets, onEdit, onDelete }) => {
               const typeBadgeClass = classificationBadgeClass(classification);
 
               return (
-                <li key={tx.id} className="flex items-center justify-between rounded-lg p-2 hover:bg-muted/50">
-                  <div className="flex min-w-0 flex-1 items-center gap-3">
+                <li key={tx.id} className="group relative flex items-center justify-between overflow-hidden rounded-lg p-2">
+                  <div className="absolute left-0 top-0 h-full w-1 bg-primary scale-y-0 transition-transform origin-center duration-300 group-hover:scale-y-100" />
+                  <div className="flex min-w-0 flex-1 items-center gap-3 transition-transform duration-300 group-hover:translate-x-2">
                     <div className={cn("rounded-full p-2", colorClass)}>
                       {icon}
                     </div>

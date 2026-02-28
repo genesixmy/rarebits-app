@@ -295,9 +295,9 @@ const ItemCard = ({
               onClick={(event) => event.stopPropagation()}
             >
               <Button
-                variant="outline"
+                variant="default"
                 size="sm"
-                className="gap-2"
+                className="gap-2 border-0 text-white brand-gradient brand-gradient-hover"
                 onClick={handleQuickSell}
                 disabled={isOutOfStock}
               >
@@ -404,7 +404,7 @@ const ItemList = ({
             variant="default"
             size="sm"
             onClick={handleEnterSelectMode}
-            className="border-0 bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white hover:from-violet-700 hover:to-fuchsia-700"
+            className="h-10 rounded-xl border-0 px-4 text-white brand-gradient brand-gradient-hover"
           >
             Pilih Banyak
           </Button>

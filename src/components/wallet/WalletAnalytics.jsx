@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts';
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
@@ -30,6 +30,18 @@ const TYPE_LABEL = {
 };
 
 const formatNumber = (value) => `RM ${Number(value || 0).toFixed(2)}`;
+const WALLET_GRAPH_THEME = {
+  inflow: '#22c1dd',
+  inflowSoft: '#67e8f9',
+  outflow: '#8b5cf6',
+  outflowSoft: '#c4b5fd',
+  axis: '#94a3b8',
+  grid: '#e2e8f0',
+  tooltipText: '#334155',
+  tooltipBg: '#ffffff',
+  tooltipBorder: '#e2e8f0',
+  tooltipShadow: '0 10px 30px -16px rgba(15, 23, 42, 0.45)',
+};
 
 const getCurrentMonthValue = () => {
   const now = new Date();
@@ -569,8 +581,23 @@ const WalletAnalytics = ({ wallets = [], transactions = [] }) => {
       </div>
 
       <Card>
-        <CardHeader>
-          <CardTitle>Aliran Masuk vs Aliran Keluar</CardTitle>
+        <CardHeader className="pb-3">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <CardTitle className="text-base font-semibold">Aliran Masuk vs Aliran Keluar</CardTitle>
+              <p className="mt-1 text-xs text-muted-foreground">Trend tunai {days} hari terakhir</p>
+            </div>
+            <div className="flex items-center gap-4 text-xs">
+              <span className="inline-flex items-center gap-1.5 text-slate-600">
+                <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: WALLET_GRAPH_THEME.inflow }} />
+                Aliran Masuk
+              </span>
+              <span className="inline-flex items-center gap-1.5 text-slate-600">
+                <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: WALLET_GRAPH_THEME.outflow }} />
+                Aliran Keluar
+              </span>
+            </div>
+          </div>
         </CardHeader>
         <CardContent>
           {isAnalyticsLoading ? (
@@ -582,16 +609,65 @@ const WalletAnalytics = ({ wallets = [], transactions = [] }) => {
               Tiada transaksi untuk julat masa ini.
             </div>
           ) : (
-            <ResponsiveContainer width="100%" height={300}>
-              <LineChart data={trendRows}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={12} />
-                <YAxis tickFormatter={(value) => `RM${Number(value).toFixed(0)}`} tickLine={false} axisLine={false} fontSize={12} />
-                <Tooltip formatter={(value) => formatNumber(value)} />
-                <Line type="monotone" dataKey="Masuk" stroke="#16a34a" strokeWidth={2} dot={false} />
-                <Line type="monotone" dataKey="Keluar" stroke="#dc2626" strokeWidth={2} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
+            <div className="rounded-2xl border border-slate-200/80 bg-white/70 p-2.5">
+              <ResponsiveContainer width="100%" height={300}>
+                <AreaChart data={trendRows} margin={{ top: 10, right: 8, left: -10, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="walletInflowFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={WALLET_GRAPH_THEME.inflow} stopOpacity={0.35} />
+                      <stop offset="100%" stopColor={WALLET_GRAPH_THEME.inflow} stopOpacity={0.03} />
+                    </linearGradient>
+                    <linearGradient id="walletOutflowFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={WALLET_GRAPH_THEME.outflow} stopOpacity={0.3} />
+                      <stop offset="100%" stopColor={WALLET_GRAPH_THEME.outflow} stopOpacity={0.03} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={WALLET_GRAPH_THEME.grid} />
+                  <XAxis
+                    dataKey="label"
+                    tickLine={false}
+                    axisLine={false}
+                    tick={{ fontSize: 11, fill: WALLET_GRAPH_THEME.axis }}
+                  />
+                  <YAxis
+                    tickFormatter={(value) => `RM${Number(value).toFixed(0)}`}
+                    tickLine={false}
+                    axisLine={false}
+                    tick={{ fontSize: 11, fill: WALLET_GRAPH_THEME.axis }}
+                    width={44}
+                  />
+                  <Tooltip
+                    labelStyle={{ color: WALLET_GRAPH_THEME.tooltipText, fontWeight: 600 }}
+                    itemStyle={{ color: WALLET_GRAPH_THEME.tooltipText }}
+                    contentStyle={{
+                      backgroundColor: WALLET_GRAPH_THEME.tooltipBg,
+                      border: `1px solid ${WALLET_GRAPH_THEME.tooltipBorder}`,
+                      borderRadius: '0.75rem',
+                      boxShadow: WALLET_GRAPH_THEME.tooltipShadow,
+                    }}
+                    formatter={(value, name) => [formatNumber(value), name]}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="Masuk"
+                    stroke={WALLET_GRAPH_THEME.inflow}
+                    fill="url(#walletInflowFill)"
+                    strokeWidth={3}
+                    dot={false}
+                    activeDot={{ r: 5, fill: WALLET_GRAPH_THEME.inflow, stroke: '#ffffff', strokeWidth: 2 }}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="Keluar"
+                    stroke={WALLET_GRAPH_THEME.outflow}
+                    fill="url(#walletOutflowFill)"
+                    strokeWidth={3}
+                    dot={false}
+                    activeDot={{ r: 5, fill: WALLET_GRAPH_THEME.outflow, stroke: '#ffffff', strokeWidth: 2 }}
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
           )}
         </CardContent>
       </Card>
@@ -611,11 +687,38 @@ const WalletAnalytics = ({ wallets = [], transactions = [] }) => {
             ) : (
               <ResponsiveContainer width="100%" height={220}>
                 <BarChart data={inflowBreakdown} layout="vertical" margin={{ top: 4, right: 16, left: 8, bottom: 4 }}>
-                  <CartesianGrid strokeDasharray="3 3" horizontal={false} />
-                  <XAxis type="number" tickFormatter={(value) => `RM${Number(value).toFixed(0)}`} fontSize={12} />
-                  <YAxis type="category" dataKey="label" width={110} fontSize={12} />
-                  <Tooltip formatter={(value) => formatNumber(value)} />
-                  <Bar dataKey="total" fill="#16a34a" radius={[0, 6, 6, 0]} />
+                  <defs>
+                    <linearGradient id="walletBreakdownInflowFill" x1="0%" y1="0%" x2="100%" y2="0%">
+                      <stop offset="0%" stopColor={WALLET_GRAPH_THEME.inflowSoft} stopOpacity={0.95} />
+                      <stop offset="100%" stopColor={WALLET_GRAPH_THEME.inflow} stopOpacity={0.95} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke={WALLET_GRAPH_THEME.grid} />
+                  <XAxis
+                    type="number"
+                    tickFormatter={(value) => `RM${Number(value).toFixed(0)}`}
+                    fontSize={12}
+                    tick={{ fill: WALLET_GRAPH_THEME.axis }}
+                  />
+                  <YAxis
+                    type="category"
+                    dataKey="label"
+                    width={110}
+                    fontSize={12}
+                    tick={{ fill: WALLET_GRAPH_THEME.axis }}
+                  />
+                  <Tooltip
+                    labelStyle={{ color: WALLET_GRAPH_THEME.tooltipText, fontWeight: 600 }}
+                    itemStyle={{ color: WALLET_GRAPH_THEME.tooltipText }}
+                    contentStyle={{
+                      backgroundColor: WALLET_GRAPH_THEME.tooltipBg,
+                      border: `1px solid ${WALLET_GRAPH_THEME.tooltipBorder}`,
+                      borderRadius: '0.75rem',
+                      boxShadow: WALLET_GRAPH_THEME.tooltipShadow,
+                    }}
+                    formatter={(value) => formatNumber(value)}
+                  />
+                  <Bar dataKey="total" fill="url(#walletBreakdownInflowFill)" radius={[0, 6, 6, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             )}
@@ -636,11 +739,38 @@ const WalletAnalytics = ({ wallets = [], transactions = [] }) => {
             ) : (
               <ResponsiveContainer width="100%" height={220}>
                 <BarChart data={outflowBreakdown} layout="vertical" margin={{ top: 4, right: 16, left: 8, bottom: 4 }}>
-                  <CartesianGrid strokeDasharray="3 3" horizontal={false} />
-                  <XAxis type="number" tickFormatter={(value) => `RM${Number(value).toFixed(0)}`} fontSize={12} />
-                  <YAxis type="category" dataKey="label" width={110} fontSize={12} />
-                  <Tooltip formatter={(value) => formatNumber(value)} />
-                  <Bar dataKey="total" fill="#dc2626" radius={[0, 6, 6, 0]} />
+                  <defs>
+                    <linearGradient id="walletBreakdownOutflowFill" x1="0%" y1="0%" x2="100%" y2="0%">
+                      <stop offset="0%" stopColor={WALLET_GRAPH_THEME.outflowSoft} stopOpacity={0.95} />
+                      <stop offset="100%" stopColor={WALLET_GRAPH_THEME.outflow} stopOpacity={0.95} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke={WALLET_GRAPH_THEME.grid} />
+                  <XAxis
+                    type="number"
+                    tickFormatter={(value) => `RM${Number(value).toFixed(0)}`}
+                    fontSize={12}
+                    tick={{ fill: WALLET_GRAPH_THEME.axis }}
+                  />
+                  <YAxis
+                    type="category"
+                    dataKey="label"
+                    width={110}
+                    fontSize={12}
+                    tick={{ fill: WALLET_GRAPH_THEME.axis }}
+                  />
+                  <Tooltip
+                    labelStyle={{ color: WALLET_GRAPH_THEME.tooltipText, fontWeight: 600 }}
+                    itemStyle={{ color: WALLET_GRAPH_THEME.tooltipText }}
+                    contentStyle={{
+                      backgroundColor: WALLET_GRAPH_THEME.tooltipBg,
+                      border: `1px solid ${WALLET_GRAPH_THEME.tooltipBorder}`,
+                      borderRadius: '0.75rem',
+                      boxShadow: WALLET_GRAPH_THEME.tooltipShadow,
+                    }}
+                    formatter={(value) => formatNumber(value)}
+                  />
+                  <Bar dataKey="total" fill="url(#walletBreakdownOutflowFill)" radius={[0, 6, 6, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             )}

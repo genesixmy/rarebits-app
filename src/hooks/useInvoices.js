@@ -134,6 +134,18 @@ export const useInvoices = (filters = {}) => {
             reason,
             notes,
             created_at
+          ),
+          invoice_fees(
+            id,
+            fee_rule_id,
+            name,
+            fee_type,
+            applies_to,
+            fee_value,
+            base_amount,
+            amount,
+            amount_override,
+            created_at
           )
         `
         )
@@ -221,6 +233,18 @@ export const useInvoiceDetail = (invoiceId) => {
             refund_amount,
             reason,
             notes,
+            created_at
+          ),
+          invoice_fees(
+            id,
+            fee_rule_id,
+            name,
+            fee_type,
+            applies_to,
+            fee_value,
+            base_amount,
+            amount,
+            amount_override,
             created_at
           )
         `
@@ -493,6 +517,19 @@ export const useCreateInvoice = () => {
 
       if (reapplySalesChannelError) {
         throw reapplySalesChannelError;
+      }
+
+      const { data: recalcData, error: recalcError } = await supabase.rpc('recalculate_invoice_totals', {
+        p_invoice_id: invoice.id,
+        p_user_id: userId,
+      });
+
+      if (recalcError) {
+        throw recalcError;
+      }
+
+      if (!recalcData?.[0]?.success) {
+        throw new Error(recalcData?.[0]?.message || 'Failed to recalculate invoice totals');
       }
 
       const { data: refreshedInvoice, error: refreshError } = await supabase
@@ -1099,6 +1136,7 @@ export const useMarkInvoiceAsPaid = () => {
       queryClient.invalidateQueries({ queryKey: ['invoices'] });
       // CRITICAL: Use correct query keys that match App.jsx
       queryClient.invalidateQueries({ queryKey: ['items', userId] });
+      queryClient.invalidateQueries({ queryKey: ['available-items', userId] });
       queryClient.invalidateQueries({ queryKey: ['clients', userId] });
       queryClient.invalidateQueries({ queryKey: ['wallets', userId] });
       queryClient.invalidateQueries({ queryKey: ['transactions', userId, 'all'] });
@@ -1111,6 +1149,10 @@ export const useMarkInvoiceAsPaid = () => {
         console.log('[useMarkInvoiceAsPaid] Refetching items for userId:', userId);
         await queryClient.refetchQueries({ queryKey: ['items', userId] });
         console.log('[useMarkInvoiceAsPaid] Items refetched - Dashboard/Sales should re-render now');
+
+        console.log('[useMarkInvoiceAsPaid] Refetching available invoice items...');
+        await queryClient.refetchQueries({ queryKey: ['available-items', userId] });
+        console.log('[useMarkInvoiceAsPaid] Available invoice items refetched');
 
         console.log('[useMarkInvoiceAsPaid] Refetching wallets...');
         await queryClient.refetchQueries({ queryKey: ['wallets', userId] });
