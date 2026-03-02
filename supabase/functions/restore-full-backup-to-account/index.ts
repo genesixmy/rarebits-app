@@ -1521,22 +1521,31 @@ const logRestoreEvent = async (
   }
 
   if (hasIdempotencyColumn) {
-    const { error: upsertError } = await serviceSupabase
+    const { data: existingRows, error: existingError } = await serviceSupabase
       .from("restore_events")
-      .upsert(eventRow, {
-        onConflict: "new_user_id,idempotency_key,restore_mode,source_backup_checksum,dry_run,force_wipe",
-      });
+      .select("id")
+      .eq("new_user_id", payload.newUserId)
+      .eq("idempotency_key", payload.idempotencyKey)
+      .eq("restore_mode", payload.restoreMode)
+      .eq("source_backup_checksum", payload.checksum)
+      .eq("dry_run", payload.dryRun)
+      .eq("force_wipe", payload.forceWipe)
+      .order("created_at", { ascending: false })
+      .limit(1);
 
-    if (!upsertError) return;
+    if (!existingError && Array.isArray(existingRows) && existingRows.length > 0) {
+      const existingId = toString((existingRows[0] as Record<string, unknown>).id);
+      if (existingId) {
+        const { error: updateError } = await serviceSupabase
+          .from("restore_events")
+          .update(eventRow)
+          .eq("id", existingId);
 
-    const upsertCode = String((upsertError as { code?: string })?.code ?? "").toUpperCase();
-    const upsertMessage = String((upsertError as { message?: string })?.message ?? "").toLowerCase();
-    const missingConflictConstraint = upsertCode === "42P10"
-      || upsertMessage.includes("no unique or exclusion constraint");
-
-    // Backward compatibility: older schema without the expected unique conflict scope.
-    if (!missingConflictConstraint) {
-      console.error("restore_events upsert failed", upsertError);
+        if (!updateError) return;
+        console.error("restore_events update failed", updateError);
+      }
+    } else if (existingError && !isMissingColumnError(existingError) && !isTableMissingError(existingError)) {
+      console.error("restore_events lookup failed", existingError);
     }
   }
 
