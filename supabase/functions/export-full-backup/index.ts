@@ -8,6 +8,10 @@ type TableExportResult = {
   rows: JsonObject[];
 };
 
+type BackupRequestOptions = {
+  includeMedia: boolean;
+};
+
 type SnapshotMetrics = {
   totalRevenue: number;
   totalExpense: number;
@@ -46,10 +50,34 @@ type FetchFilter =
   | { type: "user_id"; userId: string }
   | { type: "in"; column: string; values: string[] };
 
+type MediaReference = {
+  bucket: string;
+  key: string;
+  category: string;
+  source: string;
+};
+
+type MediaWarning = {
+  category: string | null;
+  source: string | null;
+  bucket: string | null;
+  key: string | null;
+  message: string;
+};
+
+type MediaManifestFile = {
+  bucket: string;
+  key: string;
+  size: number;
+  sha256: string;
+  category: string;
+  zip_path: string;
+};
+
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "GET, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
 };
 
 const CSV_BOM = "\uFEFF";
@@ -60,6 +88,12 @@ const COURIER_PAYMENT_MODE_PLATFORM = "platform";
 const EPSILON = 0.0001;
 const CHUNK_SIZE = 200;
 const PAGE_SIZE = 1000;
+const ITEM_IMAGE_BUCKET = "item_images";
+const AVATAR_BUCKET = "avatars";
+const MAX_ITEM_MEDIA_PER_ITEM = 10;
+const MAX_MEDIA_WARNINGS = 200;
+const TRUE_VALUES = new Set(["1", "true", "yes", "y", "on"]);
+const FALSE_VALUES = new Set(["0", "false", "no", "n", "off"]);
 
 const TABLE_SPECS: Array<{
   exportKey: string;
@@ -75,6 +109,8 @@ const TABLE_SPECS: Array<{
   { exportKey: "shipments", candidates: ["shipments"], filterType: "user_id" },
   { exportKey: "shipment_invoices", candidates: ["shipment_invoices"], filterType: "in", relationExportKey: "invoices", inColumn: "invoice_id" },
   { exportKey: "inventory", candidates: ["inventory", "items"], filterType: "user_id" },
+  { exportKey: "item_media", candidates: ["item_media"], filterType: "in", relationExportKey: "inventory", inColumn: "item_id" },
+  { exportKey: "media_library", candidates: ["media_library"], filterType: "user_id" },
   { exportKey: "inventory_reservations", candidates: ["inventory_reservations"], filterType: "in", relationExportKey: "inventory", inColumn: "item_id" },
   { exportKey: "wallet_transactions", candidates: ["wallet_transactions", "transactions"], filterType: "user_id" },
   { exportKey: "wallets", candidates: ["wallets"], filterType: "user_id" },
@@ -85,6 +121,8 @@ const TABLE_SPECS: Array<{
   { exportKey: "platform_fee_rules", candidates: ["platform_fee_rules"], filterType: "user_id" },
   { exportKey: "sales_channels", candidates: ["sales_channels"], filterType: "user_id" },
   { exportKey: "settings", candidates: ["settings", "invoice_settings"], filterType: "user_id" },
+  { exportKey: "catalogs", candidates: ["catalogs"], filterType: "user_id" },
+  { exportKey: "catalog_cover_media", candidates: ["catalog_cover_media"], filterType: "user_id" },
   { exportKey: "profiles", candidates: ["profiles"], filterType: "user_id" },
   { exportKey: "categories", candidates: ["categories"], filterType: "user_id" },
 ];
@@ -328,11 +366,65 @@ const normalizeDateRangeMode = (value: string | null): DateRangeMode | null => {
   return null;
 };
 
-const resolveDateRangeFilter = (requestUrl: URL): DateRangeFilter => {
-  const startDateParam = requestUrl.searchParams.get("startDate");
-  const endDateParam = requestUrl.searchParams.get("endDate");
+const parseBooleanLike = (value: unknown): boolean | null => {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (value === 1) return true;
+    if (value === 0) return false;
+  }
+
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (!normalized) return null;
+  if (TRUE_VALUES.has(normalized)) return true;
+  if (FALSE_VALUES.has(normalized)) return false;
+  return null;
+};
+
+const toObject = (value: unknown): JsonObject => {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as JsonObject;
+  }
+  return {};
+};
+
+const pickBodyString = (body: JsonObject, ...keys: string[]): string | null => {
+  for (const key of keys) {
+    const value = body[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return null;
+};
+
+const resolveBackupRequestOptions = (
+  requestUrl: URL,
+  requestBody: JsonObject,
+): BackupRequestOptions => {
+  const includeMediaBody = parseBooleanLike(requestBody.includeMedia ?? requestBody.include_media);
+  if (includeMediaBody !== null) {
+    return { includeMedia: includeMediaBody };
+  }
+
+  const includeMediaQuery = parseBooleanLike(
+    requestUrl.searchParams.get("includeMedia")
+      || requestUrl.searchParams.get("include_media")
+      || requestUrl.searchParams.get("media"),
+  );
+
+  return {
+    includeMedia: includeMediaQuery === true,
+  };
+};
+
+const resolveDateRangeFilter = (requestUrl: URL, requestBody: JsonObject = {}): DateRangeFilter => {
+  const startDateParam = pickBodyString(requestBody, "startDate", "start_date")
+    || requestUrl.searchParams.get("startDate")
+    || requestUrl.searchParams.get("start_date");
+  const endDateParam = pickBodyString(requestBody, "endDate", "end_date")
+    || requestUrl.searchParams.get("endDate")
+    || requestUrl.searchParams.get("end_date");
   const modeParam = normalizeDateRangeMode(
-    requestUrl.searchParams.get("range")
+    pickBodyString(requestBody, "range", "dateRange", "date_range")
+    || requestUrl.searchParams.get("range")
     || requestUrl.searchParams.get("dateRange")
     || requestUrl.searchParams.get("date_range"),
   );
@@ -734,11 +826,278 @@ const calculateInventoryValue = (inventoryRows: JsonObject[] = []): number => {
   }, 0));
 };
 
-const sha256Hex = async (value: string): Promise<string> => {
-  const inputBytes = textEncoder.encode(value);
-  const hashBuffer = await crypto.subtle.digest("SHA-256", inputBytes);
+const sha256Bytes = async (bytes: Uint8Array): Promise<string> => {
+  const hashBuffer = await crypto.subtle.digest("SHA-256", bytes);
   const hashBytes = new Uint8Array(hashBuffer);
   return Array.from(hashBytes).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+};
+
+const sha256Hex = async (value: string): Promise<string> => {
+  const inputBytes = textEncoder.encode(value);
+  return sha256Bytes(inputBytes);
+};
+
+const decodeUriComponentSafe = (value: string): string => {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+};
+
+const normalizeStoragePath = (value: string): string => {
+  const withoutQuery = value.split("?")[0].split("#")[0].replace(/\\/g, "/");
+  const segments = withoutQuery
+    .split("/")
+    .map((segment) => decodeUriComponentSafe(segment.trim()))
+    .filter((segment) => segment && segment !== "." && segment !== "..");
+  return segments.join("/");
+};
+
+const resolveStorageReference = (
+  rawValue: unknown,
+  defaultBucket?: string,
+): { bucket: string; key: string } | null => {
+  if (typeof rawValue !== "string") return null;
+  const trimmed = rawValue.trim();
+  if (!trimmed) return null;
+
+  const fromBucketAndKey = (bucket: string, rawKey: string): { bucket: string; key: string } | null => {
+    const normalizedBucket = String(bucket ?? "").trim();
+    const normalizedKey = normalizeStoragePath(rawKey);
+    if (!normalizedBucket || !normalizedKey) return null;
+    return { bucket: normalizedBucket, key: normalizedKey };
+  };
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      const parsedUrl = new URL(trimmed);
+      const decodedPath = decodeUriComponentSafe(parsedUrl.pathname);
+
+      const objectMarkers = [
+        "/storage/v1/object/public/",
+        "/storage/v1/object/sign/",
+        "/storage/v1/object/authenticated/",
+        "/storage/v1/object/",
+      ];
+
+      for (const marker of objectMarkers) {
+        const markerIndex = decodedPath.indexOf(marker);
+        if (markerIndex < 0) continue;
+
+        const remainder = normalizeStoragePath(decodedPath.slice(markerIndex + marker.length));
+        const [bucket, ...keyParts] = remainder.split("/");
+        const resolved = fromBucketAndKey(bucket || "", keyParts.join("/"));
+        if (resolved) return resolved;
+      }
+
+      for (const bucket of [ITEM_IMAGE_BUCKET, AVATAR_BUCKET]) {
+        const marker = `/${bucket}/`;
+        const markerIndex = decodedPath.indexOf(marker);
+        if (markerIndex < 0) continue;
+        const rawKey = decodedPath.slice(markerIndex + marker.length);
+        const resolved = fromBucketAndKey(bucket, rawKey);
+        if (resolved) return resolved;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  const normalizedRaw = normalizeStoragePath(trimmed);
+  if (!normalizedRaw) return null;
+
+  const parts = normalizedRaw.split("/");
+  if (parts.length >= 2 && (parts[0] === ITEM_IMAGE_BUCKET || parts[0] === AVATAR_BUCKET)) {
+    const resolved = fromBucketAndKey(parts[0], parts.slice(1).join("/"));
+    if (resolved) return resolved;
+  }
+
+  if (defaultBucket) {
+    const resolved = fromBucketAndKey(defaultBucket, normalizedRaw);
+    if (resolved) return resolved;
+  }
+
+  if (parts.length >= 2) {
+    const resolved = fromBucketAndKey(parts[0], parts.slice(1).join("/"));
+    if (resolved) return resolved;
+  }
+
+  return null;
+};
+
+const normalizeCategorySlug = (value: string): string => {
+  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+  return normalized || "misc";
+};
+
+const pushMediaWarning = (warnings: MediaWarning[], warning: MediaWarning) => {
+  if (warnings.length >= MAX_MEDIA_WARNINGS) return;
+  warnings.push(warning);
+};
+
+const collectMediaReferences = (
+  tables: Record<string, TableExportResult>,
+): MediaReference[] => {
+  const references = new Map<string, MediaReference>();
+  const addReference = (
+    rawValue: unknown,
+    category: string,
+    source: string,
+    defaultBucket?: string,
+  ) => {
+    const resolved = resolveStorageReference(rawValue, defaultBucket);
+    if (!resolved) return;
+    const dedupeKey = `${resolved.bucket}/${resolved.key}`;
+    if (references.has(dedupeKey)) return;
+    references.set(dedupeKey, {
+      bucket: resolved.bucket,
+      key: resolved.key,
+      category,
+      source,
+    });
+  };
+
+  const inventoryRows = tables.inventory?.rows || [];
+  inventoryRows.forEach((row) => {
+    addReference(row.image_url, "items", "inventory.image_url", ITEM_IMAGE_BUCKET);
+    if (Array.isArray(row.image_urls)) {
+      row.image_urls.forEach((urlValue) => {
+        addReference(urlValue, "items", "inventory.image_urls[]", ITEM_IMAGE_BUCKET);
+      });
+    }
+  });
+
+  const itemMediaRows = [...(tables.item_media?.rows || [])].sort((a, b) => {
+    const positionDelta = toNumber(a.position, 0) - toNumber(b.position, 0);
+    if (positionDelta !== 0) return positionDelta;
+    return String(a.created_at ?? "").localeCompare(String(b.created_at ?? ""));
+  });
+  const mediaCountByItemId = new Map<string, number>();
+  itemMediaRows.forEach((row) => {
+    const itemId = String(row.item_id ?? "").trim() || "__unknown__";
+    const currentCount = mediaCountByItemId.get(itemId) || 0;
+    if (currentCount >= MAX_ITEM_MEDIA_PER_ITEM) return;
+    mediaCountByItemId.set(itemId, currentCount + 1);
+
+    addReference(row.url, "items", "item_media.url", ITEM_IMAGE_BUCKET);
+    addReference(row.storage_path, "items", "item_media.storage_path", ITEM_IMAGE_BUCKET);
+  });
+
+  (tables.media_library?.rows || []).forEach((row) => {
+    addReference(row.storage_path, "library", "media_library.storage_path", ITEM_IMAGE_BUCKET);
+    addReference(row.url, "library", "media_library.url", ITEM_IMAGE_BUCKET);
+  });
+
+  (tables.settings?.rows || []).forEach((row) => {
+    addReference(row.logo_url, "brand", "settings.logo_url", ITEM_IMAGE_BUCKET);
+  });
+
+  (tables.catalogs?.rows || []).forEach((row) => {
+    addReference(row.cover_image_url, "catalog", "catalogs.cover_image_url", ITEM_IMAGE_BUCKET);
+  });
+
+  (tables.catalog_cover_media?.rows || []).forEach((row) => {
+    addReference(row.file_path, "catalog", "catalog_cover_media.file_path", ITEM_IMAGE_BUCKET);
+    addReference(row.public_url, "catalog", "catalog_cover_media.public_url", ITEM_IMAGE_BUCKET);
+  });
+
+  (tables.profiles?.rows || []).forEach((row) => {
+    addReference(row.avatar_url, "profile", "profiles.avatar_url", AVATAR_BUCKET);
+  });
+
+  return Array.from(references.values());
+};
+
+const collectMediaZipEntries = async (
+  serviceSupabase: ReturnType<typeof createClient>,
+  mediaReferences: MediaReference[],
+  exportedAt: string,
+): Promise<{
+  entries: Array<{ name: string; content: string | Uint8Array }>;
+  files: MediaManifestFile[];
+  warnings: MediaWarning[];
+}> => {
+  const entries: Array<{ name: string; content: string | Uint8Array }> = [];
+  const files: MediaManifestFile[] = [];
+  const warnings: MediaWarning[] = [];
+
+  for (const reference of mediaReferences) {
+    const { data, error } = await serviceSupabase.storage
+      .from(reference.bucket)
+      .download(reference.key);
+
+    if (error || !data) {
+      pushMediaWarning(warnings, {
+        category: reference.category,
+        source: reference.source,
+        bucket: reference.bucket,
+        key: reference.key,
+        message: (error as { message?: string })?.message || "Storage object not found or inaccessible.",
+      });
+      continue;
+    }
+
+    try {
+      const bytes = new Uint8Array(await data.arrayBuffer());
+      const fileHash = await sha256Bytes(bytes);
+      const safeCategory = normalizeCategorySlug(reference.category);
+      const safeKeyPath = normalizeStoragePath(reference.key);
+      if (!safeKeyPath) {
+        pushMediaWarning(warnings, {
+          category: reference.category,
+          source: reference.source,
+          bucket: reference.bucket,
+          key: reference.key,
+          message: "Invalid storage key after normalization.",
+        });
+        continue;
+      }
+
+      const zipPath = `media/${safeCategory}/${reference.bucket}/${safeKeyPath}`;
+      entries.push({ name: zipPath, content: bytes });
+      files.push({
+        bucket: reference.bucket,
+        key: reference.key,
+        size: bytes.length,
+        sha256: fileHash,
+        category: reference.category,
+        zip_path: zipPath,
+      });
+    } catch (error) {
+      pushMediaWarning(warnings, {
+        category: reference.category,
+        source: reference.source,
+        bucket: reference.bucket,
+        key: reference.key,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  if (entries.length === 0) {
+    entries.push({
+      name: "media/.keep",
+      content: "",
+    });
+  }
+
+  entries.push({
+    name: "media_manifest.json",
+    content: `${JSON.stringify({
+      export_timestamp: exportedAt,
+      files: files.map((file) => ({
+        bucket: file.bucket,
+        key: file.key,
+        size: file.size,
+        sha256: file.sha256,
+      })),
+      warnings,
+    }, null, 2)}\n`,
+  });
+
+  return { entries, files, warnings };
 };
 
 const fetchRowsPaged = async (
@@ -923,13 +1282,36 @@ const jsonResponse = (payload: JsonObject, status = 200): Response => {
   });
 };
 
+const parseRequestBody = async (req: Request): Promise<JsonObject> => {
+  if (req.method !== "POST") return {};
+
+  const contentType = String(req.headers.get("Content-Type") || "").toLowerCase();
+  if (contentType.includes("application/json")) {
+    const parsed = await req.json();
+    return toObject(parsed);
+  }
+
+  const rawBody = await req.text();
+  if (!rawBody.trim()) return {};
+  const parsed = JSON.parse(rawBody);
+  return toObject(parsed);
+};
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: CORS_HEADERS });
   }
 
-  if (req.method !== "GET") {
+  if (req.method !== "GET" && req.method !== "POST") {
     return jsonResponse({ error: "Method Not Allowed" }, 405);
+  }
+
+  const requestUrl = new URL(req.url);
+  let requestBody: JsonObject = {};
+  try {
+    requestBody = await parseRequestBody(req);
+  } catch {
+    return jsonResponse({ error: "Invalid JSON payload." }, 400);
   }
 
   try {
@@ -985,14 +1367,59 @@ Deno.serve(async (req) => {
       );
     }
 
-    const requestUrl = new URL(req.url);
-    const dateRangeFilter = resolveDateRangeFilter(requestUrl);
+    const requestOptions = resolveBackupRequestOptions(requestUrl, requestBody);
+    const dateRangeFilter = resolveDateRangeFilter(requestUrl, requestBody);
     const financialSummary = buildFinancialSummary(tables, dateRangeFilter);
     const legacyFinancialSummary = buildLegacyFinancialSummary(tables, dateRangeFilter);
     maybeLogFinancialDelta(dateRangeFilter.mode, legacyFinancialSummary, financialSummary);
     const exportedAt = new Date().toISOString();
     const fileDateStamp = exportedAt.slice(0, 10).replace(/-/g, "");
     const fileName = `rarebits-backup-${fileDateStamp}.zip`;
+    const mediaWarnings: MediaWarning[] = [];
+    let mediaZipEntries: Array<{ name: string; content: string | Uint8Array }> = [];
+    let mediaManifestFiles: MediaManifestFile[] = [];
+
+    if (requestOptions.includeMedia) {
+      const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+      if (!serviceRoleKey) {
+        pushMediaWarning(mediaWarnings, {
+          category: null,
+          source: null,
+          bucket: null,
+          key: null,
+          message: "SUPABASE_SERVICE_ROLE_KEY is missing; media export skipped.",
+        });
+      } else {
+        const serviceSupabase = createClient(supabaseUrl, serviceRoleKey, {
+          auth: {
+            persistSession: false,
+            autoRefreshToken: false,
+          },
+        });
+        const mediaReferences = collectMediaReferences(tables);
+        const mediaResult = await collectMediaZipEntries(
+          serviceSupabase,
+          mediaReferences,
+          exportedAt,
+        );
+        mediaZipEntries = mediaResult.entries;
+        mediaManifestFiles = mediaResult.files;
+        mediaResult.warnings.forEach((warning) => pushMediaWarning(mediaWarnings, warning));
+      }
+    }
+    if (requestOptions.includeMedia && mediaZipEntries.length === 0) {
+      mediaZipEntries = [
+        { name: "media/.keep", content: "" },
+        {
+          name: "media_manifest.json",
+          content: `${JSON.stringify({
+            export_timestamp: exportedAt,
+            files: [],
+            warnings: mediaWarnings,
+          }, null, 2)}\n`,
+        },
+      ];
+    }
 
     const tableCounts = Object.fromEntries(
       Object.entries(tables).map(([key, value]) => [key, value.rows.length]),
@@ -1031,6 +1458,9 @@ Deno.serve(async (req) => {
       invoice_count: invoiceCount,
       settled_invoice_count: settledInvoiceCount,
       inventory_value: inventoryValue,
+      media_included: requestOptions.includeMedia,
+      media_count: mediaManifestFiles.length,
+      media_warnings: mediaWarnings,
       exported_tables: Object.fromEntries(
         Object.entries(tables).map(([key, value]) => [
           key,
@@ -1088,6 +1518,9 @@ Deno.serve(async (req) => {
       name: "metadata.json",
       content: `${JSON.stringify(metadata, null, 2)}\n`,
     });
+    if (requestOptions.includeMedia) {
+      zipEntries.push(...mediaZipEntries);
+    }
 
     const zipBytes = createZip(zipEntries);
 

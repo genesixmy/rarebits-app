@@ -4,7 +4,8 @@ import ProfileSettings from '@/components/ProfileSettings';
 import CategorySettings from '@/components/CategorySettings';
 import InvoiceSettings from '@/components/InvoiceSettings';
 import PlatformFeeSettings from '@/components/PlatformFeeSettings';
-import { User, Tag, FileText, Store } from 'lucide-react';
+import DataSafetySettings from '@/components/DataSafetySettings';
+import { User, Tag, FileText, Store, ShieldCheck } from 'lucide-react';
 import { ProfileFormProvider } from '@/contexts/ProfileFormContext';
 
 const SettingsPage = ({ user, categories, onUpdateCategories, onUpdateProfile }) => {
@@ -12,7 +13,7 @@ const SettingsPage = ({ user, categories, onUpdateCategories, onUpdateProfile })
     <div className="space-y-6">
       <h1 className="page-title">Tetapan</h1>
       <Tabs defaultValue="profile" className="w-full">
-        <TabsList className="!grid w-full !h-auto grid-cols-2 sm:grid-cols-4 gap-1">
+        <TabsList className="!grid w-full !h-auto grid-cols-2 sm:grid-cols-5 gap-1">
           <TabsTrigger value="profile" className="w-full min-h-10 gap-2 rounded-lg border border-transparent text-xs transition-colors hover:border-primary/40 hover:bg-white hover:text-primary data-[state=active]:border-primary/20 data-[state=active]:bg-primary/10 data-[state=active]:font-semibold data-[state=active]:text-primary sm:text-sm">
             <User className="w-4 h-4" /> Profil
           </TabsTrigger>
@@ -24,6 +25,9 @@ const SettingsPage = ({ user, categories, onUpdateCategories, onUpdateProfile })
           </TabsTrigger>
           <TabsTrigger value="invoice" className="w-full min-h-10 gap-2 rounded-lg border border-transparent text-xs transition-colors hover:border-primary/40 hover:bg-white hover:text-primary data-[state=active]:border-primary/20 data-[state=active]:bg-primary/10 data-[state=active]:font-semibold data-[state=active]:text-primary sm:text-sm">
             <FileText className="w-4 h-4" /> Brand
+          </TabsTrigger>
+          <TabsTrigger value="data-safety" className="w-full min-h-10 gap-2 rounded-lg border border-transparent text-xs transition-colors hover:border-primary/40 hover:bg-white hover:text-primary data-[state=active]:border-primary/20 data-[state=active]:bg-primary/10 data-[state=active]:font-semibold data-[state=active]:text-primary sm:text-sm">
+            <ShieldCheck className="w-4 h-4" /> Data Safety
           </TabsTrigger>
         </TabsList>
         <TabsContent value="profile" className="mt-6">
@@ -43,6 +47,9 @@ const SettingsPage = ({ user, categories, onUpdateCategories, onUpdateProfile })
         </TabsContent>
         <TabsContent value="invoice" className="mt-6">
           <InvoiceSettings userId={user.id} />
+        </TabsContent>
+        <TabsContent value="data-safety" className="mt-6">
+          <DataSafetySettings />
         </TabsContent>
       </Tabs>
     </div>
