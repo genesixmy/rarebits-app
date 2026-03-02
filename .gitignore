@@ -1,9 +1,11 @@
 # Dependencies
 node_modules/
+node_modules/.vite/
 rarebit/node_modules/
 
 # Build outputs
 dist/
+.vite/
 rarebit/dist/
 build/
 
