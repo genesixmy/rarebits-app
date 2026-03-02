@@ -1520,9 +1520,33 @@ const logRestoreEvent = async (
     eventRow.idempotency_key = payload.idempotencyKey;
   }
 
-  await serviceSupabase
+  if (hasIdempotencyColumn) {
+    const { error: upsertError } = await serviceSupabase
+      .from("restore_events")
+      .upsert(eventRow, {
+        onConflict: "new_user_id,idempotency_key,restore_mode,source_backup_checksum,dry_run,force_wipe",
+      });
+
+    if (!upsertError) return;
+
+    const upsertCode = String((upsertError as { code?: string })?.code ?? "").toUpperCase();
+    const upsertMessage = String((upsertError as { message?: string })?.message ?? "").toLowerCase();
+    const missingConflictConstraint = upsertCode === "42P10"
+      || upsertMessage.includes("no unique or exclusion constraint");
+
+    // Backward compatibility: older schema without the expected unique conflict scope.
+    if (!missingConflictConstraint) {
+      console.error("restore_events upsert failed", upsertError);
+    }
+  }
+
+  const { error: insertError } = await serviceSupabase
     .from("restore_events")
     .insert(eventRow);
+
+  if (!insertError) return;
+  if (isLikelyAlreadyExists(insertError.message || "", insertError.code)) return;
+  console.error("restore_events insert failed", insertError);
 };
 
 const restoreMedia = async (params: {
