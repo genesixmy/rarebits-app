@@ -1398,6 +1398,7 @@ const restoreDataTables = async (params: {
     let preSkippedExistingForTable = 0;
     let preSkippedMissingParentForTable = 0;
     let preSkippedLockedForTable = 0;
+    const platformFeeStatusRestoreMap = new Map<string, string>();
 
     if (spec.exportKey === "sales_channels") {
       const pendingNameToSourceId = new Map<string, string>();
@@ -1535,12 +1536,76 @@ const restoreDataTables = async (params: {
       }
 
       // SAFETY: enforce fee owner + fee_rule linkage to the restored invoice owner.
-      const filteredRows: JsonObject[] = [];
-      remappedRows.forEach((row) => {
+      const feeRows = remappedRows.map((row) => {
         const invoiceId = toString(row.invoice_id);
         const invoiceOwnerId = invoiceUserById.get(invoiceId) || newUserId;
         row.user_id = invoiceOwnerId;
+        const invoiceStatus = (invoiceStatusById.get(invoiceId) || "").toLowerCase();
+        const isLocked = LOCKED_INVOICE_STATUSES.has(invoiceStatus);
 
+        return {
+          row,
+          invoiceId,
+          invoiceStatus,
+          isLocked,
+        };
+      });
+
+      const lockedOriginalStatusByInvoiceId = new Map<string, string>();
+      feeRows.forEach((entry) => {
+        if (!entry.isLocked || !entry.invoiceId) return;
+        if (!lockedOriginalStatusByInvoiceId.has(entry.invoiceId)) {
+          lockedOriginalStatusByInvoiceId.set(entry.invoiceId, entry.invoiceStatus);
+        }
+      });
+
+      const lockedInvoiceIds = Array.from(lockedOriginalStatusByInvoiceId.keys());
+      const unlockedInvoiceIds = new Set<string>();
+      let unlockFailed = false;
+
+      if (!dryRun && invoicesTable && lockedInvoiceIds.length > 0) {
+        for (const chunk of chunkValues(lockedInvoiceIds, MAX_DB_BATCH)) {
+          const { error } = await serviceSupabase
+            .from(invoicesTable)
+            .update({ status: "finalized" })
+            .eq("user_id", newUserId)
+            .in("id", chunk);
+
+          if (error) {
+            unlockFailed = true;
+            pushIssue(issues, {
+              table: invoicesTable,
+              bucket: null,
+              key: null,
+              message: error.message || "Gagal buka lock invois untuk restore platform fees.",
+            }, MAX_ERRORS);
+            break;
+          }
+
+          chunk.forEach((invoiceId) => {
+            unlockedInvoiceIds.add(invoiceId);
+            invoiceStatusById.set(invoiceId, "finalized");
+          });
+        }
+
+        if (unlockFailed && unlockedInvoiceIds.size > 0) {
+          for (const invoiceId of Array.from(unlockedInvoiceIds)) {
+            const originalStatus = lockedOriginalStatusByInvoiceId.get(invoiceId) || "draft";
+            const { error } = await serviceSupabase
+              .from(invoicesTable)
+              .update({ status: originalStatus })
+              .eq("user_id", newUserId)
+              .eq("id", invoiceId);
+            if (!error) {
+              invoiceStatusById.set(invoiceId, originalStatus);
+            }
+          }
+          unlockedInvoiceIds.clear();
+        }
+      }
+
+      const filteredRows: JsonObject[] = [];
+      feeRows.forEach(({ row, invoiceId }) => {
         const invoiceStatus = (invoiceStatusById.get(invoiceId) || "").toLowerCase();
         if (LOCKED_INVOICE_STATUSES.has(invoiceStatus)) {
           preSkippedLockedForTable += 1;
@@ -1556,6 +1621,14 @@ const restoreDataTables = async (params: {
 
         filteredRows.push(row);
       });
+
+      if (!dryRun) {
+        unlockedInvoiceIds.forEach((invoiceId) => {
+          const originalStatus = lockedOriginalStatusByInvoiceId.get(invoiceId);
+          if (!originalStatus) return;
+          platformFeeStatusRestoreMap.set(invoiceId, originalStatus);
+        });
+      }
       rowsToWrite = filteredRows;
     }
 
@@ -1645,15 +1718,40 @@ const restoreDataTables = async (params: {
       continue;
     }
 
-    const writeResult = rowsToWrite.length > 0
-      ? await writeRowsWithFallback(
-        serviceSupabase,
-        targetTable,
-        rowsToWrite,
-        spec.onConflict,
-        issues,
-      )
-      : { insertedCount: 0, skippedExistingCount: 0, failedCount: 0 };
+    let writeResult: WriteRowsResult = { insertedCount: 0, skippedExistingCount: 0, failedCount: 0 };
+    try {
+      writeResult = rowsToWrite.length > 0
+        ? await writeRowsWithFallback(
+          serviceSupabase,
+          targetTable,
+          rowsToWrite,
+          spec.onConflict,
+          issues,
+        )
+        : { insertedCount: 0, skippedExistingCount: 0, failedCount: 0 };
+    } finally {
+      if (!dryRun && spec.exportKey === "platform_fees" && invoicesTable && platformFeeStatusRestoreMap.size > 0) {
+        for (const [invoiceId, originalStatus] of platformFeeStatusRestoreMap.entries()) {
+          const { error } = await serviceSupabase
+            .from(invoicesTable)
+            .update({ status: originalStatus })
+            .eq("user_id", newUserId)
+            .eq("id", invoiceId);
+
+          if (error) {
+            pushIssue(issues, {
+              table: invoicesTable,
+              bucket: null,
+              key: null,
+              message: `Gagal pulihkan status invois ${invoiceId} selepas restore platform fees.`,
+            }, MAX_ERRORS);
+            continue;
+          }
+
+          invoiceStatusById.set(invoiceId, originalStatus);
+        }
+      }
+    }
 
     if (spec.exportKey === "sales_channels") {
       await refreshSalesChannels();
