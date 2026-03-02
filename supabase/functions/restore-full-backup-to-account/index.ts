@@ -37,6 +37,7 @@ type RestorePayload = {
   fileName: string;
   restoreModeRaw: string;
   modeRaw: string;
+  idempotencyKeyRaw: string;
   dryRun: boolean;
   forceWipe: boolean;
 };
@@ -56,9 +57,16 @@ const CORS_HEADERS = {
 const MAX_ERRORS = 20;
 const MAX_CONFLICTS = 20;
 const MAX_SAMPLE_PATHS = 10;
+const MAX_ZIP_BYTES = 250 * 1024 * 1024;
+const MAX_ZIP_ENTRIES = 10000;
 const MAX_MEDIA_FILES = 5000;
 const MAX_TOTAL_MEDIA_BYTES = 200 * 1024 * 1024;
+const MAX_ROWS_PER_TABLE = 50000;
+const MAX_TOTAL_DB_WRITES = 200000;
 const MAX_DB_BATCH = 200;
+const RESTORE_LOCK_TTL_SECONDS = 20 * 60;
+const IDEMPOTENCY_KEY_MAX_LENGTH = 128;
+const IDEMPOTENCY_REPLAY_WINDOW_SECONDS = 15 * 60;
 const ALLOWED_MEDIA_BUCKETS = new Set(["item_images", "avatars"]);
 const TRUE_VALUES = new Set(["1", "true", "yes", "y", "on"]);
 const FALSE_VALUES = new Set(["0", "false", "no", "n", "off"]);
@@ -131,6 +139,16 @@ const MIME_BY_EXTENSION: Record<string, string> = {
   heif: "image/heif",
 };
 
+class RestoreValidationError extends Error {
+  status: number;
+
+  constructor(message: string, status = 400) {
+    super(message);
+    this.name = "RestoreValidationError";
+    this.status = status;
+  }
+}
+
 const jsonResponse = (payload: JsonObject, status = 200) =>
   new Response(JSON.stringify(payload), {
     status,
@@ -156,6 +174,60 @@ const parseBoolean = (value: unknown, fallback = false): boolean => {
   if (TRUE_VALUES.has(normalized)) return true;
   if (FALSE_VALUES.has(normalized)) return false;
   return fallback;
+};
+
+const normalizeIdempotencyKey = (value: unknown): string => {
+  const raw = toString(value);
+  if (!raw) return "";
+
+  const compact = raw.replace(/\s+/g, "");
+  if (!compact) return "";
+
+  if (compact.length > IDEMPOTENCY_KEY_MAX_LENGTH) {
+    throw new RestoreValidationError(
+      `idempotency_key melebihi had ${IDEMPOTENCY_KEY_MAX_LENGTH} aksara.`,
+      400,
+    );
+  }
+
+  if (!/^[A-Za-z0-9._:-]+$/.test(compact)) {
+    throw new RestoreValidationError(
+      "idempotency_key hanya benarkan huruf, nombor, titik, underscore, titik bertindih, dan dash.",
+      400,
+    );
+  }
+
+  return compact;
+};
+
+const buildAutoIdempotencyKey = (payload: {
+  checksum: string;
+  restoreMode: RestoreMode;
+  dryRun: boolean;
+  forceWipe: boolean;
+}): string => {
+  const key = [
+    "auto",
+    payload.restoreMode,
+    payload.dryRun ? "dry" : "live",
+    payload.forceWipe ? "wipe" : "safe",
+    payload.checksum,
+  ].join(":");
+
+  return key.slice(0, IDEMPOTENCY_KEY_MAX_LENGTH);
+};
+
+const getSummaryCount = (summary: unknown, key: string): number => {
+  if (!summary || typeof summary !== "object") return 0;
+  const value = Number((summary as Record<string, unknown>)[key]);
+  return Number.isFinite(value) ? value : 0;
+};
+
+const toMetricCount = (value: unknown): number => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 0;
+  if (parsed < 0) return 0;
+  return Math.trunc(parsed);
 };
 
 const decodeUriComponentSafe = (value: string): string => {
@@ -231,7 +303,10 @@ const normalizeMediaFiles = (files: unknown): NormalizedMediaFile[] => {
     .filter((entry) => entry.bucket && entry.key);
 };
 
-const parseCsvRows = (csvText: string): JsonObject[] => {
+const parseCsvRows = (
+  csvText: string,
+  options: { exportKey: string; maxRows: number },
+): JsonObject[] => {
   const text = csvText.replace(/^\uFEFF/, "");
   if (!text.trim()) return [];
 
@@ -257,6 +332,9 @@ const parseCsvRows = (csvText: string): JsonObject[] => {
     }
 
     if (char === "\"") {
+      if (currentCell.length > 0) {
+        throw new RestoreValidationError(`CSV ${options.exportKey} tidak sah: petikan berada di tengah nilai.`);
+      }
       inQuotes = true;
       continue;
     }
@@ -280,32 +358,48 @@ const parseCsvRows = (csvText: string): JsonObject[] => {
     currentCell += char;
   }
 
+  if (inQuotes) {
+    throw new RestoreValidationError(`CSV ${options.exportKey} tidak sah: petikan tidak ditutup.`);
+  }
+
   if (currentCell.length > 0 || currentRow.length > 0) {
     currentRow.push(currentCell);
     rows.push(currentRow);
   }
 
   if (rows.length === 0) return [];
-  const headers = rows[0].map((header) => header.trim());
-  if (headers.length === 0) return [];
 
-  return rows
-    .slice(1)
-    .filter((row) => row.some((cell) => String(cell ?? "").trim() !== ""))
-    .map((row) => {
-      const mapped: JsonObject = {};
-      headers.forEach((header, index) => {
-        const raw = String(row[index] ?? "");
-        const trimmed = raw.trim();
-        if (!header) return;
-        if (!trimmed) {
-          mapped[header] = null;
-          return;
-        }
-        mapped[header] = trimmed;
-      });
-      return mapped;
+  const headers = rows[0].map((header) => header.trim());
+  if (headers.length === 0 || headers.every((header) => !header)) return [];
+  if (headers.some((header) => !header)) {
+    throw new RestoreValidationError(`CSV ${options.exportKey} tidak sah: tajuk kolum kosong.`);
+  }
+
+  const parsedRows: JsonObject[] = [];
+  rows.slice(1).forEach((row, index) => {
+    if (!row.some((cell) => String(cell ?? "").trim() !== "")) return;
+
+    if (row.length > headers.length) {
+      throw new RestoreValidationError(`CSV ${options.exportKey} tidak sah: bilangan kolum tidak sepadan pada baris ${index + 2}.`);
+    }
+
+    const mapped: JsonObject = {};
+    headers.forEach((header, columnIndex) => {
+      const raw = String(row[columnIndex] ?? "");
+      const trimmed = raw.trim();
+      mapped[header] = trimmed ? trimmed : null;
     });
+
+    parsedRows.push(mapped);
+    if (parsedRows.length > options.maxRows) {
+      throw new RestoreValidationError(
+        `Table ${options.exportKey} melebihi had ${options.maxRows} rows.`,
+        413,
+      );
+    }
+  });
+
+  return parsedRows;
 };
 
 const sha256Bytes = async (bytes: Uint8Array): Promise<string> => {
@@ -381,43 +475,99 @@ const resolveRestoreMode = (restoreModeRaw: string, modeRaw: string): RestoreMod
   return "self";
 };
 
+const validateZipPayloadSize = (bytesLength: number): void => {
+  if (bytesLength <= 0) {
+    throw new RestoreValidationError("Fail ZIP kosong.");
+  }
+  if (bytesLength > MAX_ZIP_BYTES) {
+    throw new RestoreValidationError(
+      `Saiz ZIP melebihi had ${MAX_ZIP_BYTES} bytes.`,
+      413,
+    );
+  }
+};
+
+const decodeBase64ToBytes = (value: string): Uint8Array => {
+  const raw = value.includes(",") ? (value.split(",").pop() || "") : value;
+  const normalized = raw.replace(/\s+/g, "");
+  if (!normalized) {
+    throw new RestoreValidationError("zip_base64 kosong.", 400);
+  }
+
+  let binary = "";
+  try {
+    binary = atob(normalized);
+  } catch {
+    throw new RestoreValidationError("zip_base64 tidak sah (base64 rosak).", 400);
+  }
+
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  validateZipPayloadSize(bytes.length);
+  return bytes;
+};
+
 const readZipPayload = async (req: Request): Promise<RestorePayload | { error: string; status: number }> => {
   const contentType = String(req.headers.get("content-type") || "").toLowerCase();
 
   if (contentType.includes("multipart/form-data")) {
-    const formData = await req.formData();
+    let formData: FormData;
+    try {
+      formData = await req.formData();
+    } catch {
+      return { error: "multipart/form-data tidak sah.", status: 400 };
+    }
+
     const fileEntry = formData.get("file") || formData.get("backup") || formData.get("zip");
     const restoreModeRaw = toString(formData.get("restore_mode"));
     const modeRaw = toString(formData.get("mode"));
+    const idempotencyKeyRaw = toString(formData.get("idempotency_key"));
     const dryRun = parseBoolean(formData.get("dry_run"), false);
     const forceWipe = parseBoolean(formData.get("force_wipe"), false);
 
     if (fileEntry instanceof File) {
-      const bytes = new Uint8Array(await fileEntry.arrayBuffer());
-      return {
-        bytes,
-        fileName: fileEntry.name || "backup.zip",
-        restoreModeRaw,
-        modeRaw,
-        dryRun,
-        forceWipe,
-      };
+      try {
+        if (fileEntry.size > MAX_ZIP_BYTES) {
+          throw new RestoreValidationError(`Saiz ZIP melebihi had ${MAX_ZIP_BYTES} bytes.`, 413);
+        }
+        const bytes = new Uint8Array(await fileEntry.arrayBuffer());
+        validateZipPayloadSize(bytes.length);
+        return {
+          bytes,
+          fileName: fileEntry.name || "backup.zip",
+          restoreModeRaw,
+          modeRaw,
+          idempotencyKeyRaw,
+          dryRun,
+          forceWipe,
+        };
+      } catch (error) {
+        if (error instanceof RestoreValidationError) {
+          return { error: error.message, status: error.status };
+        }
+        return { error: "Gagal membaca fail ZIP upload.", status: 400 };
+      }
     }
 
     const base64Entry = formData.get("zip_base64") || formData.get("file_base64");
     if (typeof base64Entry === "string" && base64Entry.trim()) {
-      const raw = base64Entry.includes(",") ? (base64Entry.split(",").pop() || "") : base64Entry;
-      const binary = atob(raw.replace(/\s+/g, ""));
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-      return {
-        bytes,
-        fileName: toString(formData.get("file_name")) || "backup.zip",
-        restoreModeRaw,
-        modeRaw,
-        dryRun,
-        forceWipe,
-      };
+      try {
+        const bytes = decodeBase64ToBytes(base64Entry);
+        return {
+          bytes,
+          fileName: toString(formData.get("file_name")) || "backup.zip",
+          restoreModeRaw,
+          modeRaw,
+          idempotencyKeyRaw,
+          dryRun,
+          forceWipe,
+        };
+      } catch (error) {
+        if (error instanceof RestoreValidationError) {
+          return { error: error.message, status: error.status };
+        }
+        return { error: "zip_base64 tidak sah.", status: 400 };
+      }
     }
 
     return { error: "Fail ZIP tidak dijumpai dalam multipart form-data.", status: 400 };
@@ -435,16 +585,22 @@ const readZipPayload = async (req: Request): Promise<RestorePayload | { error: s
     return { error: "Gunakan multipart/form-data (field `file`) atau JSON `zip_base64`.", status: 400 };
   }
 
-  const raw = base64Value.includes(",") ? (base64Value.split(",").pop() || "") : base64Value;
-  const binary = atob(raw.replace(/\s+/g, ""));
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  let bytes: Uint8Array;
+  try {
+    bytes = decodeBase64ToBytes(base64Value);
+  } catch (error) {
+    if (error instanceof RestoreValidationError) {
+      return { error: error.message, status: error.status };
+    }
+    return { error: "zip_base64 tidak sah.", status: 400 };
+  }
 
   return {
     bytes,
     fileName: toString(body?.file_name) || "backup.zip",
     restoreModeRaw: toString(body?.restore_mode),
     modeRaw: toString(body?.mode),
+    idempotencyKeyRaw: toString(body?.idempotency_key),
     dryRun: parseBoolean(body?.dry_run, false),
     forceWipe: parseBoolean(body?.force_wipe, false),
   };
@@ -550,63 +706,162 @@ const inferOldUserId = (
   return winner;
 };
 
-const loadBackupJsonRows = async (zip: JSZip, exportKey: string): Promise<JsonObject[]> => {
-  const jsonCandidates = [
-    new RegExp(`^json/${escapeRegExp(exportKey)}\\.json$`, "i"),
-    new RegExp(`(^|/)json/${escapeRegExp(exportKey)}\\.json$`, "i"),
-    new RegExp(`^${escapeRegExp(exportKey)}\\.json$`, "i"),
-    new RegExp(`(^|/)${escapeRegExp(exportKey)}\\.json$`, "i"),
-  ];
+const validateZipStructure = (zip: JSZip): void => {
+  const entries = Object.values(zip.files);
+  if (entries.length === 0) {
+    throw new RestoreValidationError("ZIP tidak mengandungi sebarang fail.");
+  }
 
-  const jsonEntries = jsonCandidates
+  if (entries.length > MAX_ZIP_ENTRIES) {
+    throw new RestoreValidationError(`ZIP mengandungi terlalu banyak fail (${entries.length}). Had ialah ${MAX_ZIP_ENTRIES}.`, 413);
+  }
+
+  const normalizedFileNames = new Set<string>();
+  entries.forEach((entry) => {
+    const rawName = String(entry.name || "").replace(/\\/g, "/");
+    if (!rawName) {
+      throw new RestoreValidationError("ZIP mengandungi nama fail kosong.");
+    }
+    if (rawName.includes("\0")) {
+      throw new RestoreValidationError(`ZIP mengandungi nama fail berisiko: ${rawName}`);
+    }
+
+    const segments = rawName.split("/");
+    if (segments.some((segment) => segment === "..")) {
+      throw new RestoreValidationError(`ZIP mengandungi path traversal tidak dibenarkan: ${rawName}`);
+    }
+
+    if (entry.dir) return;
+
+    const normalized = normalizeStoragePath(rawName);
+    if (!normalized) {
+      throw new RestoreValidationError(`Nama fail ZIP tidak sah: ${rawName}`);
+    }
+
+    const dedupeKey = normalized.toLowerCase();
+    if (normalizedFileNames.has(dedupeKey)) {
+      throw new RestoreValidationError(`ZIP mengandungi fail duplicate selepas normalisasi: ${normalized}`);
+    }
+    normalizedFileNames.add(dedupeKey);
+  });
+};
+
+const findSingleZipEntry = (zip: JSZip, pattern: RegExp, label: string): JSZip.JSZipObject | null => {
+  const entries = (zip.file(pattern) || [])
+    .filter((entry, index, self) => self.findIndex((item) => item.name === entry.name) === index);
+
+  if (entries.length > 1) {
+    throw new RestoreValidationError(`ZIP mengandungi lebih daripada satu fail ${label}.`);
+  }
+
+  return entries[0] || null;
+};
+
+const findSingleTableEntry = (
+  zip: JSZip,
+  exportKey: string,
+  format: "json" | "csv",
+): JSZip.JSZipObject | null => {
+  const candidates = format === "json"
+    ? [
+      new RegExp(`^json/${escapeRegExp(exportKey)}\\.json$`, "i"),
+      new RegExp(`(^|/)json/${escapeRegExp(exportKey)}\\.json$`, "i"),
+      new RegExp(`^${escapeRegExp(exportKey)}\\.json$`, "i"),
+      new RegExp(`(^|/)${escapeRegExp(exportKey)}\\.json$`, "i"),
+    ]
+    : [
+      new RegExp(`^csv/${escapeRegExp(exportKey)}\\.csv$`, "i"),
+      new RegExp(`(^|/)csv/${escapeRegExp(exportKey)}\\.csv$`, "i"),
+      new RegExp(`^${escapeRegExp(exportKey)}\\.csv$`, "i"),
+      new RegExp(`(^|/)${escapeRegExp(exportKey)}\\.csv$`, "i"),
+    ];
+
+  const entries = candidates
     .flatMap((pattern) => zip.file(pattern) || [])
-    .filter((entry, index, self) => self.findIndex((item) => item.name === entry.name) === index)
-    .sort((a, b) => a.name.length - b.name.length);
+    .filter((entry, index, self) => self.findIndex((item) => item.name === entry.name) === index);
 
-  const jsonEntry = jsonEntries[0] || null;
+  if (entries.length > 1) {
+    throw new RestoreValidationError(`Backup mengandungi lebih daripada satu fail ${format.toUpperCase()} untuk table ${exportKey}.`);
+  }
 
-  if (jsonEntry) {
-    try {
-      const raw = (await jsonEntry.async("string")).replace(/^\uFEFF/, "").trim();
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        return parsed.filter((row) => row && typeof row === "object") as JsonObject[];
-      }
-      if (parsed && typeof parsed === "object") {
-        const rows = (parsed as Record<string, unknown>).rows;
-        if (Array.isArray(rows)) return rows.filter((row) => row && typeof row === "object") as JsonObject[];
-        const data = (parsed as Record<string, unknown>).data;
-        if (Array.isArray(data)) return data.filter((row) => row && typeof row === "object") as JsonObject[];
-        const values = Object.values(parsed as Record<string, unknown>);
-        if (values.length > 0 && values.every((value) => value && typeof value === "object" && !Array.isArray(value))) {
-          return values as JsonObject[];
-        }
-      }
-    } catch {
-      // Fallback to CSV parsing below.
+  return entries[0] || null;
+};
+
+const normalizeJsonRows = (rows: unknown, exportKey: string): JsonObject[] => {
+  if (!Array.isArray(rows)) {
+    throw new RestoreValidationError(`JSON ${exportKey} tidak sah: format data rows bukan array.`);
+  }
+
+  return rows.map((row, index) => {
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
+      throw new RestoreValidationError(`JSON ${exportKey} tidak sah: row #${index + 1} bukan object.`);
+    }
+    return row as JsonObject;
+  });
+};
+
+const extractRowsFromJson = (parsed: unknown, exportKey: string): JsonObject[] => {
+  if (Array.isArray(parsed)) return normalizeJsonRows(parsed, exportKey);
+
+  if (parsed && typeof parsed === "object") {
+    const record = parsed as Record<string, unknown>;
+    if (Array.isArray(record.rows)) return normalizeJsonRows(record.rows, exportKey);
+    if (Array.isArray(record.data)) return normalizeJsonRows(record.data, exportKey);
+
+    const values = Object.values(record);
+    if (values.length > 0 && values.every((value) => value && typeof value === "object" && !Array.isArray(value))) {
+      return normalizeJsonRows(values, exportKey);
     }
   }
 
-  const csvCandidates = [
-    new RegExp(`^csv/${escapeRegExp(exportKey)}\\.csv$`, "i"),
-    new RegExp(`(^|/)csv/${escapeRegExp(exportKey)}\\.csv$`, "i"),
-    new RegExp(`^${escapeRegExp(exportKey)}\\.csv$`, "i"),
-    new RegExp(`(^|/)${escapeRegExp(exportKey)}\\.csv$`, "i"),
-  ];
-  const csvEntries = csvCandidates
-    .flatMap((pattern) => zip.file(pattern) || [])
-    .filter((entry, index, self) => self.findIndex((item) => item.name === entry.name) === index)
-    .sort((a, b) => a.name.length - b.name.length);
+  throw new RestoreValidationError(`JSON ${exportKey} tidak sah: format tidak disokong.`);
+};
 
-  const csvEntry = csvEntries[0] || null;
+const loadBackupJsonRows = async (
+  zip: JSZip,
+  exportKey: string,
+  maxRowsPerTable: number,
+): Promise<JsonObject[]> => {
+  const jsonEntry = findSingleTableEntry(zip, exportKey, "json");
+
+  if (jsonEntry) {
+    let rawJson = "";
+    try {
+      rawJson = (await jsonEntry.async("string")).replace(/^\uFEFF/, "").trim();
+    } catch {
+      throw new RestoreValidationError(`Gagal membaca JSON untuk table ${exportKey}.`);
+    }
+
+    if (!rawJson) return [];
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawJson);
+    } catch {
+      throw new RestoreValidationError(`JSON ${exportKey} tidak sah (parse error).`);
+    }
+
+    const rows = extractRowsFromJson(parsed, exportKey);
+    if (rows.length > maxRowsPerTable) {
+      throw new RestoreValidationError(
+        `Table ${exportKey} melebihi had ${maxRowsPerTable} rows.`,
+        413,
+      );
+    }
+    return rows;
+  }
+
+  const csvEntry = findSingleTableEntry(zip, exportKey, "csv");
   if (!csvEntry) return [];
 
+  let csvText = "";
   try {
-    const csvText = await csvEntry.async("string");
-    return parseCsvRows(csvText);
+    csvText = await csvEntry.async("string");
   } catch {
-    return [];
+    throw new RestoreValidationError(`Gagal membaca CSV untuk table ${exportKey}.`);
   }
+
+  return parseCsvRows(csvText, { exportKey, maxRows: maxRowsPerTable });
 };
 
 const resolveMetadataSourceTable = (metadata: JsonObject, exportKey: string): string | null => {
@@ -618,6 +873,151 @@ const resolveMetadataSourceTable = (metadata: JsonObject, exportKey: string): st
   if (!row || typeof row !== "object") return null;
   const sourceTable = toString((row as Record<string, unknown>).source_table);
   return sourceTable || null;
+};
+
+const validateMetadataStructure = (metadata: unknown): JsonObject => {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    throw new RestoreValidationError("metadata.json tidak sah.");
+  }
+
+  const metadataObject = metadata as JsonObject;
+  const checksum = toString(metadataObject.checksum);
+  if (!checksum) {
+    throw new RestoreValidationError("Checksum backup tiada dalam metadata.");
+  }
+
+  const exportedTables = metadataObject.exported_tables;
+  if (!exportedTables || typeof exportedTables !== "object" || Array.isArray(exportedTables)) {
+    throw new RestoreValidationError("metadata.json tidak sah: exported_tables tiada atau format salah.");
+  }
+
+  Object.entries(exportedTables as Record<string, unknown>).forEach(([tableKey, row]) => {
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
+      throw new RestoreValidationError(`metadata.json tidak sah: exported_tables.${tableKey} bukan object.`);
+    }
+
+    const rowCountRaw = (row as Record<string, unknown>).row_count;
+    const rowCount = Number(rowCountRaw);
+    if (!Number.isFinite(rowCount) || rowCount < 0 || !Number.isInteger(rowCount)) {
+      throw new RestoreValidationError(`metadata.json tidak sah: row_count table ${tableKey} tidak sah.`);
+    }
+  });
+
+  return metadataObject;
+};
+
+const validateAndNormalizeMediaManifest = (mediaManifest: unknown): NormalizedMediaFile[] => {
+  if (!mediaManifest || typeof mediaManifest !== "object" || Array.isArray(mediaManifest)) {
+    throw new RestoreValidationError("media_manifest.json tidak sah.");
+  }
+
+  const filesRaw = (mediaManifest as Record<string, unknown>).files;
+  if (!Array.isArray(filesRaw)) {
+    throw new RestoreValidationError("media_manifest.json tidak sah: `files` mesti array.");
+  }
+
+  const mediaFiles = normalizeMediaFiles(filesRaw);
+  if (mediaFiles.length === 0) {
+    throw new RestoreValidationError("media_manifest.json tidak mengandungi sebarang fail media.");
+  }
+
+  if (mediaFiles.length > MAX_MEDIA_FILES) {
+    throw new RestoreValidationError(
+      `Terlalu banyak fail media (${mediaFiles.length}). Had maksimum ialah ${MAX_MEDIA_FILES}.`,
+      413,
+    );
+  }
+
+  const dedupe = new Set<string>();
+  let declaredTotalBytes = 0;
+
+  mediaFiles.forEach((file, index) => {
+    if (!ALLOWED_MEDIA_BUCKETS.has(file.bucket)) {
+      throw new RestoreValidationError(`media_manifest.json tidak sah: bucket tidak dibenarkan pada entry #${index + 1}.`);
+    }
+
+    if (!file.key) {
+      throw new RestoreValidationError(`media_manifest.json tidak sah: key kosong pada entry #${index + 1}.`);
+    }
+
+    const dedupeKey = `${file.bucket}/${file.key}`.toLowerCase();
+    if (dedupe.has(dedupeKey)) {
+      throw new RestoreValidationError(`media_manifest.json mempunyai duplicate key: ${file.bucket}/${file.key}`);
+    }
+    dedupe.add(dedupeKey);
+
+    if (file.size !== null) {
+      if (!Number.isInteger(file.size) || file.size < 0) {
+        throw new RestoreValidationError(`media_manifest.json tidak sah: size tidak sah pada ${file.bucket}/${file.key}`);
+      }
+      declaredTotalBytes += file.size;
+      if (declaredTotalBytes > MAX_TOTAL_MEDIA_BYTES) {
+        throw new RestoreValidationError(
+          `Jumlah saiz media dalam manifest melebihi had ${MAX_TOTAL_MEDIA_BYTES} bytes.`,
+          413,
+        );
+      }
+    }
+  });
+
+  return mediaFiles;
+};
+
+const validateMediaManifestCoverage = (
+  mediaFiles: NormalizedMediaFile[],
+  mediaZipEntries: Map<string, JSZip.JSZipObject>,
+): void => {
+  const missing: string[] = [];
+
+  mediaFiles.forEach((file) => {
+    const key = `${file.bucket}/${file.key}`;
+    if (!mediaZipEntries.has(key) && missing.length < 10) {
+      missing.push(key);
+    }
+  });
+
+  if (missing.length > 0) {
+    throw new RestoreValidationError(
+      `Backup media tidak lengkap. Fail media tiada dalam /media/: ${missing.join(", ")}`,
+    );
+  }
+};
+
+const getMetadataTableRowCount = (metadata: JsonObject, exportKey: string): number | null => {
+  const exportedTables = metadata.exported_tables as Record<string, unknown>;
+  const row = exportedTables?.[exportKey];
+  if (!row || typeof row !== "object" || Array.isArray(row)) return null;
+
+  const rowCountRaw = (row as Record<string, unknown>).row_count;
+  const rowCount = Number(rowCountRaw);
+  if (!Number.isFinite(rowCount) || rowCount < 0 || !Number.isInteger(rowCount)) {
+    throw new RestoreValidationError(`metadata.json tidak sah: row_count table ${exportKey} tidak sah.`);
+  }
+
+  return rowCount;
+};
+
+const loadAndValidateBackupTables = async (
+  zip: JSZip,
+  metadata: JsonObject,
+): Promise<{ backupTables: Record<string, JsonObject[]>; totalRows: number }> => {
+  const backupTables: Record<string, JsonObject[]> = {};
+  let totalRows = 0;
+
+  for (const spec of RESTORE_TABLE_SPECS) {
+    const rows = await loadBackupJsonRows(zip, spec.exportKey, MAX_ROWS_PER_TABLE);
+    const metadataCount = getMetadataTableRowCount(metadata, spec.exportKey);
+    if (metadataCount !== null && metadataCount !== rows.length) {
+      throw new RestoreValidationError(
+        `Backup tidak konsisten untuk table ${spec.exportKey} (metadata=${metadataCount}, data=${rows.length}).`,
+      );
+    }
+
+    backupTables[spec.exportKey] = rows;
+    totalRows += rows.length;
+  }
+
+  return { backupTables, totalRows };
 };
 
 const tableExists = async (
@@ -646,6 +1046,85 @@ const tableExists = async (
   return true;
 };
 
+const columnExists = async (
+  serviceSupabase: ReturnType<typeof createClient>,
+  tableName: string,
+  columnName: string,
+  cache: Map<string, boolean>,
+): Promise<boolean> => {
+  const cacheKey = `${tableName}.${columnName}`;
+  if (cache.has(cacheKey)) return Boolean(cache.get(cacheKey));
+
+  const { error } = await serviceSupabase
+    .from(tableName)
+    .select(columnName)
+    .limit(1);
+
+  if (!error) {
+    cache.set(cacheKey, true);
+    return true;
+  }
+
+  if (isTableMissingError(error) || isMissingColumnError(error)) {
+    cache.set(cacheKey, false);
+    return false;
+  }
+
+  cache.set(cacheKey, true);
+  return true;
+};
+
+const isMissingFunctionError = (error: unknown): boolean => {
+  const code = String((error as { code?: string })?.code ?? "").toUpperCase();
+  const message = String((error as { message?: string })?.message ?? "").toLowerCase();
+  return code === "PGRST202" || message.includes("could not find the function");
+};
+
+const tryAcquireRestoreLock = async (
+  serviceSupabase: ReturnType<typeof createClient>,
+  userId: string,
+  restoreMode: RestoreMode,
+): Promise<{ enabled: boolean; acquired: boolean; requestId: string | null }> => {
+  const requestId = crypto.randomUUID();
+
+  const { data, error } = await serviceSupabase.rpc("try_acquire_restore_lock", {
+    p_user_id: userId,
+    p_request_id: requestId,
+    p_restore_mode: restoreMode,
+    p_ttl_seconds: RESTORE_LOCK_TTL_SECONDS,
+  });
+
+  if (error) {
+    if (isMissingFunctionError(error)) {
+      // Backward compatibility for projects that have not run migration yet.
+      return { enabled: false, acquired: true, requestId: null };
+    }
+    throw new Error(error.message || "Gagal mendapatkan restore lock.");
+  }
+
+  return {
+    enabled: true,
+    acquired: Boolean(data),
+    requestId,
+  };
+};
+
+const releaseRestoreLock = async (
+  serviceSupabase: ReturnType<typeof createClient>,
+  userId: string,
+  requestId: string | null,
+): Promise<void> => {
+  if (!requestId) return;
+
+  const { error } = await serviceSupabase.rpc("release_restore_lock", {
+    p_user_id: userId,
+    p_request_id: requestId,
+  });
+
+  if (!error || isMissingFunctionError(error)) return;
+  throw new Error(error.message || "Gagal melepaskan restore lock.");
+};
+
 const findFirstExistingTable = async (
   serviceSupabase: ReturnType<typeof createClient>,
   candidates: string[],
@@ -655,6 +1134,57 @@ const findFirstExistingTable = async (
     if (await tableExists(serviceSupabase, candidate, tableExistsCache)) return candidate;
   }
   return null;
+};
+
+const findRecentIdempotentRestoreEvent = async (
+  serviceSupabase: ReturnType<typeof createClient>,
+  tableExistsCache: Map<string, boolean>,
+  columnExistsCache: Map<string, boolean>,
+  payload: {
+    userId: string;
+    idempotencyKey: string;
+    checksum: string;
+    restoreMode: RestoreMode;
+    dryRun: boolean;
+    forceWipe: boolean;
+  },
+): Promise<Record<string, unknown> | null> => {
+  if (!payload.idempotencyKey) return null;
+
+  const hasRestoreEvents = await tableExists(serviceSupabase, "restore_events", tableExistsCache);
+  if (!hasRestoreEvents) return null;
+
+  const hasIdempotencyColumn = await columnExists(serviceSupabase, "restore_events", "idempotency_key", columnExistsCache);
+  if (!hasIdempotencyColumn) return null;
+
+  const replaySinceIso = new Date(Date.now() - (IDEMPOTENCY_REPLAY_WINDOW_SECONDS * 1000)).toISOString();
+  const { data, error } = await serviceSupabase
+    .from("restore_events")
+    .select("id, created_at, summary")
+    .eq("new_user_id", payload.userId)
+    .eq("idempotency_key", payload.idempotencyKey)
+    .eq("source_backup_checksum", payload.checksum)
+    .eq("restore_mode", payload.restoreMode)
+    .eq("dry_run", payload.dryRun)
+    .eq("force_wipe", payload.forceWipe)
+    .gte("created_at", replaySinceIso)
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  if (error) {
+    if (isTableMissingError(error) || isMissingColumnError(error)) return null;
+    throw new Error(error.message || "Gagal semak idempotency restore.");
+  }
+
+  const rows = Array.isArray(data) ? data : [];
+  if (rows.length === 0) return null;
+
+  const event = rows[0] as Record<string, unknown>;
+  const summary = event.summary;
+  const totalFailed = getSummaryCount(summary, "data_failed_count") + getSummaryCount(summary, "media_failed_count");
+  if (totalFailed > 0) return null;
+
+  return event;
 };
 
 const resolveTargetTable = async (
@@ -958,8 +1488,10 @@ const wipeExistingBusinessData = async (
 const logRestoreEvent = async (
   serviceSupabase: ReturnType<typeof createClient>,
   tableExistsCache: Map<string, boolean>,
+  columnExistsCache: Map<string, boolean>,
   payload: {
     checksum: string;
+    idempotencyKey: string;
     oldUserId: string | null;
     newUserId: string;
     restoreMode: RestoreMode;
@@ -969,6 +1501,10 @@ const logRestoreEvent = async (
   },
 ): Promise<void> => {
   if (!await tableExists(serviceSupabase, "restore_events", tableExistsCache)) return;
+
+  const hasIdempotencyColumn = payload.idempotencyKey
+    ? await columnExists(serviceSupabase, "restore_events", "idempotency_key", columnExistsCache)
+    : false;
 
   const eventRow: JsonObject = {
     source_backup_checksum: payload.checksum,
@@ -980,6 +1516,9 @@ const logRestoreEvent = async (
     summary: payload.summary,
     created_at: new Date().toISOString(),
   };
+  if (hasIdempotencyColumn) {
+    eventRow.idempotency_key = payload.idempotencyKey;
+  }
 
   await serviceSupabase
     .from("restore_events")
@@ -1179,7 +1718,7 @@ const restoreMedia = async (params: {
 
 const restoreDataTables = async (params: {
   serviceSupabase: ReturnType<typeof createClient>;
-  zip: JSZip;
+  backupTables: Record<string, JsonObject[]>;
   metadata: JsonObject;
   oldUserId: string | null;
   newUserId: string;
@@ -1198,7 +1737,7 @@ const restoreDataTables = async (params: {
 }> => {
   const {
     serviceSupabase,
-    zip,
+    backupTables,
     metadata,
     oldUserId,
     newUserId,
@@ -1360,7 +1899,7 @@ const restoreDataTables = async (params: {
   await refreshInvoiceItemIdsForUser();
 
   for (const spec of RESTORE_TABLE_SPECS) {
-    const rawRows = await loadBackupJsonRows(zip, spec.exportKey);
+    const rawRows = backupTables[spec.exportKey] || [];
     if (rawRows.length === 0) continue;
 
     const targetTable = await resolveTargetTable(serviceSupabase, spec, metadata, tableExistsCache);
@@ -1637,7 +2176,18 @@ const restoreDataTables = async (params: {
 
       rowsToWrite.forEach((row) => {
         const invoiceId = toString(row.invoice_id);
-        if (invoiceId && !invoiceIdsForUser.has(invoiceId)) {
+        if (!invoiceId) {
+          preSkippedMissingParentForTable += 1;
+          pushIssue(issues, {
+            table: targetTable,
+            bucket: null,
+            key: null,
+            message: "Invoice parent tidak ditemui kerana invoice_id kosong/tidak sah.",
+          }, MAX_ERRORS);
+          return;
+        }
+
+        if (!invoiceIdsForUser.has(invoiceId)) {
           preSkippedMissingParentForTable += 1;
           pushIssue(issues, {
             table: targetTable,
@@ -1819,6 +2369,96 @@ const restoreDataTables = async (params: {
   };
 };
 
+const buildReconciliationReport = (params: {
+  backupTables: Record<string, JsonObject[]>;
+  tableSummaries: JsonObject[];
+  mediaSourceCount: number;
+  mediaUploadedCount: number;
+  mediaSkippedExistingCount: number;
+  mediaFailedCount: number;
+}): JsonObject => {
+  const tableSummaryByExportKey = new Map<string, Record<string, unknown>>();
+  params.tableSummaries.forEach((entry) => {
+    if (!entry || typeof entry !== "object") return;
+    const record = entry as Record<string, unknown>;
+    const exportKey = toString(record.export_key);
+    if (!exportKey) return;
+    tableSummaryByExportKey.set(exportKey, record);
+  });
+
+  const dbByTable: JsonObject[] = [];
+  const dbMismatchTables: JsonObject[] = [];
+  let dbSourceRowsTotal = 0;
+  let dbAccountedRowsTotal = 0;
+
+  RESTORE_TABLE_SPECS.forEach((spec) => {
+    const sourceRows = (params.backupTables[spec.exportKey] || []).length;
+    const summary = tableSummaryByExportKey.get(spec.exportKey);
+
+    const inserted = toMetricCount(summary?.inserted ?? summary?.would_insert);
+    const skippedExisting = toMetricCount(summary?.skipped_existing ?? summary?.would_skip_existing);
+    const skippedMissingParent = toMetricCount(summary?.skipped_missing_parent ?? summary?.would_skip_missing_parent);
+    const skippedLocked = toMetricCount(summary?.skipped_locked ?? summary?.would_skip_locked);
+    const failed = toMetricCount(summary?.failed);
+
+    const accountedRows = inserted + skippedExisting + skippedMissingParent + skippedLocked + failed;
+    const unaccountedRows = Math.max(sourceRows - accountedRows, 0);
+
+    dbSourceRowsTotal += sourceRows;
+    dbAccountedRowsTotal += accountedRows;
+
+    const tableSummary: JsonObject = {
+      export_key: spec.exportKey,
+      source_rows: sourceRows,
+      accounted_rows: accountedRows,
+      unaccounted_rows: unaccountedRows,
+      inserted,
+      skipped_existing: skippedExisting,
+      skipped_missing_parent: skippedMissingParent,
+      skipped_locked: skippedLocked,
+      failed,
+    };
+    dbByTable.push(tableSummary);
+
+    if (unaccountedRows > 0) {
+      dbMismatchTables.push({
+        export_key: spec.exportKey,
+        source_rows: sourceRows,
+        accounted_rows: accountedRows,
+        unaccounted_rows: unaccountedRows,
+      });
+    }
+  });
+
+  const dbUnaccountedRowsTotal = Math.max(dbSourceRowsTotal - dbAccountedRowsTotal, 0);
+
+  const mediaSourceFilesTotal = toMetricCount(params.mediaSourceCount);
+  const mediaUploadedCount = toMetricCount(params.mediaUploadedCount);
+  const mediaSkippedExistingCount = toMetricCount(params.mediaSkippedExistingCount);
+  const mediaFailedCount = toMetricCount(params.mediaFailedCount);
+  const mediaAccountedFilesTotal = mediaUploadedCount + mediaSkippedExistingCount + mediaFailedCount;
+  const mediaUnaccountedFilesTotal = Math.max(mediaSourceFilesTotal - mediaAccountedFilesTotal, 0);
+
+  return {
+    db: {
+      source_rows_total: dbSourceRowsTotal,
+      accounted_rows_total: dbAccountedRowsTotal,
+      unaccounted_rows_total: dbUnaccountedRowsTotal,
+      mismatch_table_count: dbMismatchTables.length,
+      mismatch_tables: dbMismatchTables.slice(0, MAX_ERRORS),
+      by_table: dbByTable,
+    },
+    media: {
+      source_files_total: mediaSourceFilesTotal,
+      accounted_files_total: mediaAccountedFilesTotal,
+      unaccounted_files_total: mediaUnaccountedFilesTotal,
+      uploaded_count: mediaUploadedCount,
+      skipped_existing_count: mediaSkippedExistingCount,
+      failed_count: mediaFailedCount,
+    },
+  };
+};
+
 // SAFETY-5:
 // - restore_mode=self|disaster
 // - disaster mode supports cross-account restore with user_id/media remap
@@ -1831,6 +2471,25 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") {
     return jsonResponse({ error: "Method Not Allowed" }, 405);
   }
+
+  const requestStartedAtMs = Date.now();
+  const requestStartedAtIso = new Date(requestStartedAtMs).toISOString();
+  let currentPhase = "request_start";
+  let currentPhaseStartMs = requestStartedAtMs;
+  const phaseDurationsMs: Record<string, number> = {};
+  const trackPhase = (nextPhase: string): void => {
+    const now = Date.now();
+    phaseDurationsMs[currentPhase] = (phaseDurationsMs[currentPhase] || 0) + Math.max(0, now - currentPhaseStartMs);
+    currentPhase = nextPhase;
+    currentPhaseStartMs = now;
+  };
+  const getPhaseDurationsSnapshot = (): Record<string, number> => {
+    const now = Date.now();
+    return {
+      ...phaseDurationsMs,
+      [currentPhase]: (phaseDurationsMs[currentPhase] || 0) + Math.max(0, now - currentPhaseStartMs),
+    };
+  };
 
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL");
@@ -1862,6 +2521,7 @@ Deno.serve(async (req) => {
       return jsonResponse({ error: "Unauthorized" }, 401);
     }
 
+    trackPhase("payload_read");
     const payload = await readZipPayload(req);
     if ("error" in payload) {
       return jsonResponse({ error: payload.error }, payload.status);
@@ -1872,6 +2532,19 @@ Deno.serve(async (req) => {
     }
 
     const restoreMode = resolveRestoreMode(payload.restoreModeRaw, payload.modeRaw);
+    let explicitIdempotencyKey = "";
+    try {
+      explicitIdempotencyKey = normalizeIdempotencyKey(
+        req.headers.get("idempotency-key")
+          || req.headers.get("x-idempotency-key")
+          || payload.idempotencyKeyRaw,
+      );
+    } catch (error) {
+      if (error instanceof RestoreValidationError) {
+        return jsonResponse({ error: error.message }, error.status);
+      }
+      throw error;
+    }
 
     const serviceSupabase = createClient(supabaseUrl, serviceRoleKey, {
       auth: {
@@ -1880,206 +2553,450 @@ Deno.serve(async (req) => {
       },
     });
     const tableExistsCache = new Map<string, boolean>();
-
-    let zip: JSZip;
-    try {
-      zip = await JSZip.loadAsync(payload.bytes, { checkCRC32: true });
-    } catch (error) {
+    const columnExistsCache = new Map<string, boolean>();
+    trackPhase("lock_acquire");
+    const lockState = await tryAcquireRestoreLock(serviceSupabase, userId, restoreMode);
+    if (!lockState.acquired) {
       return jsonResponse({
-        error: "Fail ZIP rosak atau tidak sah.",
-        details: error instanceof Error ? error.message : String(error),
-      }, 400);
-    }
-
-    const metadataEntry = zip.file(/^metadata\.json$/i)?.[0] || null;
-    if (!metadataEntry) {
-      return jsonResponse({ error: "metadata.json tidak dijumpai dalam backup ZIP." }, 400);
-    }
-
-    let metadata: JsonObject;
-    try {
-      metadata = JSON.parse(await metadataEntry.async("string"));
-    } catch {
-      return jsonResponse({ error: "metadata.json tidak sah." }, 400);
-    }
-
-    const checksum = toString(metadata.checksum);
-    if (!checksum) {
-      return jsonResponse({ error: "Checksum backup tiada dalam metadata." }, 400);
-    }
-
-    if (restoreMode === "self") {
-      const { data: matchedSnapshots, error: snapshotMatchError } = await serviceSupabase
-        .from("business_snapshots")
-        .select("id")
-        .eq("user_id", userId)
-        .eq("checksum", checksum)
-        .limit(1);
-
-      if (snapshotMatchError) {
-        return jsonResponse({
-          error: "Gagal sahkan pemilikan backup.",
-          details: snapshotMatchError.message,
-        }, 500);
-      }
-
-      if (!Array.isArray(matchedSnapshots) || matchedSnapshots.length === 0) {
-        return jsonResponse({
-          error: "Backup ini tidak sepadan dengan rekod snapshot user semasa.",
-        }, 403);
-      }
-    }
-
-    const mediaManifestEntry = zip.file(/^media_manifest\.json$/i)?.[0] || null;
-    if (!mediaManifestEntry) {
-      return jsonResponse({ error: "media_manifest.json tidak dijumpai. Backup ini tiada media restore plan." }, 400);
-    }
-
-    let mediaManifest: JsonObject;
-    try {
-      mediaManifest = JSON.parse(await mediaManifestEntry.async("string"));
-    } catch {
-      return jsonResponse({ error: "media_manifest.json tidak sah." }, 400);
-    }
-
-    const mediaFiles = normalizeMediaFiles(mediaManifest.files);
-    if (mediaFiles.length === 0) {
-      return jsonResponse({ error: "media_manifest.json tidak mengandungi sebarang fail media." }, 400);
-    }
-
-    if (mediaFiles.length > MAX_MEDIA_FILES) {
-      return jsonResponse({
-        error: `Terlalu banyak fail media (${mediaFiles.length}). Had maksimum ialah ${MAX_MEDIA_FILES}.`,
-      }, 400);
-    }
-
-    const backupTables: Record<string, JsonObject[]> = {};
-    for (const spec of RESTORE_TABLE_SPECS) {
-      backupTables[spec.exportKey] = await loadBackupJsonRows(zip, spec.exportKey);
-    }
-    const oldUserId = inferOldUserId(backupTables, mediaFiles);
-
-    const itemsTable = await findFirstExistingTable(serviceSupabase, ["items", "inventory"], tableExistsCache);
-    const walletsTable = await findFirstExistingTable(serviceSupabase, ["wallets"], tableExistsCache);
-    const invoicesTable = await findFirstExistingTable(serviceSupabase, ["invoices"], tableExistsCache);
-
-    const itemsCount = await countRowsByUser(serviceSupabase, itemsTable, userId);
-    const invoicesCount = await countRowsByUser(serviceSupabase, invoicesTable, userId);
-    const walletsCount = await countRowsByUser(serviceSupabase, walletsTable, userId);
-    const isAccountEmptyForDisaster = itemsCount === 0 && invoicesCount === 0 && walletsCount <= 1;
-
-    if (restoreMode === "disaster" && !isAccountEmptyForDisaster && !payload.forceWipe) {
-      return jsonResponse({
-        error: "Akaun semasa tidak kosong. Gunakan force_wipe=true untuk disaster restore.",
+        error: "Restore sedang berjalan untuk akaun ini. Sila tunggu sehingga proses semasa selesai.",
         restore_mode: restoreMode,
-        account_state: {
-          items_count: itemsCount,
-          invoices_count: invoicesCount,
-          wallets_count: walletsCount,
-        },
       }, 409);
     }
 
-    if (restoreMode === "disaster" && !payload.dryRun) {
-      await wipeExistingBusinessData(serviceSupabase, userId, tableExistsCache);
-    }
+    try {
+      let zip: JSZip;
+      try {
+        trackPhase("zip_load_validate");
+        zip = await JSZip.loadAsync(payload.bytes, { checkCRC32: true });
+        validateZipStructure(zip);
+      } catch (error) {
+        if (error instanceof RestoreValidationError) {
+          return jsonResponse({ error: error.message }, error.status);
+        }
+        return jsonResponse({
+          error: "Fail ZIP rosak atau tidak sah.",
+          details: error instanceof Error ? error.message : String(error),
+        }, 400);
+      }
 
-    const mediaResult = await restoreMedia({
-      serviceSupabase,
-      zip,
-      mediaFiles,
-      restoreMode,
-      oldUserId,
-      newUserId: userId,
-      supabaseUrl,
-      dryRun: payload.dryRun,
-    });
+      const metadataEntry = findSingleZipEntry(zip, /^metadata\.json$/i, "metadata.json");
+      if (!metadataEntry) {
+        return jsonResponse({ error: "metadata.json tidak dijumpai dalam backup ZIP." }, 400);
+      }
 
-    let dataRestoreResult = {
-      insertedCount: 0,
-      skippedExistingCount: 0,
-      skippedMissingParentCount: 0,
-      skippedLockedCount: 0,
-      failedCount: 0,
-      wouldInsertCount: 0,
-      tableSummaries: [] as JsonObject[],
-      issues: [] as RestoreIssue[],
-    };
+      let metadata: JsonObject;
+      try {
+        trackPhase("metadata_validate");
+        const rawMetadata = JSON.parse(await metadataEntry.async("string"));
+        metadata = validateMetadataStructure(rawMetadata);
+      } catch (error) {
+        if (error instanceof RestoreValidationError) {
+          return jsonResponse({ error: error.message }, error.status);
+        }
+        return jsonResponse({ error: "metadata.json tidak sah." }, 400);
+      }
 
-    // SAFETY-5 scope: data restore only for disaster mode.
-    if (restoreMode === "disaster") {
-      dataRestoreResult = await restoreDataTables({
+      const checksum = toString(metadata.checksum);
+      if (!checksum) {
+        return jsonResponse({ error: "Checksum backup tiada dalam metadata." }, 400);
+      }
+
+      const effectiveIdempotencyKey = explicitIdempotencyKey || buildAutoIdempotencyKey({
+        checksum,
+        restoreMode,
+        dryRun: payload.dryRun,
+        forceWipe: payload.forceWipe,
+      });
+
+      if (restoreMode === "self") {
+        trackPhase("self_mode_snapshot_match");
+        const { data: matchedSnapshots, error: snapshotMatchError } = await serviceSupabase
+          .from("business_snapshots")
+          .select("id")
+          .eq("user_id", userId)
+          .eq("checksum", checksum)
+          .limit(1);
+
+        if (snapshotMatchError) {
+          return jsonResponse({
+            error: "Gagal sahkan pemilikan backup.",
+            details: snapshotMatchError.message,
+          }, 500);
+        }
+
+        if (!Array.isArray(matchedSnapshots) || matchedSnapshots.length === 0) {
+          return jsonResponse({
+            error: "Backup ini tidak sepadan dengan rekod snapshot user semasa.",
+          }, 403);
+        }
+      }
+
+      trackPhase("idempotency_replay_check");
+      const replayEvent = await findRecentIdempotentRestoreEvent(
+        serviceSupabase,
+        tableExistsCache,
+        columnExistsCache,
+        {
+          userId,
+          idempotencyKey: effectiveIdempotencyKey,
+          checksum,
+          restoreMode,
+          dryRun: payload.dryRun,
+          forceWipe: payload.forceWipe,
+        },
+      );
+      if (replayEvent) {
+        trackPhase("response_build");
+        const requestFinishedAtIso = new Date().toISOString();
+        const durationTotalMs = Math.max(0, Date.now() - requestStartedAtMs);
+        const phaseDurationsSnapshot = getPhaseDurationsSnapshot();
+        const replaySummary = replayEvent.summary;
+        return jsonResponse({
+          ok: true,
+          replayed: true,
+          message: "Permintaan restore yang sama telah diproses baru-baru ini.",
+          restore_mode: restoreMode,
+          dry_run: payload.dryRun,
+          force_wipe: payload.forceWipe,
+          source_backup_checksum: checksum,
+          old_user_id: null,
+          new_user_id: userId,
+          idempotency: {
+            key: effectiveIdempotencyKey,
+            replayed: true,
+            replay_window_seconds: IDEMPOTENCY_REPLAY_WINDOW_SECONDS,
+            source_event_id: toString(replayEvent.id) || null,
+            source_event_created_at: toString(replayEvent.created_at) || null,
+          },
+          lock: {
+            enabled: lockState.enabled,
+            request_id: lockState.requestId,
+          },
+          media: {
+            uploaded_count: getSummaryCount(replaySummary, "media_uploaded_count"),
+            skipped_existing_count: getSummaryCount(replaySummary, "media_skipped_existing_count"),
+            failed_count: getSummaryCount(replaySummary, "media_failed_count"),
+            would_upload_count: 0,
+            sample_uploaded_paths: [],
+            conflicts: [],
+            errors: [],
+          },
+          data: {
+            enabled: restoreMode === "disaster",
+            inserted_count: getSummaryCount(replaySummary, "data_inserted_count"),
+            skipped_existing_count: getSummaryCount(replaySummary, "data_skipped_existing_count"),
+            skipped_missing_parent_count: getSummaryCount(replaySummary, "data_skipped_missing_parent_count"),
+            skipped_locked_count: getSummaryCount(replaySummary, "data_skipped_locked_count"),
+            failed_count: getSummaryCount(replaySummary, "data_failed_count"),
+            would_insert_count: 0,
+            table_summaries: [],
+            errors: [],
+          },
+          reconciliation: {
+            db: {
+              source_rows_total: getSummaryCount(replaySummary, "reconciliation_db_source_rows_total"),
+              accounted_rows_total: getSummaryCount(replaySummary, "reconciliation_db_accounted_rows_total"),
+              unaccounted_rows_total: getSummaryCount(replaySummary, "reconciliation_db_unaccounted_rows_total"),
+              mismatch_table_count: getSummaryCount(replaySummary, "reconciliation_db_mismatch_table_count"),
+              mismatch_tables: [],
+              by_table: [],
+            },
+            media: {
+              source_files_total: getSummaryCount(replaySummary, "reconciliation_media_source_files_total"),
+              accounted_files_total: getSummaryCount(replaySummary, "reconciliation_media_accounted_files_total"),
+              unaccounted_files_total: getSummaryCount(replaySummary, "reconciliation_media_unaccounted_files_total"),
+              uploaded_count: getSummaryCount(replaySummary, "media_uploaded_count"),
+              skipped_existing_count: getSummaryCount(replaySummary, "media_skipped_existing_count"),
+              failed_count: getSummaryCount(replaySummary, "media_failed_count"),
+            },
+          },
+          observability: {
+            phase: "replayed",
+            request_started_at: requestStartedAtIso,
+            request_finished_at: requestFinishedAtIso,
+            duration_total_ms: durationTotalMs,
+            phase_durations_ms: phaseDurationsSnapshot,
+          },
+          manifest_file_count: 0,
+          backup_file_name: payload.fileName,
+        });
+      }
+
+      const mediaManifestEntry = findSingleZipEntry(zip, /^media_manifest\.json$/i, "media_manifest.json");
+      if (!mediaManifestEntry) {
+        return jsonResponse({ error: "media_manifest.json tidak dijumpai. Backup ini tiada media restore plan." }, 400);
+      }
+
+      let mediaFiles: NormalizedMediaFile[] = [];
+      try {
+        trackPhase("manifest_validate");
+        const mediaManifest = JSON.parse(await mediaManifestEntry.async("string"));
+        mediaFiles = validateAndNormalizeMediaManifest(mediaManifest);
+      } catch (error) {
+        if (error instanceof RestoreValidationError) {
+          return jsonResponse({ error: error.message }, error.status);
+        }
+        return jsonResponse({ error: "media_manifest.json tidak sah." }, 400);
+      }
+
+      let backupTables: Record<string, JsonObject[]> = {};
+      let totalBackupRows = 0;
+      try {
+        trackPhase("tables_load_validate");
+        const parsedTables = await loadAndValidateBackupTables(zip, metadata);
+        backupTables = parsedTables.backupTables;
+        totalBackupRows = parsedTables.totalRows;
+      } catch (error) {
+        if (error instanceof RestoreValidationError) {
+          return jsonResponse({ error: error.message }, error.status);
+        }
+        throw error;
+      }
+
+      if (restoreMode === "disaster" && totalBackupRows > MAX_TOTAL_DB_WRITES) {
+        return jsonResponse({
+          error: `Jumlah row restore melebihi had ${MAX_TOTAL_DB_WRITES}.`,
+        }, 413);
+      }
+
+      try {
+        trackPhase("manifest_coverage_validate");
+        const mediaZipEntries = collectMediaZipEntries(zip);
+        validateMediaManifestCoverage(mediaFiles, mediaZipEntries);
+      } catch (error) {
+        if (error instanceof RestoreValidationError) {
+          return jsonResponse({ error: error.message }, error.status);
+        }
+        throw error;
+      }
+
+      const oldUserId = inferOldUserId(backupTables, mediaFiles);
+
+      const itemsTable = await findFirstExistingTable(serviceSupabase, ["items", "inventory"], tableExistsCache);
+      const walletsTable = await findFirstExistingTable(serviceSupabase, ["wallets"], tableExistsCache);
+      const invoicesTable = await findFirstExistingTable(serviceSupabase, ["invoices"], tableExistsCache);
+
+      trackPhase("account_state_check");
+      const itemsCount = await countRowsByUser(serviceSupabase, itemsTable, userId);
+      const invoicesCount = await countRowsByUser(serviceSupabase, invoicesTable, userId);
+      const walletsCount = await countRowsByUser(serviceSupabase, walletsTable, userId);
+      const isAccountEmptyForDisaster = itemsCount === 0 && invoicesCount === 0 && walletsCount <= 1;
+
+      if (restoreMode === "disaster" && !isAccountEmptyForDisaster && !payload.forceWipe) {
+        return jsonResponse({
+          error: "Akaun semasa tidak kosong. Gunakan force_wipe=true untuk disaster restore.",
+          restore_mode: restoreMode,
+          account_state: {
+            items_count: itemsCount,
+            invoices_count: invoicesCount,
+            wallets_count: walletsCount,
+          },
+        }, 409);
+      }
+
+      if (restoreMode === "disaster" && !payload.dryRun) {
+        trackPhase("force_wipe");
+        await wipeExistingBusinessData(serviceSupabase, userId, tableExistsCache);
+      }
+
+      trackPhase("media_restore");
+      const mediaResult = await restoreMedia({
         serviceSupabase,
         zip,
-        metadata,
+        mediaFiles,
+        restoreMode,
         oldUserId,
         newUserId: userId,
-        mediaMappings: mediaResult.mediaMappings,
-        tableExistsCache,
+        supabaseUrl,
         dryRun: payload.dryRun,
       });
+
+      let dataRestoreResult = {
+        insertedCount: 0,
+        skippedExistingCount: 0,
+        skippedMissingParentCount: 0,
+        skippedLockedCount: 0,
+        failedCount: 0,
+        wouldInsertCount: 0,
+        tableSummaries: [] as JsonObject[],
+        issues: [] as RestoreIssue[],
+      };
+
+      // SAFETY-5 scope: data restore only for disaster mode.
+      if (restoreMode === "disaster") {
+        trackPhase("data_restore");
+        dataRestoreResult = await restoreDataTables({
+          serviceSupabase,
+          backupTables,
+          metadata,
+          oldUserId,
+          newUserId: userId,
+          mediaMappings: mediaResult.mediaMappings,
+          tableExistsCache,
+          dryRun: payload.dryRun,
+        });
+      }
+
+      trackPhase("reconciliation_build");
+      const reconciliation = buildReconciliationReport({
+        backupTables,
+        tableSummaries: dataRestoreResult.tableSummaries,
+        mediaSourceCount: mediaFiles.length,
+        mediaUploadedCount: mediaResult.uploadedCount,
+        mediaSkippedExistingCount: mediaResult.skippedExistingCount,
+        mediaFailedCount: mediaResult.failedCount,
+      });
+
+      trackPhase("restore_event_log");
+      const requestObservedAtIso = new Date().toISOString();
+      const durationObservedMs = Math.max(0, Date.now() - requestStartedAtMs);
+      await logRestoreEvent(serviceSupabase, tableExistsCache, columnExistsCache, {
+        checksum,
+        idempotencyKey: effectiveIdempotencyKey,
+        oldUserId,
+        newUserId: userId,
+        restoreMode,
+        forceWipe: payload.forceWipe,
+        dryRun: payload.dryRun,
+        summary: {
+          lock_enabled: lockState.enabled,
+          lock_request_id: lockState.requestId,
+          idempotency_key: effectiveIdempotencyKey,
+          media_uploaded_count: mediaResult.uploadedCount,
+          media_skipped_existing_count: mediaResult.skippedExistingCount,
+          media_failed_count: mediaResult.failedCount,
+          data_inserted_count: dataRestoreResult.insertedCount,
+          data_skipped_existing_count: dataRestoreResult.skippedExistingCount,
+          data_skipped_missing_parent_count: dataRestoreResult.skippedMissingParentCount,
+          data_skipped_locked_count: dataRestoreResult.skippedLockedCount,
+          data_failed_count: dataRestoreResult.failedCount,
+          reconciliation_db_source_rows_total: toMetricCount(
+            (reconciliation.db as Record<string, unknown>)?.source_rows_total,
+          ),
+          reconciliation_db_accounted_rows_total: toMetricCount(
+            (reconciliation.db as Record<string, unknown>)?.accounted_rows_total,
+          ),
+          reconciliation_db_unaccounted_rows_total: toMetricCount(
+            (reconciliation.db as Record<string, unknown>)?.unaccounted_rows_total,
+          ),
+          reconciliation_db_mismatch_table_count: toMetricCount(
+            (reconciliation.db as Record<string, unknown>)?.mismatch_table_count,
+          ),
+          reconciliation_media_source_files_total: toMetricCount(
+            (reconciliation.media as Record<string, unknown>)?.source_files_total,
+          ),
+          reconciliation_media_accounted_files_total: toMetricCount(
+            (reconciliation.media as Record<string, unknown>)?.accounted_files_total,
+          ),
+          reconciliation_media_unaccounted_files_total: toMetricCount(
+            (reconciliation.media as Record<string, unknown>)?.unaccounted_files_total,
+          ),
+          phase_durations_ms: getPhaseDurationsSnapshot(),
+          request_started_at: requestStartedAtIso,
+          request_observed_at: requestObservedAtIso,
+          duration_observed_ms: durationObservedMs,
+        },
+      });
+
+      trackPhase("response_build");
+      const requestFinishedAtIso = new Date().toISOString();
+      const durationTotalMs = Math.max(0, Date.now() - requestStartedAtMs);
+      const phaseDurationsSnapshot = getPhaseDurationsSnapshot();
+
+      return jsonResponse({
+        ok: true,
+        restore_mode: restoreMode,
+        dry_run: payload.dryRun,
+        force_wipe: payload.forceWipe,
+        source_backup_checksum: checksum,
+        old_user_id: oldUserId,
+        new_user_id: userId,
+        idempotency: {
+          key: effectiveIdempotencyKey,
+          replayed: false,
+          replay_window_seconds: IDEMPOTENCY_REPLAY_WINDOW_SECONDS,
+        },
+        lock: {
+          enabled: lockState.enabled,
+          request_id: lockState.requestId,
+        },
+        account_state_before: {
+          items_count: itemsCount,
+          invoices_count: invoicesCount,
+          wallets_count: walletsCount,
+          qualifies_as_empty: isAccountEmptyForDisaster,
+        },
+        media: {
+          uploaded_count: mediaResult.uploadedCount,
+          skipped_existing_count: mediaResult.skippedExistingCount,
+          failed_count: mediaResult.failedCount,
+          would_upload_count: mediaResult.wouldUploadCount,
+          sample_uploaded_paths: mediaResult.sampleUploadedPaths,
+          conflicts: mediaResult.conflicts,
+          errors: mediaResult.issues,
+        },
+        data: {
+          enabled: restoreMode === "disaster",
+          inserted_count: dataRestoreResult.insertedCount,
+          skipped_existing_count: dataRestoreResult.skippedExistingCount,
+          skipped_missing_parent_count: dataRestoreResult.skippedMissingParentCount,
+          skipped_locked_count: dataRestoreResult.skippedLockedCount,
+          failed_count: dataRestoreResult.failedCount,
+          would_insert_count: dataRestoreResult.wouldInsertCount,
+          table_summaries: dataRestoreResult.tableSummaries,
+          errors: dataRestoreResult.issues,
+        },
+        reconciliation,
+        observability: {
+          phase: "completed",
+          request_started_at: requestStartedAtIso,
+          request_finished_at: requestFinishedAtIso,
+          duration_total_ms: durationTotalMs,
+          phase_durations_ms: phaseDurationsSnapshot,
+        },
+        manifest_file_count: mediaFiles.length,
+        backup_file_name: payload.fileName,
+      });
+    } finally {
+      if (lockState.enabled) {
+        try {
+          await releaseRestoreLock(serviceSupabase, userId, lockState.requestId);
+        } catch (releaseError) {
+          console.error("release_restore_lock failed", releaseError);
+        }
+      }
+    }
+  } catch (error) {
+    trackPhase("response_build");
+    const requestFinishedAtIso = new Date().toISOString();
+    const durationTotalMs = Math.max(0, Date.now() - requestStartedAtMs);
+    const phaseDurationsSnapshot = getPhaseDurationsSnapshot();
+
+    if (error instanceof RestoreValidationError) {
+      return jsonResponse({
+        error: error.message,
+        phase: currentPhase,
+        observability: {
+          phase: currentPhase,
+          request_started_at: requestStartedAtIso,
+          request_finished_at: requestFinishedAtIso,
+          duration_total_ms: durationTotalMs,
+          phase_durations_ms: phaseDurationsSnapshot,
+        },
+      }, error.status);
     }
 
-    await logRestoreEvent(serviceSupabase, tableExistsCache, {
-      checksum,
-      oldUserId,
-      newUserId: userId,
-      restoreMode,
-      forceWipe: payload.forceWipe,
-      dryRun: payload.dryRun,
-      summary: {
-        media_uploaded_count: mediaResult.uploadedCount,
-        media_skipped_existing_count: mediaResult.skippedExistingCount,
-        media_failed_count: mediaResult.failedCount,
-        data_inserted_count: dataRestoreResult.insertedCount,
-        data_skipped_existing_count: dataRestoreResult.skippedExistingCount,
-        data_skipped_missing_parent_count: dataRestoreResult.skippedMissingParentCount,
-        data_skipped_locked_count: dataRestoreResult.skippedLockedCount,
-        data_failed_count: dataRestoreResult.failedCount,
-      },
-    });
-
-    return jsonResponse({
-      ok: true,
-      restore_mode: restoreMode,
-      dry_run: payload.dryRun,
-      force_wipe: payload.forceWipe,
-      source_backup_checksum: checksum,
-      old_user_id: oldUserId,
-      new_user_id: userId,
-      account_state_before: {
-        items_count: itemsCount,
-        invoices_count: invoicesCount,
-        wallets_count: walletsCount,
-        qualifies_as_empty: isAccountEmptyForDisaster,
-      },
-      media: {
-        uploaded_count: mediaResult.uploadedCount,
-        skipped_existing_count: mediaResult.skippedExistingCount,
-        failed_count: mediaResult.failedCount,
-        would_upload_count: mediaResult.wouldUploadCount,
-        sample_uploaded_paths: mediaResult.sampleUploadedPaths,
-        conflicts: mediaResult.conflicts,
-        errors: mediaResult.issues,
-      },
-      data: {
-        enabled: restoreMode === "disaster",
-        inserted_count: dataRestoreResult.insertedCount,
-        skipped_existing_count: dataRestoreResult.skippedExistingCount,
-        skipped_missing_parent_count: dataRestoreResult.skippedMissingParentCount,
-        skipped_locked_count: dataRestoreResult.skippedLockedCount,
-        failed_count: dataRestoreResult.failedCount,
-        would_insert_count: dataRestoreResult.wouldInsertCount,
-        table_summaries: dataRestoreResult.tableSummaries,
-        errors: dataRestoreResult.issues,
-      },
-      manifest_file_count: mediaFiles.length,
-      backup_file_name: payload.fileName,
-    });
-  } catch (error) {
     return jsonResponse({
       error: "Failed to restore full backup to account.",
       details: error instanceof Error ? error.message : String(error),
+      phase: currentPhase,
+      observability: {
+        phase: currentPhase,
+        request_started_at: requestStartedAtIso,
+        request_finished_at: requestFinishedAtIso,
+        duration_total_ms: durationTotalMs,
+        phase_durations_ms: phaseDurationsSnapshot,
+      },
     }, 500);
   }
 });

@@ -624,7 +624,7 @@ const RestorePreviewSection = () => {
                   )}
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Sandbox restore only; DB remap/overwrite belum diimplementasi.
+                  Sandbox restore hanya untuk media. Untuk DB restore + remap cross-account, gunakan Disaster Restore.
                 </p>
               </div>
             )}
@@ -735,6 +735,16 @@ const RestorePreviewSection = () => {
                 <p>
                   Restore mode: <span className="font-medium text-foreground">{dummyMediaRestoreResult.restore_mode || '-'}</span>
                 </p>
+                {dummyMediaRestoreResult?.replayed && (
+                  <p className="rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-blue-700">
+                    Request ini guna hasil replay idempotency (restore tidak dijalankan semula).
+                  </p>
+                )}
+                {dummyMediaRestoreResult?.idempotency?.key && (
+                  <p>
+                    Idempotency key: <span className="font-medium break-all text-foreground">{String(dummyMediaRestoreResult.idempotency.key)}</span>
+                  </p>
+                )}
                 <p>
                   Media uploaded: <span className="font-medium text-foreground">{formatNumber(dummyMediaRestoreResult?.media?.uploaded_count || 0)}</span>
                   {' '}| Media skipped existing: <span className="font-medium text-foreground">{formatNumber(dummyMediaRestoreResult?.media?.skipped_existing_count || 0)}</span>
@@ -742,6 +752,44 @@ const RestorePreviewSection = () => {
                   {' '}| Data skip missing parent: <span className="font-medium text-foreground">{formatNumber(dummyMediaRestoreResult?.data?.skipped_missing_parent_count || 0)}</span>
                   {' '}| Data skip locked: <span className="font-medium text-foreground">{formatNumber(dummyMediaRestoreResult?.data?.skipped_locked_count || 0)}</span>
                 </p>
+                {dummyMediaRestoreResult?.reconciliation && (
+                  <div className="rounded-md border border-slate-200 bg-white px-2 py-2">
+                    <p className="font-medium text-foreground">Reconciliation</p>
+                    <p>
+                      DB source/accounted/unaccounted:{' '}
+                      <span className="font-medium text-foreground">
+                        {formatNumber(dummyMediaRestoreResult?.reconciliation?.db?.source_rows_total || 0)} / {formatNumber(dummyMediaRestoreResult?.reconciliation?.db?.accounted_rows_total || 0)} / {formatNumber(dummyMediaRestoreResult?.reconciliation?.db?.unaccounted_rows_total || 0)}
+                      </span>
+                    </p>
+                    <p>
+                      Media source/accounted/unaccounted:{' '}
+                      <span className="font-medium text-foreground">
+                        {formatNumber(dummyMediaRestoreResult?.reconciliation?.media?.source_files_total || 0)} / {formatNumber(dummyMediaRestoreResult?.reconciliation?.media?.accounted_files_total || 0)} / {formatNumber(dummyMediaRestoreResult?.reconciliation?.media?.unaccounted_files_total || 0)}
+                      </span>
+                    </p>
+                    <p>
+                      DB mismatch tables:{' '}
+                      <span className="font-medium text-foreground">{formatNumber(dummyMediaRestoreResult?.reconciliation?.db?.mismatch_table_count || 0)}</span>
+                    </p>
+                  </div>
+                )}
+                {dummyMediaRestoreResult?.observability && (
+                  <div className="rounded-md border border-slate-200 bg-white px-2 py-2">
+                    <p className="font-medium text-foreground">Observability</p>
+                    <p>
+                      Phase: <span className="font-medium text-foreground">{String(dummyMediaRestoreResult?.observability?.phase || '-')}</span>
+                    </p>
+                    <p>
+                      Duration: <span className="font-medium text-foreground">{formatNumber(dummyMediaRestoreResult?.observability?.duration_total_ms || 0)} ms</span>
+                    </p>
+                    <p>
+                      Started: <span className="font-medium text-foreground">{formatTimestamp(dummyMediaRestoreResult?.observability?.request_started_at)}</span>
+                    </p>
+                    <p>
+                      Finished: <span className="font-medium text-foreground">{formatTimestamp(dummyMediaRestoreResult?.observability?.request_finished_at)}</span>
+                    </p>
+                  </div>
+                )}
 
                 {Array.isArray(dummyMediaRestoreResult?.media?.sample_uploaded_paths) && dummyMediaRestoreResult.media.sample_uploaded_paths.length > 0 && (
                   <div>
