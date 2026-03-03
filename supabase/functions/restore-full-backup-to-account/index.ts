@@ -2298,9 +2298,10 @@ const restoreDataTables = async (params: {
     let preSkippedLockedForTable = 0;
     const platformFeeStatusRestoreMap = new Map<string, string>();
 
-    const applyClientReferenceFallback = (): void => {
+    const applyClientReferenceFallback = async (): Promise<void> => {
       if (!["client_phones", "client_addresses", "inventory", "invoices"].includes(spec.exportKey)) return;
       const fallbackCustomerId = existingCustomerIds.size === 1 ? Array.from(existingCustomerIds)[0] : "";
+      const missingClientIdsToSeed = new Set<string>();
 
       const filteredRows: JsonObject[] = [];
       rowsToWrite.forEach((row, index) => {
@@ -2324,6 +2325,13 @@ const restoreDataTables = async (params: {
           return;
         }
 
+        if (isUuid(currentClientId) && customersTable) {
+          missingClientIdsToSeed.add(currentClientId);
+          if (isUuid(sourceClientId)) globalIdMappings.set(sourceClientId, currentClientId);
+          filteredRows.push(row);
+          return;
+        }
+
         if (spec.exportKey === "inventory" || spec.exportKey === "invoices") {
           row.client_id = null;
           filteredRows.push(row);
@@ -2340,6 +2348,25 @@ const restoreDataTables = async (params: {
       });
 
       rowsToWrite = filteredRows;
+
+      if (missingClientIdsToSeed.size === 0 || !customersTable) return;
+
+      const seedRows = Array.from(missingClientIdsToSeed).map((id) => ({
+        id,
+        user_id: newUserId,
+        name: "Pelanggan Restore",
+        email: null,
+      })) as JsonObject[];
+
+      await writeRowsWithFallback(
+        serviceSupabase,
+        customersTable,
+        seedRows,
+        "id",
+        issues,
+      );
+
+      await refreshExistingCustomersByEmail();
     };
 
     if (spec.exportKey === "sales_channels") {
@@ -2494,7 +2521,7 @@ const restoreDataTables = async (params: {
       rowsToWrite = filteredRows;
     }
 
-    applyClientReferenceFallback();
+    await applyClientReferenceFallback();
 
     if (spec.exportKey === "client_phones") {
       const pendingPhoneKeys = new Set<string>();
