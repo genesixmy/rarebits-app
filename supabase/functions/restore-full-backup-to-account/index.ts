@@ -78,7 +78,7 @@ const RESTORE_TABLE_SPECS: RestoreTableSpec[] = [
   { exportKey: "profiles", candidates: ["profiles"], onConflict: "id" },
   { exportKey: "settings", candidates: ["settings", "invoice_settings"], onConflict: "user_id" },
   { exportKey: "wallets", candidates: ["wallets"] },
-  { exportKey: "customers", candidates: ["customers", "clients"], onConflict: "user_id,email" },
+  { exportKey: "customers", candidates: ["clients", "customers"], onConflict: "user_id,email" },
   { exportKey: "client_phones", candidates: ["client_phones"] },
   { exportKey: "client_addresses", candidates: ["client_addresses"] },
   { exportKey: "categories", candidates: ["categories"] },
@@ -1488,7 +1488,7 @@ const wipeExistingBusinessData = async (
   tableExistsCache: Map<string, boolean>,
 ): Promise<void> => {
   const itemsTable = await findFirstExistingTable(serviceSupabase, ["items", "inventory"], tableExistsCache);
-  const customersTable = await findFirstExistingTable(serviceSupabase, ["customers", "clients"], tableExistsCache);
+  const customersTable = await findFirstExistingTable(serviceSupabase, ["clients", "customers"], tableExistsCache);
   const walletsTable = await findFirstExistingTable(serviceSupabase, ["wallets"], tableExistsCache);
   const invoicesTable = await findFirstExistingTable(serviceSupabase, ["invoices"], tableExistsCache);
   const shipmentsTable = await findFirstExistingTable(serviceSupabase, ["shipments"], tableExistsCache);
@@ -1869,7 +1869,7 @@ const restoreDataTables = async (params: {
   const invoiceAdjustmentsTable = await findFirstExistingTable(serviceSupabase, ["invoice_adjustments", "invoice_refunds"], tableExistsCache);
   const invoiceItemReturnsTable = await findFirstExistingTable(serviceSupabase, ["invoice_item_returns"], tableExistsCache);
   const shipmentsTable = await findFirstExistingTable(serviceSupabase, ["shipments"], tableExistsCache);
-  const customersTable = await findFirstExistingTable(serviceSupabase, ["customers", "clients"], tableExistsCache);
+  const customersTable = await findFirstExistingTable(serviceSupabase, ["clients", "customers"], tableExistsCache);
   const clientPhonesTable = await findFirstExistingTable(serviceSupabase, ["client_phones"], tableExistsCache);
   const clientAddressesTable = await findFirstExistingTable(serviceSupabase, ["client_addresses"], tableExistsCache);
   const existingCustomerIdByEmail = new Map<string, string>();
