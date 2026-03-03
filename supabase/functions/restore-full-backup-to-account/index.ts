@@ -1645,6 +1645,78 @@ const syncClientsFromCustomersIfNeeded = async (
   }
 };
 
+const syncClientsFromInvoiceRefsIfNeeded = async (
+  serviceSupabase: ReturnType<typeof createClient>,
+  userId: string,
+  tableExistsCache: Map<string, boolean>,
+  issues: RestoreIssue[],
+): Promise<void> => {
+  const hasClients = await tableExists(serviceSupabase, "clients", tableExistsCache);
+  const hasInvoices = await tableExists(serviceSupabase, "invoices", tableExistsCache);
+  if (!hasClients || !hasInvoices) return;
+
+  const { data: existingClients, error: clientsError } = await serviceSupabase
+    .from("clients")
+    .select("id")
+    .eq("user_id", userId)
+    .limit(50000);
+
+  if (clientsError) {
+    if (isTableMissingError(clientsError) || isMissingColumnError(clientsError)) return;
+    throw new Error(clientsError.message || "Gagal semak clients semasa sync dari invoices.");
+  }
+  const existingClientIds = new Set(
+    (Array.isArray(existingClients) ? existingClients : [])
+      .map((row) => toString((row as Record<string, unknown>).id))
+      .filter((id) => isUuid(id)),
+  );
+
+  const { data: invoiceRows, error: invoicesError } = await serviceSupabase
+    .from("invoices")
+    .select("client_id")
+    .eq("user_id", userId)
+    .not("client_id", "is", null)
+    .limit(10000);
+
+  if (invoicesError) {
+    if (isTableMissingError(invoicesError) || isMissingColumnError(invoicesError)) return;
+    throw new Error(invoicesError.message || "Gagal baca invoices semasa sync ke clients.");
+  }
+
+  const clientIds = Array.from(new Set(
+    (Array.isArray(invoiceRows) ? invoiceRows : [])
+      .map((row) => toString((row as Record<string, unknown>).client_id))
+      .filter((id) => isUuid(id)),
+  ));
+
+  const missingClientIds = clientIds.filter((id) => !existingClientIds.has(id));
+  if (missingClientIds.length === 0) return;
+
+  const rows = missingClientIds.map((id) => ({
+    id,
+    user_id: userId,
+    name: "Pelanggan Restore",
+    email: null,
+  })) as JsonObject[];
+
+  const syncResult = await writeRowsWithFallback(
+    serviceSupabase,
+    "clients",
+    rows,
+    "id",
+    issues,
+  );
+
+  if (syncResult.failedCount > 0) {
+    pushIssue(issues, {
+      table: "clients",
+      bucket: null,
+      key: null,
+      message: "Sebahagian sync invoice client_id -> clients gagal.",
+    }, MAX_ERRORS);
+  }
+};
+
 const logRestoreEvent = async (
   serviceSupabase: ReturnType<typeof createClient>,
   tableExistsCache: Map<string, boolean>,
@@ -3312,6 +3384,12 @@ Deno.serve(async (req) => {
 
         if (!payload.dryRun) {
           await syncClientsFromCustomersIfNeeded(
+            serviceSupabase,
+            userId,
+            tableExistsCache,
+            dataRestoreResult.issues,
+          );
+          await syncClientsFromInvoiceRefsIfNeeded(
             serviceSupabase,
             userId,
             tableExistsCache,
