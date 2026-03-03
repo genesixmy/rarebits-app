@@ -2143,6 +2143,14 @@ const restoreDataTables = async (params: {
       globalIdMappings,
     ));
 
+    // Hard tenant ownership guard: any row carrying user_id must belong to
+    // the target account in disaster restore.
+    remappedRows.forEach((row) => {
+      if (Object.prototype.hasOwnProperty.call(row, "user_id")) {
+        row.user_id = newUserId;
+      }
+    });
+
     let rowsToWrite = remappedRows;
     let preSkippedExistingForTable = 0;
     let preSkippedMissingParentForTable = 0;
