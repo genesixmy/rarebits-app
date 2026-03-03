@@ -1905,6 +1905,7 @@ const restoreDataTables = async (params: {
   const clientPhonesTable = await findFirstExistingTable(serviceSupabase, ["client_phones"], tableExistsCache);
   const clientAddressesTable = await findFirstExistingTable(serviceSupabase, ["client_addresses"], tableExistsCache);
   const existingCustomerIdByEmail = new Map<string, string>();
+  const existingCustomerIds = new Set<string>();
   const existingClientPhoneKeys = new Set<string>();
   const existingClientAddressKeys = new Set<string>();
 
@@ -1963,6 +1964,7 @@ const restoreDataTables = async (params: {
 
   const refreshExistingCustomersByEmail = async (): Promise<void> => {
     existingCustomerIdByEmail.clear();
+    existingCustomerIds.clear();
     if (!customersTable) return;
 
     const { data, error } = await serviceSupabase
@@ -1979,6 +1981,7 @@ const restoreDataTables = async (params: {
     (Array.isArray(data) ? data : []).forEach((row) => {
       const id = toString((row as Record<string, unknown>).id);
       const emailKey = normalizeEmailKey((row as Record<string, unknown>).email);
+      if (id) existingCustomerIds.add(id);
       if (!id || !emailKey) return;
       if (!existingCustomerIdByEmail.has(emailKey)) {
         existingCustomerIdByEmail.set(emailKey, id);
@@ -2146,6 +2149,50 @@ const restoreDataTables = async (params: {
     let preSkippedLockedForTable = 0;
     const platformFeeStatusRestoreMap = new Map<string, string>();
 
+    const applyClientReferenceFallback = (): void => {
+      if (!["client_phones", "client_addresses", "inventory", "invoices"].includes(spec.exportKey)) return;
+      const fallbackCustomerId = existingCustomerIds.size === 1 ? Array.from(existingCustomerIds)[0] : "";
+
+      const filteredRows: JsonObject[] = [];
+      rowsToWrite.forEach((row, index) => {
+        const currentClientId = toString(row.client_id);
+        if (!currentClientId) {
+          filteredRows.push(row);
+          return;
+        }
+        if (existingCustomerIds.has(currentClientId)) {
+          filteredRows.push(row);
+          return;
+        }
+
+        const sourceRow = rawRows[index] as Record<string, unknown> | undefined;
+        const sourceClientId = toString(sourceRow?.client_id);
+
+        if (fallbackCustomerId) {
+          row.client_id = fallbackCustomerId;
+          if (isUuid(sourceClientId)) globalIdMappings.set(sourceClientId, fallbackCustomerId);
+          filteredRows.push(row);
+          return;
+        }
+
+        if (spec.exportKey === "inventory" || spec.exportKey === "invoices") {
+          row.client_id = null;
+          filteredRows.push(row);
+          return;
+        }
+
+        preSkippedMissingParentForTable += 1;
+        pushIssue(issues, {
+          table: targetTable,
+          bucket: null,
+          key: null,
+          message: `Client parent tidak ditemui untuk client_id=${currentClientId}.`,
+        }, MAX_ERRORS);
+      });
+
+      rowsToWrite = filteredRows;
+    };
+
     if (spec.exportKey === "sales_channels") {
       const pendingNameToSourceId = new Map<string, string>();
       const filteredRows: JsonObject[] = [];
@@ -2279,6 +2326,8 @@ const restoreDataTables = async (params: {
 
       rowsToWrite = filteredRows;
     }
+
+    applyClientReferenceFallback();
 
     if (spec.exportKey === "client_phones") {
       const pendingPhoneKeys = new Set<string>();
@@ -2549,6 +2598,16 @@ const restoreDataTables = async (params: {
 
     if (dryRun) {
       wouldInsertCount += rowsToWrite.length;
+      if (spec.exportKey === "customers") {
+        rowsToWrite.forEach((row) => {
+          const customerId = toString(row.id);
+          const emailKey = normalizeEmailKey(row.email);
+          if (customerId) existingCustomerIds.add(customerId);
+          if (customerId && emailKey && !existingCustomerIdByEmail.has(emailKey)) {
+            existingCustomerIdByEmail.set(emailKey, customerId);
+          }
+        });
+      }
       if (spec.exportKey === "sales_channels") {
         rowsToWrite.forEach((row) => {
           const sourceId = toString(row.id);
@@ -2646,6 +2705,11 @@ const restoreDataTables = async (params: {
         const mappedByName = nameKey ? platformFeeRuleNameToId.get(nameKey) : "";
         if (mappedByName) platformFeeRuleIdRemap.set(sourceId, mappedByName);
       });
+    }
+
+    if (spec.exportKey === "customers") {
+      await refreshExistingCustomersByEmail();
+      await refreshExistingClientContactKeys();
     }
 
     if (spec.exportKey === "invoices" || spec.exportKey === "shipment_invoices" || spec.exportKey === "invoice_items" || spec.exportKey === "invoice_item_returns") {
