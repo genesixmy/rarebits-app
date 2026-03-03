@@ -1265,6 +1265,14 @@ const resolveTargetTable = async (
   metadata: JsonObject,
   tableExistsCache: Map<string, boolean>,
 ): Promise<string | null> => {
+  if (spec.exportKey === "customers") {
+    // Legacy backups may label this table as "customers", but live relational FKs
+    // point to "clients". Always prefer "clients" when available.
+    if (await tableExists(serviceSupabase, "clients", tableExistsCache)) {
+      return "clients";
+    }
+  }
+
   const metadataSource = resolveMetadataSourceTable(metadata, spec.exportKey);
   if (metadataSource && await tableExists(serviceSupabase, metadataSource, tableExistsCache)) {
     return metadataSource;
