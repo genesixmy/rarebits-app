@@ -323,6 +323,19 @@ const buildClientAddressDedupeKey = (row: JsonObject): string => {
   return `${clientId}:${keyPart}`;
 };
 
+const extractUuidCandidates = (row: Record<string, unknown> | undefined, keys: string[]): string[] => {
+  if (!row) return [];
+  const seen = new Set<string>();
+  const output: string[] = [];
+  keys.forEach((key) => {
+    const value = toString(row[key]);
+    if (!isUuid(value) || seen.has(value)) return;
+    seen.add(value);
+    output.push(value);
+  });
+  return output;
+};
+
 const isLikelyAlreadyExists = (message: string, code?: string): boolean => {
   const normalized = String(message || "").toLowerCase();
   const normalizedCode = String(code || "").toUpperCase();
@@ -1327,9 +1340,20 @@ const registerDisasterIdMappings = (
   if (!DISASTER_ID_REMAP_TABLES.has(exportKey)) return;
 
   rows.forEach((row) => {
-    const sourceId = toString((row as Record<string, unknown>).id);
-    if (!isUuid(sourceId) || idMappings.has(sourceId)) return;
-    idMappings.set(sourceId, crypto.randomUUID());
+    const record = row as Record<string, unknown>;
+    const sourceIds = exportKey === "customers"
+      ? extractUuidCandidates(record, ["id", "client_id", "customer_id"])
+      : extractUuidCandidates(record, ["id"]);
+    if (sourceIds.length === 0) return;
+
+    const firstMapped = sourceIds
+      .map((sourceId) => idMappings.get(sourceId))
+      .find((mapped) => isUuid(mapped));
+    const nextId = firstMapped || crypto.randomUUID();
+
+    sourceIds.forEach((sourceId) => {
+      if (!idMappings.has(sourceId)) idMappings.set(sourceId, nextId);
+    });
   });
 };
 
@@ -2196,7 +2220,13 @@ const restoreDataTables = async (params: {
         if (!row.user_id) row.user_id = newUserId;
 
         const sourceRow = rawRows[index] as Record<string, unknown> | undefined;
-        const sourceId = toString(sourceRow?.id);
+        const sourceIdCandidates = extractUuidCandidates(sourceRow, ["id", "client_id", "customer_id"]);
+        const sourceId = sourceIdCandidates[0] || "";
+
+        if (!toString(row.id) && sourceId) {
+          row.id = globalIdMappings.get(sourceId) || sourceId;
+        }
+
         const remappedId = toString(row.id);
         const emailKey = normalizeEmailKey(row.email);
 
@@ -2204,24 +2234,30 @@ const restoreDataTables = async (params: {
           row.email = emailKey || null;
         }
 
-        if (sourceId && emailKey) {
+        if (sourceIdCandidates.length > 0 && emailKey) {
           const existingId = existingCustomerIdByEmail.get(emailKey);
           if (existingId) {
-            globalIdMappings.set(sourceId, existingId);
+            sourceIdCandidates.forEach((sourceClientId) => {
+              globalIdMappings.set(sourceClientId, existingId);
+            });
             preSkippedExistingForTable += 1;
             return;
           }
 
           const pendingId = pendingEmailToId.get(emailKey);
           if (pendingId) {
-            globalIdMappings.set(sourceId, pendingId);
+            sourceIdCandidates.forEach((sourceClientId) => {
+              globalIdMappings.set(sourceClientId, pendingId);
+            });
             preSkippedExistingForTable += 1;
             return;
           }
         }
 
-        if (sourceId && remappedId) {
-          globalIdMappings.set(sourceId, remappedId);
+        if (remappedId) {
+          sourceIdCandidates.forEach((sourceClientId) => {
+            globalIdMappings.set(sourceClientId, remappedId);
+          });
         }
         if (emailKey && remappedId) {
           pendingEmailToId.set(emailKey, remappedId);
