@@ -78,7 +78,7 @@ const RESTORE_TABLE_SPECS: RestoreTableSpec[] = [
   { exportKey: "profiles", candidates: ["profiles"], onConflict: "id" },
   { exportKey: "settings", candidates: ["settings", "invoice_settings"], onConflict: "user_id" },
   { exportKey: "wallets", candidates: ["wallets"] },
-  { exportKey: "customers", candidates: ["customers", "clients"] },
+  { exportKey: "customers", candidates: ["customers", "clients"], onConflict: "user_id,email" },
   { exportKey: "client_phones", candidates: ["client_phones"] },
   { exportKey: "client_addresses", candidates: ["client_addresses"] },
   { exportKey: "categories", candidates: ["categories"] },
@@ -160,6 +160,9 @@ const jsonResponse = (payload: JsonObject, status = 200) =>
 
 const toString = (value: unknown): string => String(value ?? "").trim();
 const normalizeNameKey = (value: unknown): string => toString(value).toLowerCase();
+const normalizeEmailKey = (value: unknown): string => toString(value).toLowerCase();
+const normalizePhoneKey = (value: unknown): string => toString(value).replace(/[^\d+]/g, "");
+const normalizeAddressKey = (value: unknown): string => toString(value).replace(/\s+/g, " ").toLowerCase();
 
 const toNumberOrNull = (value: unknown): number | null => {
   const parsed = Number(value);
@@ -262,6 +265,62 @@ const chunkValues = <T,>(values: T[], size: number): T[][] => {
     output.push(values.slice(index, index + size));
   }
   return output;
+};
+
+const pickFirstNonEmptyFromRow = (row: JsonObject, keys: string[]): string => {
+  for (const key of keys) {
+    const value = toString((row as Record<string, unknown>)[key]);
+    if (value) return value;
+  }
+  return "";
+};
+
+const buildFallbackRowFingerprint = (row: JsonObject, ignoredKeys: Set<string>): string => {
+  const parts = Object.entries(row as Record<string, unknown>)
+    .filter(([key]) => !ignoredKeys.has(key))
+    .map(([key, value]) => {
+      const normalized = normalizeAddressKey(value);
+      return normalized ? `${key}:${normalized}` : "";
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.localeCompare(right));
+
+  return parts.join("|");
+};
+
+const buildClientPhoneDedupeKey = (row: JsonObject): string => {
+  const clientId = toString((row as Record<string, unknown>).client_id);
+  if (!clientId) return "";
+
+  const rawPhone = pickFirstNonEmptyFromRow(row, ["phone_number", "phone", "number", "value"]);
+  const normalizedPhone = normalizePhoneKey(rawPhone);
+  const fallback = buildFallbackRowFingerprint(
+    row,
+    new Set(["id", "user_id", "client_id", "created_at", "updated_at"]),
+  );
+  const keyPart = normalizedPhone || fallback;
+  if (!keyPart) return "";
+
+  return `${clientId}:${keyPart}`;
+};
+
+const buildClientAddressDedupeKey = (row: JsonObject): string => {
+  const clientId = toString((row as Record<string, unknown>).client_id);
+  if (!clientId) return "";
+
+  const rawAddress = pickFirstNonEmptyFromRow(
+    row,
+    ["address", "address_line1", "address_line_1", "line1", "full_address", "street"],
+  );
+  const normalizedAddress = normalizeAddressKey(rawAddress);
+  const fallback = buildFallbackRowFingerprint(
+    row,
+    new Set(["id", "user_id", "client_id", "created_at", "updated_at"]),
+  );
+  const keyPart = normalizedAddress || fallback;
+  if (!keyPart) return "";
+
+  return `${clientId}:${keyPart}`;
 };
 
 const isLikelyAlreadyExists = (message: string, code?: string): boolean => {
@@ -1810,6 +1869,12 @@ const restoreDataTables = async (params: {
   const invoiceAdjustmentsTable = await findFirstExistingTable(serviceSupabase, ["invoice_adjustments", "invoice_refunds"], tableExistsCache);
   const invoiceItemReturnsTable = await findFirstExistingTable(serviceSupabase, ["invoice_item_returns"], tableExistsCache);
   const shipmentsTable = await findFirstExistingTable(serviceSupabase, ["shipments"], tableExistsCache);
+  const customersTable = await findFirstExistingTable(serviceSupabase, ["customers", "clients"], tableExistsCache);
+  const clientPhonesTable = await findFirstExistingTable(serviceSupabase, ["client_phones"], tableExistsCache);
+  const clientAddressesTable = await findFirstExistingTable(serviceSupabase, ["client_addresses"], tableExistsCache);
+  const existingCustomerIdByEmail = new Map<string, string>();
+  const existingClientPhoneKeys = new Set<string>();
+  const existingClientAddressKeys = new Set<string>();
 
   const refreshSalesChannels = async (): Promise<void> => {
     salesChannelIds.clear();
@@ -1863,6 +1928,83 @@ const restoreDataTables = async (params: {
 
   await refreshSalesChannels();
   await refreshPlatformFeeRules();
+
+  const refreshExistingCustomersByEmail = async (): Promise<void> => {
+    existingCustomerIdByEmail.clear();
+    if (!customersTable) return;
+
+    const { data, error } = await serviceSupabase
+      .from(customersTable)
+      .select("id, email")
+      .eq("user_id", newUserId)
+      .limit(50000);
+
+    if (error) {
+      if (isTableMissingError(error) || isMissingColumnError(error)) return;
+      throw new Error(error.message || "Gagal baca clients/customers semasa restore.");
+    }
+
+    (Array.isArray(data) ? data : []).forEach((row) => {
+      const id = toString((row as Record<string, unknown>).id);
+      const emailKey = normalizeEmailKey((row as Record<string, unknown>).email);
+      if (!id || !emailKey) return;
+      if (!existingCustomerIdByEmail.has(emailKey)) {
+        existingCustomerIdByEmail.set(emailKey, id);
+      }
+    });
+  };
+
+  const refreshExistingClientContactKeys = async (): Promise<void> => {
+    existingClientPhoneKeys.clear();
+    existingClientAddressKeys.clear();
+    if (!customersTable) return;
+
+    const customerIds = await fetchIdsByUser(serviceSupabase, customersTable, newUserId);
+    if (customerIds.length === 0) return;
+
+    if (clientPhonesTable) {
+      for (const chunk of chunkValues(customerIds, MAX_DB_BATCH)) {
+        const { data, error } = await serviceSupabase
+          .from(clientPhonesTable)
+          .select("*")
+          .in("client_id", chunk)
+          .limit(50000);
+
+        if (error) {
+          if (isTableMissingError(error) || isMissingColumnError(error)) break;
+          throw new Error(error.message || "Gagal baca client_phones semasa restore.");
+        }
+
+        (Array.isArray(data) ? data : []).forEach((entry) => {
+          const key = buildClientPhoneDedupeKey(entry as JsonObject);
+          if (key) existingClientPhoneKeys.add(key);
+        });
+      }
+    }
+
+    if (clientAddressesTable) {
+      for (const chunk of chunkValues(customerIds, MAX_DB_BATCH)) {
+        const { data, error } = await serviceSupabase
+          .from(clientAddressesTable)
+          .select("*")
+          .in("client_id", chunk)
+          .limit(50000);
+
+        if (error) {
+          if (isTableMissingError(error) || isMissingColumnError(error)) break;
+          throw new Error(error.message || "Gagal baca client_addresses semasa restore.");
+        }
+
+        (Array.isArray(data) ? data : []).forEach((entry) => {
+          const key = buildClientAddressDedupeKey(entry as JsonObject);
+          if (key) existingClientAddressKeys.add(key);
+        });
+      }
+    }
+  };
+
+  await refreshExistingCustomersByEmail();
+  await refreshExistingClientContactKeys();
 
   const refreshInvoiceIdsForUser = async (): Promise<void> => {
     invoiceIdsForUser.clear();
@@ -2040,6 +2182,102 @@ const restoreDataTables = async (params: {
 
         if (sourceId) platformFeeRuleIdRemap.set(sourceId, sourceId);
         if (sourceId && nameKey) pendingNameToSourceId.set(nameKey, sourceId);
+        filteredRows.push(row);
+      });
+
+      rowsToWrite = filteredRows;
+    }
+
+    if (spec.exportKey === "customers") {
+      const pendingEmailToId = new Map<string, string>();
+      const filteredRows: JsonObject[] = [];
+
+      remappedRows.forEach((row, index) => {
+        if (!row.user_id) row.user_id = newUserId;
+
+        const sourceRow = rawRows[index] as Record<string, unknown> | undefined;
+        const sourceId = toString(sourceRow?.id);
+        const remappedId = toString(row.id);
+        const emailKey = normalizeEmailKey(row.email);
+
+        if (Object.prototype.hasOwnProperty.call(row, "email")) {
+          row.email = emailKey || null;
+        }
+
+        if (sourceId && emailKey) {
+          const existingId = existingCustomerIdByEmail.get(emailKey);
+          if (existingId) {
+            globalIdMappings.set(sourceId, existingId);
+            preSkippedExistingForTable += 1;
+            return;
+          }
+
+          const pendingId = pendingEmailToId.get(emailKey);
+          if (pendingId) {
+            globalIdMappings.set(sourceId, pendingId);
+            preSkippedExistingForTable += 1;
+            return;
+          }
+        }
+
+        if (sourceId && remappedId) {
+          globalIdMappings.set(sourceId, remappedId);
+        }
+        if (emailKey && remappedId) {
+          pendingEmailToId.set(emailKey, remappedId);
+          if (!existingCustomerIdByEmail.has(emailKey)) {
+            existingCustomerIdByEmail.set(emailKey, remappedId);
+          }
+        }
+
+        filteredRows.push(row);
+      });
+
+      rowsToWrite = filteredRows;
+    }
+
+    if (spec.exportKey === "client_phones") {
+      const pendingPhoneKeys = new Set<string>();
+      const filteredRows: JsonObject[] = [];
+
+      rowsToWrite.forEach((row) => {
+        const dedupeKey = buildClientPhoneDedupeKey(row);
+        if (!dedupeKey) {
+          filteredRows.push(row);
+          return;
+        }
+
+        if (existingClientPhoneKeys.has(dedupeKey) || pendingPhoneKeys.has(dedupeKey)) {
+          preSkippedExistingForTable += 1;
+          return;
+        }
+
+        pendingPhoneKeys.add(dedupeKey);
+        existingClientPhoneKeys.add(dedupeKey);
+        filteredRows.push(row);
+      });
+
+      rowsToWrite = filteredRows;
+    }
+
+    if (spec.exportKey === "client_addresses") {
+      const pendingAddressKeys = new Set<string>();
+      const filteredRows: JsonObject[] = [];
+
+      rowsToWrite.forEach((row) => {
+        const dedupeKey = buildClientAddressDedupeKey(row);
+        if (!dedupeKey) {
+          filteredRows.push(row);
+          return;
+        }
+
+        if (existingClientAddressKeys.has(dedupeKey) || pendingAddressKeys.has(dedupeKey)) {
+          preSkippedExistingForTable += 1;
+          return;
+        }
+
+        pendingAddressKeys.add(dedupeKey);
+        existingClientAddressKeys.add(dedupeKey);
         filteredRows.push(row);
       });
 
