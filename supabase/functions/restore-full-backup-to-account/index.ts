@@ -2332,6 +2332,24 @@ const restoreDataTables = async (params: {
         filteredRows.push(row);
       });
 
+      if (filteredRows.length === 0 && existingCustomerIds.size === 0 && remappedRows.length > 0) {
+        // Safety net for legacy exports where customer key fields vary.
+        const fallbackSource = rawRows[0] as Record<string, unknown> | undefined;
+        const fallbackRow = { ...(remappedRows[0] as JsonObject) };
+        const fallbackSourceId = extractUuidCandidates(fallbackSource, ["id", "client_id", "customer_id"])[0] || "";
+        const fallbackMappedId = isUuid(fallbackSourceId)
+          ? (globalIdMappings.get(fallbackSourceId) || crypto.randomUUID())
+          : crypto.randomUUID();
+        fallbackRow.id = fallbackMappedId;
+        fallbackRow.user_id = newUserId;
+        if (Object.prototype.hasOwnProperty.call(fallbackRow, "email")) {
+          fallbackRow.email = normalizeEmailKey(fallbackRow.email) || null;
+        }
+        if (isUuid(fallbackSourceId)) globalIdMappings.set(fallbackSourceId, fallbackMappedId);
+        filteredRows.push(fallbackRow);
+        preSkippedExistingForTable = Math.max(preSkippedExistingForTable - 1, 0);
+      }
+
       rowsToWrite = filteredRows;
     }
 
