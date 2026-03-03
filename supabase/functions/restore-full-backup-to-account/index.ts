@@ -1576,6 +1576,75 @@ const wipeExistingBusinessData = async (
   await deleteByUser(serviceSupabase, walletsTable, userId);
 };
 
+const syncClientsFromCustomersIfNeeded = async (
+  serviceSupabase: ReturnType<typeof createClient>,
+  userId: string,
+  tableExistsCache: Map<string, boolean>,
+  issues: RestoreIssue[],
+): Promise<void> => {
+  const hasClients = await tableExists(serviceSupabase, "clients", tableExistsCache);
+  const hasCustomers = await tableExists(serviceSupabase, "customers", tableExistsCache);
+  if (!hasClients || !hasCustomers) return;
+
+  const { data: existingClients, error: clientsError } = await serviceSupabase
+    .from("clients")
+    .select("id")
+    .eq("user_id", userId)
+    .limit(1);
+
+  if (clientsError) {
+    if (isTableMissingError(clientsError) || isMissingColumnError(clientsError)) return;
+    throw new Error(clientsError.message || "Gagal semak clients semasa sync.");
+  }
+
+  if ((existingClients || []).length > 0) return;
+
+  const { data: legacyCustomers, error: customersError } = await serviceSupabase
+    .from("customers")
+    .select("id, user_id, name, email")
+    .eq("user_id", userId)
+    .limit(5000);
+
+  if (customersError) {
+    if (isTableMissingError(customersError) || isMissingColumnError(customersError)) return;
+    throw new Error(customersError.message || "Gagal baca customers semasa sync ke clients.");
+  }
+
+  const rows = (Array.isArray(legacyCustomers) ? legacyCustomers : [])
+    .map((row) => {
+      const record = row as Record<string, unknown>;
+      const id = toString(record.id);
+      if (!isUuid(id)) return null;
+      const email = normalizeEmailKey(record.email);
+      return {
+        id,
+        user_id: userId,
+        name: toString(record.name) || "Pelanggan",
+        email: email || null,
+      } as JsonObject;
+    })
+    .filter((row): row is JsonObject => Boolean(row));
+
+  if (rows.length === 0) return;
+
+  const syncResult = await writeRowsWithFallback(
+    serviceSupabase,
+    "clients",
+    rows,
+    "id",
+    issues,
+  );
+
+  if (syncResult.failedCount > 0) {
+    pushIssue(issues, {
+      table: "clients",
+      bucket: null,
+      key: null,
+      message: "Sebahagian sync customers -> clients gagal.",
+    }, MAX_ERRORS);
+  }
+};
+
 const logRestoreEvent = async (
   serviceSupabase: ReturnType<typeof createClient>,
   tableExistsCache: Map<string, boolean>,
@@ -3240,6 +3309,15 @@ Deno.serve(async (req) => {
           tableExistsCache,
           dryRun: payload.dryRun,
         });
+
+        if (!payload.dryRun) {
+          await syncClientsFromCustomersIfNeeded(
+            serviceSupabase,
+            userId,
+            tableExistsCache,
+            dataRestoreResult.issues,
+          );
+        }
       }
 
       trackPhase("reconciliation_build");
