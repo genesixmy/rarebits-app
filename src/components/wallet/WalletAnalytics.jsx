@@ -247,9 +247,12 @@ const WalletAnalytics = ({ wallets = [], transactions = [] }) => {
   const [monthValue, setMonthValue] = useState(getCurrentMonthValue());
   const [summaryWalletId, setSummaryWalletId] = useState(wallets[0]?.id || '');
 
+  const hasScopedWallets = wallets.length > 0;
   const chartWalletParam = chartWalletId === 'all' ? null : chartWalletId;
   const hasWalletSelector = wallets.length > 1;
   const selectedSummaryWallet = wallets.find((wallet) => wallet.id === summaryWalletId) || null;
+  const canRunChartRpc = hasScopedWallets && chartWalletId !== 'all';
+  const isSummaryWalletInScope = wallets.some((wallet) => wallet.id === summaryWalletId);
 
   useEffect(() => {
     if (chartWalletId === 'all') return;
@@ -275,7 +278,7 @@ const WalletAnalytics = ({ wallets = [], transactions = [] }) => {
       if (error) throw error;
       return data || [];
     },
-    enabled: !!user?.id,
+    enabled: !!user?.id && canRunChartRpc,
   });
 
   const breakdownQuery = useQuery({
@@ -290,7 +293,7 @@ const WalletAnalytics = ({ wallets = [], transactions = [] }) => {
       if (error) throw error;
       return data || [];
     },
-    enabled: !!user?.id,
+    enabled: !!user?.id && canRunChartRpc,
   });
 
   const monthlySummaryQuery = useQuery({
@@ -305,7 +308,7 @@ const WalletAnalytics = ({ wallets = [], transactions = [] }) => {
       if (error) throw error;
       return data?.[0] || { inflow: 0, outflow: 0, net: 0 };
     },
-    enabled: !!user?.id && !!summaryWalletId,
+    enabled: !!user?.id && !!summaryWalletId && isSummaryWalletInScope,
   });
 
   const monthlyTransactionsQuery = useQuery({
@@ -320,7 +323,7 @@ const WalletAnalytics = ({ wallets = [], transactions = [] }) => {
       if (error) throw error;
       return data || [];
     },
-    enabled: !!user?.id && !!summaryWalletId,
+    enabled: !!user?.id && !!summaryWalletId && isSummaryWalletInScope,
   });
 
   const fallbackTrend = useMemo(
@@ -343,8 +346,15 @@ const WalletAnalytics = ({ wallets = [], transactions = [] }) => {
   // Prefer local transaction dataset from WalletPage for immediate UI consistency after mutations.
   // RPC remains as fallback when local dataset is empty.
   const hasLocalTransactions = Array.isArray(transactions) && transactions.length > 0;
-  const useAnalyticsFallback = hasLocalTransactions || trendQuery.isError || breakdownQuery.isError;
-  const useSummaryFallback = hasLocalTransactions || monthlySummaryQuery.isError || monthlyTransactionsQuery.isError;
+  const useAnalyticsFallback =
+    !canRunChartRpc || hasLocalTransactions || trendQuery.isError || breakdownQuery.isError;
+  const useSummaryFallback =
+    !hasScopedWallets ||
+    !summaryWalletId ||
+    !isSummaryWalletInScope ||
+    hasLocalTransactions ||
+    monthlySummaryQuery.isError ||
+    monthlyTransactionsQuery.isError;
 
   const trendRows = useMemo(() => {
     const baseRows = useAnalyticsFallback ? fallbackTrend : (trendQuery.data || []);

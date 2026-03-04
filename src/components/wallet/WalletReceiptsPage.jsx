@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { format } from 'date-fns';
 import { ms } from 'date-fns/locale';
-import { Eye, Download, Loader2, ArrowLeft, Paperclip, Wallet } from 'lucide-react';
+import { Eye, Download, Loader2, ArrowLeft, Paperclip, Wallet, Search } from 'lucide-react';
 import JSZip from 'jszip';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -421,54 +421,63 @@ const WalletReceiptsPage = () => {
         </div>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Tapis Resit</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+      <div className="space-y-4 rounded-2xl border border-slate-200 bg-white p-4 sm:p-5">
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+          <div className="relative w-full lg:col-span-3">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-cyan-500" />
             <Input
-              className="lg:flex-1"
               placeholder="Cari deskripsi, kategori atau nama fail..."
               value={searchTerm}
               onChange={(event) => setSearchTerm(event.target.value)}
+              className="h-10 w-full rounded-full border-cyan-300 bg-white pl-10 pr-4 font-medium text-cyan-700 placeholder:text-slate-400 focus-visible:ring-cyan-300"
             />
-            <Select className="lg:flex-1" value={filterWallet} onChange={(event) => setFilterWallet(event.target.value)}>
+          </div>
+
+          <div className="lg:col-span-3">
+            <Select value={filterWallet} onChange={(event) => setFilterWallet(event.target.value)}>
               <option value="all">Semua Wallet</option>
               {walletOptions.map(([walletId, walletName]) => (
                 <option key={walletId} value={walletId}>{walletName}</option>
               ))}
             </Select>
-            <div className="flex flex-col gap-2 sm:flex-row lg:flex-1">
-              <Input
-                className="sm:flex-1"
-                type="date"
-                value={filterDateFrom}
-                onChange={(event) => setFilterDateFrom(event.target.value)}
-              />
-              <Input
-                className="sm:flex-1"
-                type="date"
-                value={filterDateTo}
-                onChange={(event) => setFilterDateTo(event.target.value)}
-              />
-            </div>
+          </div>
+
+          <div className="lg:col-span-2">
+            <Input
+              type="date"
+              value={filterDateFrom}
+              onChange={(event) => setFilterDateFrom(event.target.value)}
+              className="h-10 w-full rounded-full border-cyan-300 bg-white px-4 font-medium text-cyan-700 focus-visible:ring-cyan-300"
+            />
+          </div>
+
+          <div className="lg:col-span-2">
+            <Input
+              type="date"
+              value={filterDateTo}
+              onChange={(event) => setFilterDateTo(event.target.value)}
+              className="h-10 w-full rounded-full border-cyan-300 bg-white px-4 font-medium text-cyan-700 focus-visible:ring-cyan-300"
+            />
+          </div>
+
+          <div className="lg:col-span-2">
             <Button
               variant="outline"
               size="sm"
-              className="h-10 w-fit self-start border-cyan-200 bg-transparent px-3 text-cyan-700 hover:bg-cyan-50 hover:text-cyan-800 lg:shrink-0"
+              className="h-10 w-full border-cyan-200 bg-transparent px-3 text-cyan-700 hover:bg-cyan-50 hover:text-cyan-800"
               onClick={resetFilters}
             >
               Reset
             </Button>
           </div>
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <div className="text-sm text-muted-foreground">
-              {filteredTransactions.length} daripada {receiptTransactions.length} resit dipaparkan
-            </div>
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <div className="text-sm text-muted-foreground">
+            {filteredTransactions.length} daripada {receiptTransactions.length} resit dipaparkan
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      </div>
 
       <Card>
         <CardHeader>

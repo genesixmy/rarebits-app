@@ -1280,7 +1280,7 @@ function App() {
   const pageTitle = {
     '/': 'Papan Pemuka', '/inventory': 'Inventori', '/sales': 'Jualan',
     '/invoices': 'Invois', '/catalogs': 'Katalog', '/inventory/catalogs': 'Katalog',
-    '/clients': 'Pelanggan', '/wallet': 'Wallet', '/wallet/receipts': 'Resit Wallet', '/knowledge-base': 'Knowledge Base', '/settings': 'Tetapan', '/reminders': 'Reminder'
+    '/clients': 'Pelanggan', '/wallet': 'Wallet', '/wallet/receipts': 'Resit Wallet', '/knowledge-base': 'Panduan', '/settings': 'Tetapan', '/reminders': 'Peringatan'
   }[location.pathname] || 'Papan Pemuka';
 
   return (

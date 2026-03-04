@@ -18,11 +18,40 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-const TransactionList = ({ transactions, wallets, onEdit, onDelete, onViewReceipt, onDownloadReceipt }) => {
+const TransactionList = ({
+  transactions,
+  wallets,
+  onEdit,
+  onDelete,
+  onViewReceipt,
+  onDownloadReceipt,
+  receiptFilter = 'all',
+  onReceiptFilterChange,
+}) => {
   return (
     <Card className="h-full">
-      <CardHeader>
+      <CardHeader className="space-y-3">
         <CardTitle>Transaksi Terkini</CardTitle>
+        {onReceiptFilterChange && (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant={receiptFilter === 'all' ? 'default' : 'outline'}
+              onClick={() => onReceiptFilterChange('all')}
+              className="rounded-full"
+            >
+              Semua Resit
+            </Button>
+            <Button
+              size="sm"
+              variant={receiptFilter === 'has_receipt' ? 'default' : 'outline'}
+              onClick={() => onReceiptFilterChange('has_receipt')}
+              className="rounded-full"
+            >
+              Ada Resit
+            </Button>
+          </div>
+        )}
       </CardHeader>
       <CardContent>
         {transactions.length > 0 ? (

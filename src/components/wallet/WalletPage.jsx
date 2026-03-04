@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Loader2, Plus, MoreVertical, Edit, Trash2, Wallet as WalletIcon, ArrowRightLeft, Repeat, Briefcase, User, BarChart2, RefreshCw, Paperclip, Download } from 'lucide-react';
+import { Loader2, Plus, MoreVertical, Edit, Trash2, Wallet as WalletIcon, ArrowUpRight, Repeat, Briefcase, User, BarChart2, RefreshCw, Paperclip, Download, LayoutGrid } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
 import { supabase } from '@/lib/customSupabaseClient';
 import { useAuth } from '@/contexts/SupabaseAuthContext';
@@ -64,35 +64,80 @@ const fetchTransactions = async (userId) => {
   return data;
 };
 
+const ACCOUNT_TYPE_FILTER_OPTIONS = [
+  {
+    value: 'Business',
+    label: 'Business',
+    icon: Briefcase,
+    orbClass: 'from-rose-500 to-red-600 text-white shadow-rose-300/70',
+  },
+  {
+    value: 'Personal',
+    label: 'Personal',
+    icon: User,
+    orbClass: 'from-amber-400 to-yellow-500 text-amber-950 shadow-amber-300/70',
+  },
+  {
+    value: 'All',
+    label: 'Semua',
+    icon: LayoutGrid,
+    orbClass: 'from-slate-700 to-slate-800 text-cyan-100 shadow-slate-300/70',
+  },
+];
+
 const AccountTypeFilter = ({ filter, setFilter }) => (
-    <div className="flex items-center gap-2 bg-muted p-1 rounded-lg">
-      <Button
-        variant={filter === 'Business' ? 'default' : 'ghost'}
-        size="sm"
-        className="flex-1"
-        onClick={() => setFilter('Business')}
-      >
-        <Briefcase className="mr-2 h-4 w-4" />
-        Business
-      </Button>
-      <Button
-        variant={filter === 'Personal' ? 'default' : 'ghost'}
-        size="sm"
-        className="flex-1"
-        onClick={() => setFilter('Personal')}
-      >
-        <User className="mr-2 h-4 w-4" />
-        Personal
-      </Button>
-      <Button
-        variant={filter === 'All' ? 'default' : 'ghost'}
-        size="sm"
-        className="flex-1"
-        onClick={() => setFilter('All')}
-      >
-        Semua
-      </Button>
-    </div>
+  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+    {ACCOUNT_TYPE_FILTER_OPTIONS.map((option) => {
+      const Icon = option.icon;
+      const isActive = filter === option.value;
+
+      return (
+        <button
+          key={option.value}
+          type="button"
+          onClick={() => setFilter(option.value)}
+          aria-pressed={isActive}
+          className={cn(
+            'group relative overflow-hidden rounded-2xl border p-4 text-left transition-all duration-200',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300',
+            isActive
+              ? 'border-cyan-400 bg-cyan-50 shadow-[0_14px_28px_-22px_rgba(6,182,212,0.85)]'
+              : 'border-slate-200 bg-white hover:border-cyan-300 hover:shadow-[0_14px_28px_-22px_rgba(15,23,42,0.35)]'
+          )}
+        >
+          <span className="pointer-events-none absolute -bottom-8 -right-8 h-24 w-24 rounded-full bg-slate-200/45 transition group-hover:bg-cyan-100/60" />
+
+          <div className="relative z-10 flex items-start justify-between">
+            <span
+              className={cn(
+                'inline-flex h-12 w-12 items-center justify-center rounded-full bg-gradient-to-br shadow-lg',
+                option.orbClass
+              )}
+            >
+              <Icon className="h-5 w-5" />
+            </span>
+            <span
+              className={cn(
+                'inline-flex h-6 w-6 items-center justify-center rounded-full border transition',
+                isActive
+                  ? 'border-cyan-300 bg-cyan-100 text-cyan-700'
+                  : 'border-slate-200 bg-slate-50 text-slate-400 group-hover:border-cyan-200 group-hover:text-cyan-600'
+              )}
+            >
+              <ArrowUpRight className="h-3.5 w-3.5" />
+            </span>
+          </div>
+
+          <div className="relative z-10 mt-6">
+            <p className={cn('text-[11px] font-semibold uppercase tracking-[0.16em]', isActive ? 'text-cyan-700' : 'text-slate-500')}>
+              Wallet
+            </p>
+            <p className="mt-1 text-base font-semibold text-slate-900">{option.label}</p>
+          </div>
+        </button>
+      );
+    })}
+  </div>
 );
 
 const WALLET_PREVIEW_THEMES = [
@@ -707,30 +752,6 @@ const WalletPage = () => {
           </div>
         )}
 
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            size="sm"
-            variant={receiptFilter === 'all' ? 'default' : 'outline'}
-            onClick={() => setReceiptFilter('all')}
-          >
-            Semua Resit
-          </Button>
-          <Button
-            size="sm"
-            variant={receiptFilter === 'has_receipt' ? 'default' : 'outline'}
-            onClick={() => setReceiptFilter('has_receipt')}
-          >
-            Ada Resit
-          </Button>
-          <Button
-            size="sm"
-            variant={receiptFilter === 'missing_receipt' ? 'default' : 'outline'}
-            onClick={() => setReceiptFilter('missing_receipt')}
-          >
-            Tiada Resit
-          </Button>
-        </div>
-
         <Card className="overflow-hidden rounded-3xl border border-transparent bg-gradient-to-r from-cyan-500 to-teal-500 text-white shadow-[0_20px_45px_-22px_rgba(8,145,178,0.65)]">
           <CardHeader className="pb-3">
             <div className="flex items-center gap-3">
@@ -855,6 +876,8 @@ const WalletPage = () => {
             onDelete={(tx) => setDeletingTransaction(tx)}
             onViewReceipt={handleViewReceipt}
             onDownloadReceipt={handleDownloadReceipt}
+            receiptFilter={receiptFilter}
+            onReceiptFilterChange={setReceiptFilter}
           />
           {filteredTransactions.length > displayLimit && (
             <Button variant="outline" className="w-full" onClick={() => setDisplayLimit(prev => prev + 20)}>

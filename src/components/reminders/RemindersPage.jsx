@@ -265,7 +265,7 @@ const RemindersPage = ({ user }) => {
       setEditingReminder(null);
       setFormDefaultStartDate('');
       toast({
-        title: values?.id ? 'Reminder dikemas kini' : 'Reminder ditambah',
+        title: values?.id ? 'Peringatan dikemas kini' : 'Peringatan ditambah',
         description: 'Perubahan reminder telah disimpan.',
       });
     },
@@ -281,7 +281,7 @@ const RemindersPage = ({ user }) => {
   const toggleCompletedMutation = useMutation({
     mutationFn: async ({ reminder, nextCompleted, occurrenceDateKey }) => {
       const reminderId = resolveReminderSourceId(reminder);
-      if (!reminderId) throw new Error('Reminder tidak sah.');
+      if (!reminderId) throw new Error('Peringatan tidak sah.');
 
       const isRecurringToggle = isReminderRecurring(reminder) && Boolean(occurrenceDateKey);
       if (isRecurringToggle) {
@@ -376,7 +376,7 @@ const RemindersPage = ({ user }) => {
         queryClient.setQueryData(reminderOccurrencesQueryKey, context.previousOccurrences);
       }
       toast({
-        title: 'Gagal kemas kini reminder',
+        title: 'Gagal kemas kini peringatan',
         description: error.message,
         variant: 'destructive',
       });
@@ -400,13 +400,13 @@ const RemindersPage = ({ user }) => {
       invalidateReminderQueries();
       setDeletingReminder(null);
       toast({
-        title: 'Reminder dipadam',
-        description: 'Reminder telah dikeluarkan.',
+        title: 'Peringatan dipadam',
+        description: 'Peringatan telah dikeluarkan.',
       });
     },
     onError: (error) => {
       toast({
-        title: 'Gagal padam reminder',
+        title: 'Gagal padam peringatan',
         description: error.message,
         variant: 'destructive',
       });
@@ -589,7 +589,7 @@ const RemindersPage = ({ user }) => {
   return (
     <div className="space-y-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <h1 className="page-title">Reminder</h1>
+        <h1 className="page-title">Peringatan</h1>
         <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
           <div className="inline-flex h-9 rounded-lg border bg-slate-50 p-1">
             <Button
@@ -615,7 +615,7 @@ const RemindersPage = ({ user }) => {
           </div>
           <Button onClick={() => handleOpenCreate()} className="brand-gradient brand-gradient-hover w-full gap-2 text-white sm:w-auto">
             <Plus className="h-4 w-4" />
-            Tambah Reminder
+            Tambah Peringatan
           </Button>
         </div>
       </div>

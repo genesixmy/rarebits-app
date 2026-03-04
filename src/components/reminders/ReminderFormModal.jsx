@@ -128,7 +128,7 @@ const ReminderFormModal = ({ reminder, onSave, onCancel, isSaving = false, defau
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle className="gradient-text">
-              {reminder ? 'Edit Reminder' : 'Tambah Reminder'}
+              {reminder ? 'Edit Peringatan' : 'Tambah Peringatan'}
             </CardTitle>
             <Button type="button" variant="ghost" size="icon" onClick={onCancel} disabled={isSaving}>
               <X className="h-5 w-5" />

@@ -51,7 +51,7 @@ const ReminderDateModal = ({
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle className="text-base font-semibold">
-              Reminder - {formatDueDate(dateKey)}
+              Peringatan - {formatDueDate(dateKey)}
             </CardTitle>
             <Button type="button" variant="ghost" size="icon" onClick={onClose}>
               <X className="h-5 w-5" />
@@ -62,7 +62,7 @@ const ReminderDateModal = ({
             <div className="max-h-[52vh] space-y-2 overflow-y-auto pr-1">
               {reminders.length === 0 ? (
                 <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
-                  Tiada reminder untuk tarikh ini.
+                  Tiada peringatan untuk tarikh ini.
                 </div>
               ) : (
                 reminders.map((reminder) => (
@@ -127,7 +127,7 @@ const ReminderDateModal = ({
               </Button>
               <Button type="button" className="gap-1.5 text-white brand-gradient brand-gradient-hover" onClick={onAddReminder}>
                 <Plus className="h-3.5 w-3.5" />
-                Tambah Reminder
+                Tambah Peringatan
               </Button>
             </div>
             {isToggling ? (

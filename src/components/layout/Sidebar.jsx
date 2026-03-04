@@ -22,7 +22,7 @@ const Sidebar = ({ isSidebarOpen, setSidebarOpen }) => {
       ],
     },
     { path: '/sales', label: 'Jualan', icon: <Receipt className="w-5 h-5" /> },
-    { path: '/reminders', label: 'Reminder', icon: <Bell className="w-5 h-5" /> },
+    { path: '/reminders', label: 'Peringatan', icon: <Bell className="w-5 h-5" /> },
     { path: '/invoices', label: 'Invois', icon: <FileText className="w-5 h-5" /> },
     { path: '/clients', label: 'Pelanggan', icon: <Users className="w-5 h-5" /> },
     {
@@ -107,7 +107,7 @@ const Sidebar = ({ isSidebarOpen, setSidebarOpen }) => {
               >
                 <Link to="/knowledge-base">
                   <BookOpen className="w-5 h-5" />
-                  Knowledge Base
+                  Panduan
                 </Link>
               </Button>
             </div>

@@ -221,6 +221,21 @@ const InvoiceListPage = () => {
     updateUrlFilters({ nextStatus: statusFilter, nextShippingState: '' });
   };
 
+  const resetFilters = () => {
+    setSearchTerm('');
+    setSortBy('date-desc');
+    setDateRange({ start: '', end: '' });
+    setShowSortDropdown(false);
+    setShowStatusDropdown(false);
+
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete('status');
+    nextParams.delete('shipping_state');
+    nextParams.delete('range');
+    nextParams.delete('has_refund');
+    setSearchParams(nextParams, { replace: true });
+  };
+
   const handleCreateInvoice = () => {
     navigate('/invoices/create');
   };
@@ -287,9 +302,9 @@ const InvoiceListPage = () => {
 
       {/* Filters */}
       <div className="space-y-4 rounded-2xl border border-slate-200 bg-white p-4 sm:p-5">
-        <div className="grid grid-cols-1 gap-4">
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
           {/* Search */}
-          <div className="relative w-full">
+          <div className="relative w-full lg:col-span-3">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-cyan-500" />
             <Input
               placeholder="Cari nombor invois atau pembeli..."
@@ -299,9 +314,9 @@ const InvoiceListPage = () => {
             />
           </div>
 
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:col-span-4 lg:grid-cols-2">
             {/* Status Filter - Dropdown */}
-            <div className="relative w-full">
+            <div className="relative w-full lg:col-span-1">
               <Button
                 variant="outline"
                 size="default"
@@ -356,7 +371,7 @@ const InvoiceListPage = () => {
             </div>
 
             {/* Sort - Dropdown */}
-            <div className="relative w-full">
+            <div className="relative w-full lg:col-span-1">
               <Button
                 variant="outline"
                 size="default"
@@ -407,10 +422,41 @@ const InvoiceListPage = () => {
               )}
             </div>
           </div>
+
+          <div className="hidden lg:block lg:col-span-2">
+            <Input
+              type="date"
+              value={dateRange.start}
+              onChange={(e) => setDateRange({ ...dateRange, start: e.target.value })}
+              placeholder="Dari Tarikh"
+              className="h-10 w-full rounded-full border-cyan-300 bg-white px-4 font-medium text-cyan-700 focus-visible:ring-cyan-300"
+            />
+          </div>
+
+          <div className="hidden lg:block lg:col-span-2">
+            <Input
+              type="date"
+              value={dateRange.end}
+              onChange={(e) => setDateRange({ ...dateRange, end: e.target.value })}
+              placeholder="Hingga Tarikh"
+              className="h-10 w-full rounded-full border-cyan-300 bg-white px-4 font-medium text-cyan-700 focus-visible:ring-cyan-300"
+            />
+          </div>
+
+          <div className="hidden lg:flex lg:col-span-1 lg:items-center">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={resetFilters}
+              className="h-10 w-fit self-start border-cyan-200 bg-transparent px-3 text-cyan-700 hover:bg-cyan-50 hover:text-cyan-800 lg:shrink-0"
+            >
+              Reset
+            </Button>
+          </div>
         </div>
 
         {/* Date Range */}
-        <div className="flex flex-col sm:flex-row gap-4 w-full">
+        <div className="flex w-full flex-col gap-4 sm:flex-row lg:hidden">
           <Input
             type="date"
             value={dateRange.start}
@@ -427,11 +473,11 @@ const InvoiceListPage = () => {
           />
           <Button
             variant="outline"
-            size="default"
-            onClick={() => setDateRange({ start: '', end: '' })}
-            className="h-10 w-full whitespace-nowrap rounded-full border-cyan-300 bg-white px-4 font-medium text-cyan-700 hover:bg-cyan-50 hover:text-cyan-700 sm:w-auto"
+            size="sm"
+            onClick={resetFilters}
+            className="h-10 w-fit self-start border-cyan-200 bg-transparent px-3 text-cyan-700 hover:bg-cyan-50 hover:text-cyan-800 lg:shrink-0"
           >
-            Kosongkan Tarikh
+            Reset
           </Button>
         </div>
 

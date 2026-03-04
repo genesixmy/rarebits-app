@@ -5,6 +5,7 @@ import {
   Layers3,
   User,
   Users,
+  X,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Card, CardContent } from '@/components/ui/card';
@@ -452,7 +453,7 @@ const KnowledgeBasePage = () => {
             <div className="space-y-3">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div>
-                  <h1 className="text-3xl font-bold text-slate-900 sm:text-4xl">Knowledge Base</h1>
+                  <h1 className="text-3xl font-bold text-slate-900 sm:text-4xl">Panduan</h1>
                   <p className="mt-1 text-sm text-muted-foreground">
                     Tutorial Rarebits untuk user baru dan lama, berdasarkan Learning Center.
                   </p>
@@ -557,12 +558,24 @@ const KnowledgeBasePage = () => {
       </div>
       {isGuideOpen ? (
         <AlertDialog open={isGuideOpen} onOpenChange={setIsGuideOpen}>
-          <AlertDialogContent className="max-h-[92vh] w-[95vw] max-w-5xl overflow-hidden p-0">
-            <AlertDialogHeader className="border-b border-border bg-gradient-to-r from-slate-50 to-cyan-50 px-6 py-4 text-left">
-              <AlertDialogTitle className="flex items-center gap-2 text-xl text-slate-900">
-                <BookOpen className="h-5 w-5 text-primary" />
-                {selectedArticle?.title || 'Panduan'}
-              </AlertDialogTitle>
+          <AlertDialogContent className="flex max-h-[92vh] w-[95vw] max-w-5xl flex-col overflow-hidden p-0">
+            <AlertDialogHeader className="border-b border-border bg-gradient-to-r from-slate-50 to-cyan-50 px-4 py-3 text-left sm:px-6 sm:py-4">
+              <div className="flex items-start justify-between gap-3">
+                <AlertDialogTitle className="flex items-center gap-2 text-lg text-slate-900 sm:text-xl">
+                  <BookOpen className="h-5 w-5 text-primary" />
+                  {selectedArticle?.title || 'Panduan'}
+                </AlertDialogTitle>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 shrink-0 rounded-full"
+                  onClick={() => setIsGuideOpen(false)}
+                  aria-label="Tutup panduan"
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
               <div className="mt-3 flex flex-wrap gap-2">
                 <span className="rounded-full border border-primary/20 bg-white px-3 py-1 text-xs font-semibold text-primary">
                   {KNOWLEDGE_BASE_LEVEL_LABEL[selectedArticle?.level] || 'Modul'}
@@ -579,7 +592,7 @@ const KnowledgeBasePage = () => {
                 </span>
               </div>
             </AlertDialogHeader>
-            <div className="max-h-[72vh] overflow-y-auto bg-slate-50/60 px-6 py-5">
+            <div className="min-h-0 flex-1 overflow-y-auto bg-slate-50/60 px-4 py-4 sm:px-6 sm:py-5">
               {selectedGuideContent ? (
                 <div className="space-y-4">
                   <div className="rounded-2xl border border-primary/15 bg-white p-4 shadow-sm">
@@ -603,8 +616,8 @@ const KnowledgeBasePage = () => {
                 <p className="text-sm text-muted-foreground">Kandungan panduan belum tersedia.</p>
               )}
             </div>
-            <AlertDialogFooter className="border-t border-border px-6 py-4">
-              <AlertDialogCancel className="mt-0">Tutup</AlertDialogCancel>
+            <AlertDialogFooter className="border-t border-border px-4 py-3 sm:px-6 sm:py-4">
+              <AlertDialogCancel className="mt-0 w-full sm:w-auto">Tutup</AlertDialogCancel>
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
