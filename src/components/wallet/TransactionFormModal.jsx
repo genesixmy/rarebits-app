@@ -3,12 +3,17 @@ import { motion } from 'framer-motion';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
-import { Loader2, Save } from 'lucide-react';
+import { Loader2, Paperclip, Save, Trash2 } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
 import {
   TRANSACTION_CLASSIFICATIONS,
   resolveTransactionClassification,
 } from './transactionClassification';
+import {
+  formatFileSize,
+  prepareReceiptUploadFile,
+  RECEIPT_ACCEPT_ATTR,
+} from '@/lib/walletTransactionReceipts';
 
 const DRAFT_KEY_PREFIX = 'rarebits-transaction-form-draft';
 
@@ -47,6 +52,9 @@ const TransactionFormModal = ({ transaction, wallets, onSave, onCancel, isSaving
     description: '',
     category: '',
   });
+  const [preparedReceipt, setPreparedReceipt] = useState(null);
+  const [isPreparingReceipt, setIsPreparingReceipt] = useState(false);
+  const [removeExistingReceipt, setRemoveExistingReceipt] = useState(false);
 
   const selectedWallet = useMemo(
     () => wallets.find((w) => w.id === formData.wallet_id),
@@ -60,6 +68,10 @@ const TransactionFormModal = ({ transaction, wallets, onSave, onCancel, isSaving
   useEffect(() => {
     const initialWallet = wallets.find((w) => w.id === transaction?.wallet_id) || wallets[0];
     const savedDraft = !isEditing ? localStorage.getItem(DRAFT_KEY) : null;
+
+    setPreparedReceipt(null);
+    setIsPreparingReceipt(false);
+    setRemoveExistingReceipt(false);
 
     if (savedDraft) {
       const draft = JSON.parse(savedDraft);
@@ -146,6 +158,10 @@ const TransactionFormModal = ({ transaction, wallets, onSave, onCancel, isSaving
       amount: Math.abs(parsedAmount),
       category: type === TRANSACTION_CLASSIFICATIONS.ADJUSTMENT ? 'Pelarasan' : formData.category,
       adjustment_direction: type === TRANSACTION_CLASSIFICATIONS.ADJUSTMENT ? adjustmentDirection : undefined,
+      receipt_file: type === TRANSACTION_CLASSIFICATIONS.ADJUSTMENT ? null : preparedReceipt?.file || null,
+      receipt_upload_meta: type === TRANSACTION_CLASSIFICATIONS.ADJUSTMENT ? null : preparedReceipt?.meta || null,
+      remove_receipt: type === TRANSACTION_CLASSIFICATIONS.ADJUSTMENT ? false : removeExistingReceipt,
+      existing_receipt_path: transaction?.receipt_path || null,
     };
 
     await onSave(dataToSave);
@@ -156,6 +172,41 @@ const TransactionFormModal = ({ transaction, wallets, onSave, onCancel, isSaving
     if (!isEditing) localStorage.removeItem(DRAFT_KEY);
     onCancel();
   };
+
+  const handleReceiptFileChange = async (event) => {
+    const nextFile = event.target.files?.[0];
+    if (!nextFile) {
+      setPreparedReceipt(null);
+      return;
+    }
+
+    setIsPreparingReceipt(true);
+    try {
+      const prepared = await prepareReceiptUploadFile(nextFile);
+      setPreparedReceipt(prepared);
+      setRemoveExistingReceipt(false);
+      if (prepared.meta?.compressed) {
+        toast({
+          title: 'Resit dimampatkan',
+          description: `${formatFileSize(prepared.meta.original_size_bytes)} -> ${formatFileSize(prepared.meta.final_size_bytes)}`,
+        });
+      }
+    } catch (error) {
+      console.error('[TransactionFormModal] Receipt preparation failed:', error);
+      setPreparedReceipt(null);
+      toast({
+        title: 'Lampiran tidak sah',
+        description: error.message || 'Gagal memproses fail resit.',
+        variant: 'destructive',
+      });
+      event.target.value = '';
+    } finally {
+      setIsPreparingReceipt(false);
+    }
+  };
+
+  const hasExistingReceipt = Boolean(transaction?.receipt_path);
+  const canAttachReceipt = type !== TRANSACTION_CLASSIFICATIONS.ADJUSTMENT;
 
   return (
     <motion.div
@@ -283,17 +334,85 @@ const TransactionFormModal = ({ transaction, wallets, onSave, onCancel, isSaving
               />
             </div>
 
+            <div className="space-y-2 rounded-lg border border-dashed border-border p-3">
+              <label className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+                <Paperclip className="h-4 w-4" />
+                Lampiran Resit (Opsyenal)
+              </label>
+
+              {canAttachReceipt ? (
+                <>
+                  <Input
+                    type="file"
+                    accept={RECEIPT_ACCEPT_ATTR}
+                    onChange={handleReceiptFileChange}
+                    disabled={isSaving || isPreparingReceipt}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Imej akan dimampatkan automatik untuk jimat storan. PDF kekal asal.
+                  </p>
+                </>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  Pelarasan baki tidak menyimpan lampiran resit.
+                </p>
+              )}
+
+              {isPreparingReceipt && (
+                <p className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Memproses fail resit...
+                </p>
+              )}
+
+              {hasExistingReceipt && !preparedReceipt && !removeExistingReceipt && canAttachReceipt && (
+                <div className="flex flex-wrap items-center gap-2 rounded-md bg-muted/60 p-2">
+                  <span className="text-xs">
+                    Lampiran semasa: <strong>{transaction?.receipt_name || 'receipt'}</strong>
+                  </span>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-7 px-2 text-xs"
+                    onClick={() => setRemoveExistingReceipt(true)}
+                  >
+                    <Trash2 className="mr-1 h-3.5 w-3.5" />
+                    Buang Lampiran
+                  </Button>
+                </div>
+              )}
+
+              {removeExistingReceipt && canAttachReceipt && (
+                <p className="text-xs text-amber-700">
+                  Lampiran sedia ada akan dibuang semasa simpan.
+                </p>
+              )}
+
+              {preparedReceipt && canAttachReceipt && (
+                <div className="rounded-md bg-emerald-50 p-2 text-xs text-emerald-800">
+                  <div>
+                    Fail dipilih: <strong>{preparedReceipt.meta?.original_name || preparedReceipt.file?.name}</strong>
+                  </div>
+                  <div>
+                    Saiz: {formatFileSize(preparedReceipt.meta?.original_size_bytes)} -> {formatFileSize(preparedReceipt.meta?.final_size_bytes)}
+                    {preparedReceipt.meta?.compressed ? ' (dimampatkan)' : ' (kekal asal)'}
+                  </div>
+                </div>
+              )}
+            </div>
+
             <div className="flex gap-3 pt-4">
               <Button
                 type="submit"
                 className="flex-1"
                 variant={type === TRANSACTION_CLASSIFICATIONS.EXPENSE ? 'destructive' : 'default'}
-                disabled={isSaving}
+                disabled={isSaving || isPreparingReceipt}
               >
                 {isSaving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                 {isEditing ? 'Kemas Kini' : 'Simpan'}
               </Button>
-              <Button type="button" variant="outline" onClick={handleCancel} disabled={isSaving}>
+              <Button type="button" variant="outline" onClick={handleCancel} disabled={isSaving || isPreparingReceipt}>
                 Batal
               </Button>
             </div>

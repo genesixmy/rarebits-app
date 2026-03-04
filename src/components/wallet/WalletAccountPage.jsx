@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/customSupabaseClient';
 import { useAuth } from '@/contexts/SupabaseAuthContext';
-import { Loader2, ArrowLeft, Wallet as WalletIcon, ChevronsUpDown, Briefcase, User, Plus, Repeat, Edit, Check, X, RefreshCw } from 'lucide-react';
+import { Loader2, ArrowLeft, Wallet as WalletIcon, ChevronsUpDown, Briefcase, User, Plus, Repeat, Edit, Check, X, RefreshCw, Paperclip } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -23,6 +23,12 @@ import {
   isTransferLegacyType,
   manualTypeToLegacyType,
 } from '@/components/wallet/transactionClassification';
+import {
+  applyTransactionReceiptChange,
+  createTransactionReceiptSignedUrl,
+  findLatestCreatedTransactionId,
+  hasPendingReceiptChange,
+} from '@/lib/walletTransactionReceipts';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -215,9 +221,51 @@ const WalletAccountPage = () => {
     refetchData();
   }
 
+  const handleViewReceipt = async (transaction) => {
+    if (!transaction?.receipt_path) return;
+    try {
+      const signedUrl = await createTransactionReceiptSignedUrl({
+        supabase,
+        receiptPath: transaction.receipt_path,
+      });
+      const popup = window.open(signedUrl, '_blank', 'noopener,noreferrer');
+      if (!popup) {
+        toast({ title: 'Popup disekat', description: 'Benarkan popup untuk melihat resit.', variant: 'destructive' });
+      }
+    } catch (error) {
+      console.error('[WalletAccountPage] Failed to open receipt:', error);
+      toast({ title: 'Gagal membuka resit', description: error.message, variant: 'destructive' });
+    }
+  };
+
+  const handleDownloadReceipt = async (transaction) => {
+    if (!transaction?.receipt_path) return;
+    try {
+      const signedUrl = await createTransactionReceiptSignedUrl({
+        supabase,
+        receiptPath: transaction.receipt_path,
+        downloadFileName: transaction.receipt_name || `receipt-${transaction.id}`,
+      });
+      const link = document.createElement('a');
+      link.href = signedUrl;
+      link.rel = 'noopener noreferrer';
+      link.target = '_blank';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (error) {
+      console.error('[WalletAccountPage] Failed to download receipt:', error);
+      toast({ title: 'Gagal memuat turun resit', description: error.message, variant: 'destructive' });
+    }
+  };
+
   const transactionMutation = useMutation({
     mutationFn: async ({ transactionData, isEditing }) => {
+        const shouldHandleReceipt = hasPendingReceiptChange(transactionData);
+        const mutationStartedAtIso = new Date().toISOString();
         let rpcName, params;
+        let createdLegacyType = null;
+        let createdAmount = null;
         if (isEditing) {
             rpcName = 'update_transaction_and_adjust_wallets';
             params = { p_transaction_id: transactionData.id, p_user_id: user.id, p_new_wallet_id: transactionData.wallet_id, p_new_amount: transactionData.amount, p_new_date: transactionData.transaction_date, p_new_description: transactionData.description, p_new_category: transactionData.category };
@@ -228,6 +276,9 @@ const WalletAccountPage = () => {
             }
 
             if (transactionData.type === 'adjustment') {
+              if (shouldHandleReceipt) {
+                throw new Error('Lampiran resit tidak disokong untuk pelarasan baki.');
+              }
               const { data: walletSnapshot, error: walletError } = await supabase
                 .from('wallets')
                 .select('balance')
@@ -258,11 +309,13 @@ const WalletAccountPage = () => {
             }
 
             rpcName = 'add_transaction_and_update_wallet';
+            createdLegacyType = manualTypeToLegacyType(transactionData.type, transactionData.adjustment_direction);
+            createdAmount = Math.abs(parsedAmount);
             params = {
               p_user_id: user.id,
               p_wallet_id: transactionData.wallet_id,
-              p_type: manualTypeToLegacyType(transactionData.type, transactionData.adjustment_direction),
-              p_amount: Math.abs(parsedAmount),
+              p_type: createdLegacyType,
+              p_amount: createdAmount,
               p_description: transactionData.description,
               p_category: transactionData.category,
               p_transaction_date: transactionData.transaction_date,
@@ -271,6 +324,33 @@ const WalletAccountPage = () => {
         }
         const { error } = await supabase.rpc(rpcName, params);
         if (error) throw error;
+
+        if (shouldHandleReceipt) {
+          let transactionId = transactionData.id || null;
+          if (!transactionId) {
+            transactionId = await findLatestCreatedTransactionId({
+              supabase,
+              userId: user.id,
+              walletId: transactionData.wallet_id,
+              type: createdLegacyType,
+              amount: createdAmount,
+              transactionDate: transactionData.transaction_date,
+              description: transactionData.description,
+              category: transactionData.category,
+              createdAfterIso: mutationStartedAtIso,
+            });
+          }
+          if (!transactionId) {
+            throw new Error('Transaksi telah disimpan tetapi lampiran resit tidak dapat dipautkan.');
+          }
+          await applyTransactionReceiptChange({
+            supabase,
+            userId: user.id,
+            transactionId,
+            transactionData,
+          });
+        }
+
         return isEditing;
     },
     onSuccess: (isEditing) => {
@@ -377,6 +457,9 @@ const WalletAccountPage = () => {
             <Button onClick={handleRefresh} variant="outline" className="w-full sm:w-auto">
               <RefreshCw className={cn("mr-2 h-4 w-4", (isRefetchingWallet || isRefetchingTransactions) && "animate-spin")} /> Muat Semula
             </Button>
+            <Button variant="outline" className="w-full sm:w-auto" onClick={() => navigate('/wallet/receipts')}>
+              <Paperclip className="mr-2 h-4 w-4" /> Senarai Resit
+            </Button>
             <DropdownMenu>
                 <DropdownMenuTrigger asChild><Button variant="outline" className="w-full sm:w-auto"><ChevronsUpDown className="h-4 w-4 mr-2" /> Tukar Akaun</Button></DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="w-56">{allWallets.map(w => (<DropdownMenuItem key={w.id} onClick={() => navigate(`/wallet/account/${w.id}`)} disabled={w.id === accountId}>{w.name}</DropdownMenuItem>))}</DropdownMenuContent>
@@ -399,7 +482,14 @@ const WalletAccountPage = () => {
           </CardContent>
         </Card>
 
-        <TransactionList transactions={transactions} wallets={allWallets} onEdit={(tx) => { setEditingTransaction(tx); setIsTransactionModalOpen(true); }} onDelete={(tx) => setDeletingTransaction(tx)}/>
+        <TransactionList
+          transactions={transactions}
+          wallets={allWallets}
+          onEdit={(tx) => { setEditingTransaction(tx); setIsTransactionModalOpen(true); }}
+          onDelete={(tx) => setDeletingTransaction(tx)}
+          onViewReceipt={handleViewReceipt}
+          onDownloadReceipt={handleDownloadReceipt}
+        />
       </div>
 
       <AnimatePresence>

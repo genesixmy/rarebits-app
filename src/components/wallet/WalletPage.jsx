@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Loader2, Plus, MoreVertical, Edit, Trash2, Wallet as WalletIcon, ArrowRightLeft, Repeat, Briefcase, User, BarChart2, RefreshCw } from 'lucide-react';
+import { Loader2, Plus, MoreVertical, Edit, Trash2, Wallet as WalletIcon, ArrowRightLeft, Repeat, Briefcase, User, BarChart2, RefreshCw, Paperclip } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
 import { supabase } from '@/lib/customSupabaseClient';
 import { useAuth } from '@/contexts/SupabaseAuthContext';
@@ -21,6 +21,12 @@ import {
   resolveTransactionClassification,
   TRANSACTION_CLASSIFICATIONS,
 } from '@/components/wallet/transactionClassification';
+import {
+  applyTransactionReceiptChange,
+  createTransactionReceiptSignedUrl,
+  findLatestCreatedTransactionId,
+  hasPendingReceiptChange,
+} from '@/lib/walletTransactionReceipts';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -117,6 +123,7 @@ const WalletPage = () => {
   const [accountTypeFilter, setAccountTypeFilter] = useState('Business');
   const [walletSort, setWalletSort] = useState('newest');
   const [displayLimit, setDisplayLimit] = useState(20);
+  const [receiptFilter, setReceiptFilter] = useState('all');
   const tabFilter = searchParams.get('tab') === 'expenses' ? 'expenses' : '';
 
   const { data: allWallets = [], isLoading: isLoadingWallets, isError: isWalletsError, refetch: refetchWallets, isRefetching: isRefetchingWallets } = useQuery({
@@ -222,6 +229,44 @@ const WalletPage = () => {
     queryClient.invalidateQueries({ queryKey: ['transactions', user?.id, 'all'] });
   }
 
+  const handleViewReceipt = async (transaction) => {
+    if (!transaction?.receipt_path) return;
+    try {
+      const signedUrl = await createTransactionReceiptSignedUrl({
+        supabase,
+        receiptPath: transaction.receipt_path,
+      });
+      const popup = window.open(signedUrl, '_blank', 'noopener,noreferrer');
+      if (!popup) {
+        toast({ title: 'Popup disekat', description: 'Benarkan popup untuk melihat resit.', variant: 'destructive' });
+      }
+    } catch (error) {
+      console.error('[WalletPage] Failed to open receipt:', error);
+      toast({ title: 'Gagal membuka resit', description: error.message, variant: 'destructive' });
+    }
+  };
+
+  const handleDownloadReceipt = async (transaction) => {
+    if (!transaction?.receipt_path) return;
+    try {
+      const signedUrl = await createTransactionReceiptSignedUrl({
+        supabase,
+        receiptPath: transaction.receipt_path,
+        downloadFileName: transaction.receipt_name || `receipt-${transaction.id}`,
+      });
+      const link = document.createElement('a');
+      link.href = signedUrl;
+      link.rel = 'noopener noreferrer';
+      link.target = '_blank';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (error) {
+      console.error('[WalletPage] Failed to download receipt:', error);
+      toast({ title: 'Gagal memuat turun resit', description: error.message, variant: 'destructive' });
+    }
+  };
+
   const filteredWallets = useMemo(() => {
     if (accountTypeFilter === 'All') return allWallets;
     return allWallets.filter(w => w.account_type === accountTypeFilter);
@@ -273,16 +318,24 @@ const WalletPage = () => {
           return txWalletType === accountTypeFilter;
       });
 
-    if (tabFilter !== 'expenses') {
-      return accountScopedTransactions;
+    const expenseScopedTransactions = tabFilter !== 'expenses'
+      ? accountScopedTransactions
+      : accountScopedTransactions.filter((tx) => {
+          const classification = resolveTransactionClassification(tx);
+          if (classification === TRANSACTION_CLASSIFICATIONS.EXPENSE) return true;
+          return tx.type === 'sales_return' || tx.type === 'refund' || tx.type === 'refund_adjustment' || tx.type === 'goodwill_adjustment';
+        });
+
+    if (receiptFilter === 'has_receipt') {
+      return expenseScopedTransactions.filter((tx) => Boolean(tx.receipt_path));
     }
 
-    return accountScopedTransactions.filter((tx) => {
-      const classification = resolveTransactionClassification(tx);
-      if (classification === TRANSACTION_CLASSIFICATIONS.EXPENSE) return true;
-      return tx.type === 'sales_return' || tx.type === 'refund' || tx.type === 'refund_adjustment' || tx.type === 'goodwill_adjustment';
-    });
-  }, [allTransactions, allWallets, accountTypeFilter, tabFilter]);
+    if (receiptFilter === 'missing_receipt') {
+      return expenseScopedTransactions.filter((tx) => !tx.receipt_path);
+    }
+
+    return expenseScopedTransactions;
+  }, [allTransactions, allWallets, accountTypeFilter, tabFilter, receiptFilter]);
   
   const transactionsToDisplay = useMemo(() => filteredTransactions.slice(0, displayLimit), [filteredTransactions, displayLimit]);
 
@@ -313,7 +366,11 @@ const WalletPage = () => {
 
   const transactionMutation = useMutation({
     mutationFn: async ({ transactionData, isEditing }) => {
+        const shouldHandleReceipt = hasPendingReceiptChange(transactionData);
+        const mutationStartedAtIso = new Date().toISOString();
         let rpcName, params;
+        let createdLegacyType = null;
+        let createdAmount = null;
         if (isEditing) {
             rpcName = 'update_transaction_and_adjust_wallets';
             params = {
@@ -332,6 +389,9 @@ const WalletPage = () => {
             }
 
             if (transactionData.type === 'adjustment') {
+              if (shouldHandleReceipt) {
+                throw new Error('Lampiran resit tidak disokong untuk pelarasan baki.');
+              }
               const { data: walletSnapshot, error: walletError } = await supabase
                 .from('wallets')
                 .select('balance')
@@ -362,11 +422,13 @@ const WalletPage = () => {
             }
 
             rpcName = 'add_transaction_and_update_wallet';
+            createdLegacyType = manualTypeToLegacyType(transactionData.type, transactionData.adjustment_direction);
+            createdAmount = Math.abs(parsedAmount);
             params = {
                 p_user_id: user.id,
                 p_wallet_id: transactionData.wallet_id,
-                p_type: manualTypeToLegacyType(transactionData.type, transactionData.adjustment_direction),
-                p_amount: Math.abs(parsedAmount),
+                p_type: createdLegacyType,
+                p_amount: createdAmount,
                 p_description: transactionData.description,
                 p_category: transactionData.category,
                 p_transaction_date: transactionData.transaction_date,
@@ -375,6 +437,33 @@ const WalletPage = () => {
         }
         const { error } = await supabase.rpc(rpcName, params);
         if (error) throw error;
+
+        if (shouldHandleReceipt) {
+          let transactionId = transactionData.id || null;
+          if (!transactionId) {
+            transactionId = await findLatestCreatedTransactionId({
+              supabase,
+              userId: user.id,
+              walletId: transactionData.wallet_id,
+              type: createdLegacyType,
+              amount: createdAmount,
+              transactionDate: transactionData.transaction_date,
+              description: transactionData.description,
+              category: transactionData.category,
+              createdAfterIso: mutationStartedAtIso,
+            });
+          }
+          if (!transactionId) {
+            throw new Error('Transaksi telah disimpan tetapi lampiran resit tidak dapat dipautkan.');
+          }
+          await applyTransactionReceiptChange({
+            supabase,
+            userId: user.id,
+            transactionId,
+            transactionData,
+          });
+        }
+
         return isEditing;
     },
     onSuccess: (isEditing) => {
@@ -529,6 +618,11 @@ const WalletPage = () => {
             <Button onClick={handleRefresh} variant="outline" className="w-full sm:w-auto">
               <RefreshCw className={cn("mr-2 h-4 w-4", (isRefetchingWallets || isRefetchingTransactions) && "animate-spin")} /> Muat Semula
             </Button>
+            <Button asChild variant="outline" className="w-full sm:w-auto">
+              <Link to="/wallet/receipts">
+                <Paperclip className="mr-2 h-4 w-4" /> Senarai Resit
+              </Link>
+            </Button>
             <Tooltip>
               <TooltipTrigger asChild>
                 <div className="w-full sm:w-auto">
@@ -573,6 +667,30 @@ const WalletPage = () => {
             </Button>
           </div>
         )}
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            variant={receiptFilter === 'all' ? 'default' : 'outline'}
+            onClick={() => setReceiptFilter('all')}
+          >
+            Semua Resit
+          </Button>
+          <Button
+            size="sm"
+            variant={receiptFilter === 'has_receipt' ? 'default' : 'outline'}
+            onClick={() => setReceiptFilter('has_receipt')}
+          >
+            Ada Resit
+          </Button>
+          <Button
+            size="sm"
+            variant={receiptFilter === 'missing_receipt' ? 'default' : 'outline'}
+            onClick={() => setReceiptFilter('missing_receipt')}
+          >
+            Tiada Resit
+          </Button>
+        </div>
 
         <Card className="overflow-hidden rounded-3xl border border-transparent bg-gradient-to-r from-cyan-500 to-teal-500 text-white shadow-[0_20px_45px_-22px_rgba(8,145,178,0.65)]">
           <CardHeader className="pb-3">
@@ -696,6 +814,8 @@ const WalletPage = () => {
             wallets={allWallets}
             onEdit={(tx) => { setEditingTransaction(tx); setIsTransactionModalOpen(true); }}
             onDelete={(tx) => setDeletingTransaction(tx)}
+            onViewReceipt={handleViewReceipt}
+            onDownloadReceipt={handleDownloadReceipt}
           />
           {filteredTransactions.length > displayLimit && (
             <Button variant="outline" className="w-full" onClick={() => setDisplayLimit(prev => prev + 20)}>

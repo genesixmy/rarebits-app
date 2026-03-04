@@ -1,6 +1,6 @@
 import React from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { TrendingUp, TrendingDown, MoreVertical, Edit, Trash2, ArrowRightLeft, ArrowRight, ArrowLeft, Settings2 } from 'lucide-react';
+import { TrendingUp, TrendingDown, MoreVertical, Edit, Trash2, ArrowRightLeft, ArrowRight, ArrowLeft, Settings2, Paperclip, Eye, Download } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import {
@@ -18,7 +18,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-const TransactionList = ({ transactions, wallets, onEdit, onDelete }) => {
+const TransactionList = ({ transactions, wallets, onEdit, onDelete, onViewReceipt, onDownloadReceipt }) => {
   return (
     <Card className="h-full">
       <CardHeader>
@@ -45,6 +45,7 @@ const TransactionList = ({ transactions, wallets, onEdit, onDelete }) => {
 
               const amountPrefix = direction < 0 ? '-' : '+';
               const amountClass = direction < 0 ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400';
+              const hasReceipt = Boolean(tx.receipt_path);
 
               let icon;
               let colorClass;
@@ -118,6 +119,19 @@ const TransactionList = ({ transactions, wallets, onEdit, onDelete }) => {
                         <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium", typeBadgeClass)}>
                           {typeBadgeLabel}
                         </span>
+                        <span
+                          className={cn(
+                            'shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium',
+                            hasReceipt
+                              ? 'bg-cyan-100 text-cyan-800 dark:bg-cyan-900/40 dark:text-cyan-300'
+                              : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'
+                          )}
+                        >
+                          <span className="inline-flex items-center gap-1">
+                            <Paperclip className="h-3 w-3" />
+                            {hasReceipt ? 'Ada Resit' : 'Tiada Resit'}
+                          </span>
+                        </span>
                       </div>
                       <p className="truncate text-sm text-muted-foreground">
                         {new Date(tx.transaction_date).toLocaleDateString()} - {subtitle}
@@ -135,6 +149,16 @@ const TransactionList = ({ transactions, wallets, onEdit, onDelete }) => {
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
+                        {hasReceipt && (
+                          <DropdownMenuItem onClick={() => onViewReceipt?.(tx)}>
+                            <Eye className="mr-2 h-4 w-4" /> Lihat Resit
+                          </DropdownMenuItem>
+                        )}
+                        {hasReceipt && (
+                          <DropdownMenuItem onClick={() => onDownloadReceipt?.(tx)}>
+                            <Download className="mr-2 h-4 w-4" /> Muat Turun Resit
+                          </DropdownMenuItem>
+                        )}
                         {isEditable && (
                           <DropdownMenuItem onClick={() => onEdit(tx)}>
                             <Edit className="mr-2 h-4 w-4" /> Sunting

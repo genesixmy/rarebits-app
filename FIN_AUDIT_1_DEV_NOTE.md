@@ -41,3 +41,30 @@ Core definitions used:
 - Invoice adjustment modal now requires `Jenis Adjustment` and sends explicit type to RPC.
 - Reporting fallback hardened:
   - when `invoice.adjustment_total` is 0 but refund rows exist, goodwill can be inferred from `invoice_refunds` (including legacy NULL-type courtesy hints).
+
+## SAFETY-1-SCHEMA-FIX (business_snapshots)
+- Added migration `supabase/migrations/20260301000044_business_snapshots_metadata_columns.sql`.
+- Non-destructive column alignment (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`) for:
+  - `total_profit`
+  - `wallet_balance`
+  - `invoice_count`
+  - `inventory_value`
+  - `checksum`
+- Edge Function `export-full-backup` now inserts extended snapshot payload, with safe fallback to base payload if new columns are not available yet.
+
+### SQL check (Supabase SQL Editor)
+```sql
+SELECT
+  exported_at,
+  file_name,
+  total_revenue,
+  total_profit,
+  total_expense,
+  wallet_balance,
+  invoice_count,
+  inventory_value,
+  checksum
+FROM public.business_snapshots
+ORDER BY exported_at DESC
+LIMIT 5;
+```

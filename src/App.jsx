@@ -14,9 +14,11 @@ import ClientsPage from '@/components/clients/ClientsPage';
 import ClientDetailPage from '@/components/clients/ClientDetailPage';
 import WalletPage from '@/components/wallet/WalletPage';
 import WalletAccountPage from '@/components/wallet/WalletAccountPage';
+import WalletReceiptsPage from '@/components/wallet/WalletReceiptsPage';
 import InvoiceListPage from '@/components/invoices/InvoiceListPage';
 import InvoiceFormPage from '@/components/invoices/InvoiceFormPage';
 import InvoiceDetailsPage from '@/components/invoices/InvoiceDetailsPage';
+import InvoiceShareRedirectPage from '@/components/invoices/InvoiceShareRedirectPage';
 import CatalogCreatePage from '@/components/catalogs/CatalogCreatePage';
 import CatalogPublicPage from '@/components/catalogs/CatalogPublicPage';
 import Layout from '@/components/layout/Layout';
@@ -220,6 +222,8 @@ function App() {
   const queryClient = useQueryClient();
   const { editingItem, showAddForm, setEditingItem, setShowAddForm, clearEditingState } = useEditingState();
   const isPublicCatalogRoute = location.pathname.startsWith('/c/') || location.pathname.startsWith('/cat/');
+  const isPublicInvoiceShareRoute = location.pathname.startsWith('/i/');
+  const isPublicRoute = isPublicCatalogRoute || isPublicInvoiceShareRoute;
 
   // State for UI control
   const [searchTerm, setSearchTerm] = useState('');
@@ -402,11 +406,11 @@ function App() {
 
   useEffect(() => {
     if (!authLoading && !user && location.pathname !== '/login') {
-      if (!isPublicCatalogRoute) {
+      if (!isPublicRoute) {
         navigate('/login', { replace: true });
       }
     }
-  }, [user, authLoading, location.pathname, navigate, isPublicCatalogRoute]);
+  }, [user, authLoading, location.pathname, navigate, isPublicRoute]);
 
   const forceRefetchAll = useCallback(async () => {
     console.log("forceRefetchAll: Invalidating ALL queries...");
@@ -1241,13 +1245,14 @@ function App() {
     [fastSellSuggestions]
   );
   
-  if (isPublicCatalogRoute) {
+  if (isPublicRoute) {
     return (
       <>
-        <Helmet><title>Katalog Awam - RareBits</title></Helmet>
+        <Helmet><title>RareBits - Public Link</title></Helmet>
         <Routes>
           <Route path="/c/:publicCode" element={<CatalogPublicPage />} />
           <Route path="/cat/:publicCode" element={<CatalogPublicPage />} />
+          <Route path="/i/:shareCode" element={<InvoiceShareRedirectPage />} />
         </Routes>
       </>
     );
@@ -1273,7 +1278,7 @@ function App() {
   const pageTitle = {
     '/': 'Papan Pemuka', '/inventory': 'Inventori', '/sales': 'Jualan',
     '/invoices': 'Invois', '/catalogs': 'Katalog', '/inventory/catalogs': 'Katalog',
-    '/clients': 'Pelanggan', '/wallet': 'Wallet', '/settings': 'Tetapan', '/reminders': 'Reminder'
+    '/clients': 'Pelanggan', '/wallet': 'Wallet', '/wallet/receipts': 'Resit Wallet', '/settings': 'Tetapan', '/reminders': 'Reminder'
   }[location.pathname] || 'Papan Pemuka';
 
   return (
@@ -1411,6 +1416,7 @@ function App() {
               <Route path="/clients/:id" element={<ClientDetailPage />} />
               <Route path="/wallet" element={<WalletPage />} />
               <Route path="/wallet/account/:accountId" element={<WalletAccountPage />} />
+              <Route path="/wallet/receipts" element={<WalletReceiptsPage />} />
               <Route path="/settings" element={<SettingsPage user={user} categories={categories} onUpdateCategories={() => queryClient.invalidateQueries({ queryKey: ['categories', user.id] })} onUpdateProfile={() => queryClient.invalidateQueries({ queryKey: ['profile', user.id] })} />} />
             </Routes>
           </motion.div>

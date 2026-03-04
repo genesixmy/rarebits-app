@@ -29,7 +29,7 @@ import {
 import { supabase } from '@/lib/customSupabaseClient';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { ChevronLeft, Edit, Download, Trash2, DollarSign, AlertCircle, X } from 'lucide-react';
+import { ChevronLeft, Edit, Download, Trash2, DollarSign, AlertCircle, X, Send } from 'lucide-react';
 import QRCode from 'qrcode';
 import { format } from 'date-fns';
 import { ms } from 'date-fns/locale';
@@ -147,6 +147,284 @@ const getInvoiceFinancialSummary = (invoiceData) => {
     returnedTotal,
     finalTotal,
   };
+};
+
+const normalizeWhatsAppPhone = (phoneValue) => {
+  if (typeof phoneValue !== 'string') return '';
+  const trimmed = phoneValue.trim();
+  if (!trimmed) return '';
+
+  const keepDigitsAndPlus = trimmed.replace(/[^\d+]/g, '');
+  const withoutLeadingPlus = keepDigitsAndPlus.startsWith('+')
+    ? keepDigitsAndPlus.slice(1)
+    : keepDigitsAndPlus;
+
+  let normalized = withoutLeadingPlus.replace(/\D/g, '');
+  if (!normalized) return '';
+
+  if (normalized.startsWith('00')) {
+    normalized = normalized.slice(2);
+  }
+  if (normalized.startsWith('0')) {
+    normalized = `60${normalized.slice(1)}`;
+  }
+
+  return normalized.length >= 8 ? normalized : '';
+};
+
+const getPrimaryClientPhone = (invoiceData) => {
+  const phones = Array.isArray(invoiceData?.client?.client_phones) ? invoiceData.client.client_phones : [];
+  for (const entry of phones) {
+    const candidate = typeof entry?.phone_number === 'string' ? entry.phone_number.trim() : '';
+    if (candidate) return candidate;
+  }
+  return '';
+};
+
+const buildInvoiceWhatsAppMessage = ({ invoice, printSettings }) => {
+  const clientName = normalizeOptionalText(invoice?.client?.name) || 'Pelanggan';
+  const companyName = normalizeOptionalText(printSettings?.companyName) || 'RareBits';
+  const invoiceNumber = normalizeOptionalText(invoice?.invoice_number) || '-';
+  const invoiceDateLabel = invoice?.invoice_date
+    ? format(new Date(invoice.invoice_date), 'dd MMM yyyy', { locale: ms })
+    : '-';
+  const paymentSettled = ['paid', 'partially_returned', 'returned'].includes(String(invoice?.status || '').toLowerCase());
+  const paymentStatus = paymentSettled ? 'Lunas' : 'Belum Lunas';
+  const financialSummary = getInvoiceFinancialSummary(invoice || {});
+  const amountLabel = formatCurrency(financialSummary.finalTotal || 0);
+
+  return [
+    `Hi ${clientName},`,
+    `Ini invois anda dari ${companyName}.`,
+    '',
+    `No Invois: ${invoiceNumber}`,
+    `Tarikh: ${invoiceDateLabel}`,
+    `Jumlah: ${amountLabel}`,
+    `Status: ${paymentStatus}`,
+    '',
+    'Terima kasih.',
+  ].join('\n');
+};
+
+const getInvoiceExportFileName = (invoiceData) => `invoice-${invoiceData?.invoice_number || invoiceData?.id || 'rarebits'}.png`;
+const INVOICE_SHARE_BUCKET = 'item_images';
+const INVOICE_SHARE_LINK_EXPIRES_SEC = 60 * 60 * 24 * 7;
+const INVOICE_SHARE_SHORT_CODE_LENGTH = 12;
+
+const sanitizeFileSegment = (value, fallback = 'invoice') => {
+  const cleaned = String(value || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 80);
+  return cleaned || fallback;
+};
+
+const withDownloadQuery = (rawUrl, fileName) => {
+  if (!rawUrl) return '';
+  try {
+    const url = new URL(rawUrl);
+    url.searchParams.set('download', fileName);
+    return url.toString();
+  } catch (_error) {
+    return rawUrl;
+  }
+};
+
+const buildInvoiceShareStoragePath = (invoiceData, ownerUserId) => {
+  const ownerId = normalizeOptionalText(ownerUserId) || 'unknown-user';
+  const invoiceKey = sanitizeFileSegment(invoiceData?.id || invoiceData?.invoice_number, 'invoice');
+  const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return `${ownerId}/invoice-shares/${invoiceKey}-${nonce}.png`;
+};
+
+const generateShortCode = (length = INVOICE_SHARE_SHORT_CODE_LENGTH) => {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  const max = alphabet.length;
+  const bytes = new Uint8Array(length);
+
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < length; i += 1) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+
+  let code = '';
+  for (let i = 0; i < length; i += 1) {
+    code += alphabet[bytes[i] % max];
+  }
+  return code;
+};
+
+const buildShortInvoiceShareUrl = (shortCode) => {
+  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  if (!origin) return `/i/${shortCode}`;
+  return `${origin}/i/${shortCode}`;
+};
+
+const withTimeout = async (promise, timeoutMs, timeoutMessage) => {
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(timeoutMessage || 'Operasi melebihi masa menunggu.'));
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
+const getErrorMessage = (error) => {
+  if (!error) return 'Unknown error';
+  if (typeof error === 'string') return error;
+  if (typeof error?.message === 'string' && error.message.trim()) return error.message.trim();
+  if (typeof error?.error_description === 'string' && error.error_description.trim()) return error.error_description.trim();
+  if (typeof error?.details === 'string' && error.details.trim()) return error.details.trim();
+  try {
+    return JSON.stringify(error);
+  } catch (_error) {
+    return String(error);
+  }
+};
+
+const uploadInvoiceAttachmentAndGetSignedShare = async ({ invoiceData, invoiceBlob, fileName, actorUserId }) => {
+  if (!normalizeOptionalText(actorUserId)) {
+    throw new Error('User semasa tidak ditemui untuk upload invois.');
+  }
+
+  const storagePath = buildInvoiceShareStoragePath(invoiceData, actorUserId);
+  const storage = supabase.storage.from(INVOICE_SHARE_BUCKET);
+  const expiresAtIso = new Date(Date.now() + (INVOICE_SHARE_LINK_EXPIRES_SEC * 1000)).toISOString();
+
+  const { error: uploadError } = await storage.upload(storagePath, invoiceBlob, {
+    contentType: 'image/png',
+    cacheControl: '60',
+    upsert: false,
+  });
+  if (uploadError) throw new Error(`Upload invois gagal: ${getErrorMessage(uploadError)}`);
+
+  const { data: signedData, error: signedError } = await storage.createSignedUrl(
+    storagePath,
+    INVOICE_SHARE_LINK_EXPIRES_SEC,
+    { download: fileName }
+  );
+
+  if (signedError || !signedData?.signedUrl) {
+    const { data: publicData } = storage.getPublicUrl(storagePath);
+    if (publicData?.publicUrl) {
+      return {
+        signedUrl: withDownloadQuery(publicData.publicUrl, fileName),
+        expiresAtIso,
+      };
+    }
+    if (signedError) throw new Error(`Signed URL gagal: ${getErrorMessage(signedError)}`);
+    throw new Error('Gagal jana link invois.');
+  }
+
+  return {
+    signedUrl: signedData.signedUrl,
+    expiresAtIso,
+  };
+};
+
+const isDuplicateShortCodeError = (error) => {
+  if (!error) return false;
+  const message = String(error?.message || '').toLowerCase();
+  return error?.code === '23505' || message.includes('duplicate key');
+};
+
+const createInvoiceShortShareLink = async ({ invoiceData, targetUrl, expiresAtIso, actorUserId }) => {
+  const normalizedTargetUrl = normalizeOptionalText(targetUrl);
+  if (!normalizedTargetUrl) {
+    throw new Error('Link sasaran invois tidak sah.');
+  }
+  const ownerUserId = normalizeOptionalText(actorUserId);
+  if (!ownerUserId) {
+    throw new Error('User semasa tidak ditemui untuk short link.');
+  }
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const shortCode = generateShortCode();
+    const payload = {
+      short_code: shortCode,
+      user_id: ownerUserId,
+      invoice_id: invoiceData.id,
+      target_url: normalizedTargetUrl,
+      expires_at: expiresAtIso,
+    };
+
+    const { error } = await supabase.from('invoice_share_links').insert(payload);
+    if (!error) {
+      return buildShortInvoiceShareUrl(shortCode);
+    }
+    if (isDuplicateShortCodeError(error)) {
+      continue;
+    }
+    throw new Error(`Short link insert gagal: ${getErrorMessage(error)}`);
+  }
+
+  throw new Error('Gagal jana short link invois.');
+};
+
+const downloadBlobFile = (blob, fileName) => {
+  const blobUrl = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = blobUrl;
+  link.download = fileName;
+  link.rel = 'noopener noreferrer';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+};
+
+const openWhatsAppThread = ({ normalizedPhone, message, targetWindow = null }) => {
+  const encodedText = encodeURIComponent(message);
+  const primaryUrl = `https://wa.me/${normalizedPhone}?text=${encodedText}`;
+  const fallbackUrl = `https://api.whatsapp.com/send?phone=${normalizedPhone}&text=${encodedText}`;
+
+  const navigateTab = (tabRef, url) => {
+    if (!tabRef || tabRef.closed) return false;
+    try {
+      tabRef.location.replace(url);
+      return true;
+    } catch (_error) {
+      try {
+        tabRef.location.href = url;
+        return true;
+      } catch (_error2) {
+        return false;
+      }
+    }
+  };
+
+  if (targetWindow && !targetWindow.closed) {
+    if (navigateTab(targetWindow, primaryUrl)) {
+      return { opened: true, url: primaryUrl };
+    }
+    if (navigateTab(targetWindow, fallbackUrl)) {
+      return { opened: true, url: fallbackUrl };
+    }
+    try {
+      targetWindow.close();
+    } catch (_error) {
+      // noop
+    }
+  }
+
+  const popup = window.open(primaryUrl, '_blank', 'noopener,noreferrer');
+  if (!popup) {
+    const fallbackPopup = window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+    if (!fallbackPopup) return { opened: false, url: fallbackUrl };
+    return { opened: true, url: fallbackUrl };
+  }
+  return { opened: true, url: primaryUrl };
 };
 
 const normalizeWhitespaceText = (value) => {
@@ -617,6 +895,137 @@ const InvoiceDetailsPage = () => {
 
 const handleDeleteInvoice = async () => {    try {      await deleteInvoice.mutateAsync({ invoiceId });      toast.success('Invois dihapus');      navigate('/invoices');    } catch (error) {      console.error('[InvoiceDetailsPage] Error deleting invoice:', error);      toast.error('Gagal menghapus invois');    }  };
 
+  const handleSendInvoiceWhatsApp = async () => {
+    if (!invoice) return;
+
+    const rawPhone = getPrimaryClientPhone(invoice);
+    const normalizedPhone = normalizeWhatsAppPhone(rawPhone);
+    if (!normalizedPhone) {
+      console.warn('[InvoiceDetailsPage] Invalid/missing client WhatsApp number', { rawPhone });
+      toast.error('Nombor WhatsApp pelanggan tiada / tidak sah.');
+      return;
+    }
+
+    const loadingToastId = toast.loading('Menyediakan WhatsApp...');
+    const message = buildInvoiceWhatsAppMessage({ invoice, printSettings });
+    const fileName = getInvoiceExportFileName(invoice);
+    let actorUserId = '';
+    try {
+      const { data: sessionData } = await withTimeout(
+        supabase.auth.getSession(),
+        5000,
+        'Timeout semasa semak sesi pengguna.'
+      );
+      actorUserId = normalizeOptionalText(sessionData?.session?.user?.id);
+    } catch (authError) {
+      console.warn('[InvoiceDetailsPage] Unable to resolve current auth session:', authError);
+    }
+
+    if (!actorUserId) {
+      toast.dismiss(loadingToastId);
+      toast.error('Sesi login tidak sah. Sila refresh dan log masuk semula.');
+      return;
+    }
+
+    let invoiceBlob;
+    try {
+      toast.loading('Menjana lampiran invois...', { id: loadingToastId });
+      invoiceBlob = await withTimeout(
+        generateA4InvoiceBlob(),
+        45000,
+        'Timeout semasa menjana lampiran A4.'
+      );
+    } catch (exportError) {
+      console.error('[InvoiceDetailsPage] Failed to generate A4 invoice attachment, fallback to thermal:', exportError);
+      try {
+        toast.loading('Lampiran A4 gagal, guna fallback...', { id: loadingToastId });
+        invoiceBlob = await withTimeout(
+          generateThermalInvoiceBlob({ showQrFallbackToast: false }),
+          20000,
+          'Timeout semasa menjana lampiran fallback.'
+        );
+      } catch (fallbackError) {
+        console.error('[InvoiceDetailsPage] Failed to generate fallback attachment:', fallbackError);
+        toast.dismiss(loadingToastId);
+        toast.error('Gagal sediakan lampiran invois.');
+        return;
+      }
+    }
+
+    let shareFailureReason = '';
+    try {
+      toast.loading('Memuat naik invois dan menjana link...', { id: loadingToastId });
+      const shareData = await withTimeout(
+        uploadInvoiceAttachmentAndGetSignedShare({
+          invoiceData: invoice,
+          invoiceBlob,
+          fileName,
+          actorUserId,
+        }),
+        20000,
+        'Timeout semasa memuat naik invois.'
+      );
+
+      let shareUrlToSend = shareData.signedUrl;
+      try {
+        shareUrlToSend = await withTimeout(
+          createInvoiceShortShareLink({
+            invoiceData: invoice,
+            targetUrl: shareData.signedUrl,
+            expiresAtIso: shareData.expiresAtIso,
+            actorUserId,
+          }),
+          10000,
+          'Timeout semasa menjana short link.'
+        );
+      } catch (shortLinkError) {
+        console.warn('[InvoiceDetailsPage] Short link unavailable, using signed URL:', shortLinkError);
+      }
+
+      const messageWithLink = `${message}\n\nMuat turun invois:\n${shareUrlToSend}`;
+      const openResult = openWhatsAppThread({
+        normalizedPhone,
+        message: messageWithLink,
+      });
+      if (!openResult.opened) {
+        try {
+          await navigator.clipboard.writeText(openResult.url);
+          toast.dismiss(loadingToastId);
+          toast.error('Popup disekat browser. Link WhatsApp disalin, sila buka tab baru dan paste.');
+        } catch (_clipboardError) {
+          toast.dismiss(loadingToastId);
+          toast.error('Popup disekat browser. Benarkan popup untuk RareBits.');
+        }
+        return;
+      }
+      toast.dismiss(loadingToastId);
+      toast.success('Link invois berjaya disediakan untuk WhatsApp.');
+      return;
+    } catch (shareError) {
+      console.error('[InvoiceDetailsPage] Failed to create invoice share link, fallback to manual attachment:', shareError);
+      shareFailureReason = getErrorMessage(shareError);
+    }
+
+    downloadBlobFile(invoiceBlob, fileName);
+    const openResult = openWhatsAppThread({
+      normalizedPhone,
+      message,
+    });
+    if (!openResult.opened) {
+      try {
+        await navigator.clipboard.writeText(openResult.url);
+        toast.dismiss(loadingToastId);
+        toast.error('Popup disekat browser. Link WhatsApp disalin, sila buka tab baru dan paste.');
+      } catch (_clipboardError) {
+        toast.dismiss(loadingToastId);
+        toast.error('Popup disekat browser. Benarkan popup untuk RareBits.');
+      }
+      return;
+    }
+    toast.dismiss(loadingToastId);
+    toast.error(`Gagal jana link automatik (${shareFailureReason || 'unknown'}). Fail dimuat turun, sila attach manual dalam WhatsApp.`);
+  };
+
   const printHtmlInIframe = (htmlContent, title) => {
     const iframe = document.createElement('iframe');
     iframe.setAttribute('title', title);
@@ -676,12 +1085,17 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
     const sellerEmail = printSettings.email;
     const sellerWebsite = printSettings.website;
     const sellerFax = printSettings.fax;
-    const footerNote = printSettings.footerNotes;
+    const footerNote = normalizeOptionalText(printSettings.footerNotes);
+    const normalizedFooterNote = (footerNote && /polisi\s+kedai/i.test(footerNote))
+      ? 'PRODUK DIJUAL ADALAH TERTAKLUK KEPADA POLISI PENIAGA.'
+      : (footerNote || 'PRODUK DIJUAL ADALAH TERTAKLUK KEPADA POLISI PENIAGA.');
     const showGeneratedBy = printSettings.showGeneratedByA4;
+    const showLogoA4 = Boolean(printSettings.showLogoA4 && !options.hideLogo);
     const a4QrDataUrl = normalizeOptionalText(options.qrDataUrl);
     const showQr = Boolean(printSettings.showQrA4 && a4QrDataUrl);
 
     const clientName = invoiceData.client?.name || '-';
+    const clientEmail = invoiceData.client?.email || '';
     const clientPhone = (invoiceData.client?.client_phones || [])
       .map((phone) => phone?.phone_number)
       .filter(Boolean)
@@ -694,12 +1108,25 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
     const invoiceDateLabel = invoiceData.invoice_date
       ? format(new Date(invoiceData.invoice_date), 'dd MMM yyyy', { locale: ms })
       : '-';
-    const createdAtLabel = invoiceData.created_at
-      ? format(new Date(invoiceData.created_at), 'dd MMM yyyy, HH:mm', { locale: ms })
-      : '-';
-    const paymentSettled = ['paid', 'partially_returned', 'returned'].includes(invoiceData.status);
-    const paymentStatus = paymentSettled ? 'Paid' : 'Unpaid';
-    const paymentStatusClass = paymentSettled ? 'status-paid' : 'status-unpaid';
+    const invoiceStatusKey = String(invoiceData.status || '').toLowerCase();
+    const invoiceStatusLabelMap = {
+      draft: 'DRAF',
+      finalized: 'MUKTAMAD',
+      paid: 'DIBAYAR',
+      partially_returned: 'SEPARA PULANG',
+      returned: 'DIPULANGKAN',
+      cancelled: 'DIBATALKAN',
+    };
+    const invoiceStatusClassMap = {
+      draft: 'status-badge-gray',
+      finalized: 'status-badge-blue',
+      paid: 'status-badge-green',
+      partially_returned: 'status-badge-amber',
+      returned: 'status-badge-rose',
+      cancelled: 'status-badge-red',
+    };
+    const invoiceStatusText = invoiceStatusLabelMap[invoiceStatusKey] || String(invoiceData.status || 'STATUS').toUpperCase();
+    const invoiceStatusClass = invoiceStatusClassMap[invoiceStatusKey] || 'status-badge-gray';
     const shippingCharged = getSellerCollectedShippingCharged(invoiceData);
     const financialSummary = getInvoiceFinancialSummary(invoiceData);
     const showShippingLine = shippingCharged > 0;
@@ -732,6 +1159,19 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
       </tr>
     `;
 
+    const icon = (paths) => `
+      <svg class="line-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        ${paths}
+      </svg>
+    `;
+    const iconMapPin = icon('<path d="M12 21s-6-5.3-6-10a6 6 0 1 1 12 0c0 4.7-6 10-6 10Z"></path><circle cx="12" cy="11" r="2.3"></circle>');
+    const iconPhone = icon('<path d="M22 16.9v3a2 2 0 0 1-2.2 2A19.8 19.8 0 0 1 3 5.2 2 2 0 0 1 5 3h3a2 2 0 0 1 2 1.7c.1.8.3 1.6.6 2.3a2 2 0 0 1-.4 2.1L9 10.3a16 16 0 0 0 4.7 4.7l1.2-1.2a2 2 0 0 1 2.1-.4c.7.3 1.5.5 2.3.6A2 2 0 0 1 22 16.9Z"></path>');
+    const iconMail = icon('<rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="m3 7 9 6 9-6"></path>');
+    const iconGlobe = icon('<circle cx="12" cy="12" r="9"></circle><path d="M3 12h18"></path><path d="M12 3a14.5 14.5 0 0 1 0 18"></path><path d="M12 3a14.5 14.5 0 0 0 0 18"></path>');
+    const iconHash = icon('<path d="M9 3 7 21"></path><path d="M17 3 15 21"></path><path d="M4 9h16"></path><path d="M3 15h16"></path>');
+    const iconCalendar = icon('<rect x="3" y="5" width="18" height="16" rx="2"></rect><path d="M16 3v4"></path><path d="M8 3v4"></path><path d="M3 10h18"></path>');
+    const iconCreditCard = icon('<rect x="2" y="5" width="20" height="14" rx="2"></rect><path d="M2 10h20"></path>');
+
     return `
       <!doctype html>
       <html>
@@ -740,14 +1180,23 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
           <title>Invoice ${escapeHtml(invoiceData.invoice_number || '')}</title>
           <style>
             * { box-sizing: border-box; }
-            @page { size: A4; margin: 20mm; }
+            @page { size: A4; margin: 12mm; }
             html, body {
               margin: 0;
               padding: 0;
               background: #fff;
-              color: #111;
-              font-family: "Inter", Arial, sans-serif;
+              color: #0f172a;
+              font-family: "Poppins", "Segoe UI", Arial, sans-serif;
               line-height: 1.45;
+            }
+            :root {
+              --rb-primary: #0ea5b7;
+              --rb-primary-dark: #0f8696;
+              --rb-primary-soft: #eefbfc;
+              --rb-ink: #0f172a;
+              --rb-muted: #64748b;
+              --rb-border: #d5e3e7;
+              --rb-panel: #f8fcfd;
             }
             @media print {
               html, body {
@@ -755,101 +1204,240 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                 min-height: auto;
                 overflow: visible;
               }
+              body {
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
+              }
             }
             .invoice-doc {
               width: 100%;
               margin: 0;
               padding: 0;
             }
-            .header {
-              display: flex;
-              justify-content: space-between;
-              align-items: flex-start;
-              gap: 24px;
-              margin-bottom: 20px;
+            .top-bar {
+              height: 8px;
+              background: var(--rb-primary-dark);
             }
-            .seller-brand {
+            .header-shell {
+              padding: 28px 24px 20px;
+              background:
+                radial-gradient(circle at 88% 12%, rgba(14,165,183,0.08), transparent 28%),
+                radial-gradient(circle at 70% 8%, rgba(15,134,150,0.06), transparent 24%),
+                #fff;
+            }
+            .header-brand {
               display: flex;
-              align-items: flex-start;
-              gap: 14px;
+              align-items: center;
+              gap: 12px;
             }
             .seller-logo {
-              max-width: 86px;
-              max-height: 86px;
+              max-width: 52px;
+              max-height: 52px;
               width: auto;
               height: auto;
               object-fit: contain;
-              border: 1px solid #e5e7eb;
-              border-radius: 8px;
-              padding: 4px;
               background: #fff;
             }
+            .seller-logo-fallback {
+              width: 52px;
+              height: 52px;
+              border: 2px solid #cfe8ec;
+              border-radius: 8px;
+              display: inline-flex;
+              align-items: center;
+              justify-content: center;
+              font-size: 28px;
+              font-weight: 800;
+              color: var(--rb-primary-dark);
+              background: #ffffff;
+              line-height: 1;
+            }
             .seller-details {
+              display: flex;
+              align-items: center;
               min-width: 0;
+              min-height: 52px;
             }
             .seller-name {
-              font-size: 24px;
-              font-weight: 700;
-              margin-bottom: 6px;
-            }
-            .seller-line {
-              font-size: 12px;
-              margin: 2px 0;
-              color: #303030;
-            }
-            .invoice-title {
-              text-align: right;
-            }
-            .invoice-title h1 {
+              font-size: 22px;
+              font-weight: 800;
               margin: 0;
-              font-size: 30px;
-              letter-spacing: 1.6px;
+              color: var(--rb-primary-dark);
+              line-height: 1;
             }
-            .meta-row {
-              font-size: 12px;
-              margin-top: 4px;
+            .header-divider {
+              margin: 16px 0 18px;
+              height: 2px;
+              background: #cfe8ec;
             }
-            .status-chip {
-              display: inline-block;
-              margin-top: 8px;
-              padding: 3px 10px;
-              border-radius: 999px;
+            .header-main {
+              display: grid;
+              grid-template-columns: 0.9fr 1.25fr;
+              gap: 24px;
+              align-items: stretch;
+            }
+            .invoice-to {
+              padding-top: 22px;
+              padding-right: 22px;
+              border-right: 1px solid #d9ecef;
+            }
+            .invoice-to-title {
+              margin: 0 0 10px;
               font-size: 11px;
-              border: 1px solid #c7c7c7;
+              color: var(--rb-muted);
+              font-weight: 600;
+              display: inline-flex;
+              align-items: center;
+              gap: 5px;
+              white-space: nowrap;
+              line-height: 1.2;
             }
-            .status-paid {
-              color: #166534;
-              border-color: #86efac;
-              background: #f0fdf4;
+            .invoice-to-label {
+              text-transform: uppercase;
+              letter-spacing: 0.06em;
             }
-            .status-unpaid {
-              color: #854d0e;
-              border-color: #fcd34d;
-              background: #fffbeb;
-            }
-            .bill-to {
-              margin-bottom: 20px;
-              border: 1px solid #e5e7eb;
-              border-radius: 8px;
-              padding: 12px 14px;
-            }
-            .section-label {
-              margin: 0 0 6px 0;
+            .invoice-to-buyer {
               font-size: 11px;
               font-weight: 700;
-              letter-spacing: 0.08em;
-              color: #4b5563;
-              text-transform: uppercase;
+              color: var(--rb-ink);
+              letter-spacing: 0;
+              text-transform: none;
+              line-height: 1.2;
             }
-            .bill-line {
-              margin: 2px 0;
-              font-size: 13px;
-              color: #111827;
+            .invoice-to-line {
+              display: flex;
+              align-items: flex-start;
+              gap: 6px;
+              margin: 8px 0;
+              font-size: 11px;
+              color: #334155;
+              line-height: 1.35;
+            }
+            .invoice-to-line span {
+              min-width: 0;
+              word-break: break-word;
+            }
+            .invoice-right {
+              min-width: 0;
+              padding-left: 14px;
+            }
+            .invoice-title-row {
+              display: flex;
+              align-items: flex-end;
+              gap: 18px;
+            }
+            .invoice-right h1 {
+              margin: 0;
+              font-size: 60px;
+              letter-spacing: 1px;
+              line-height: 0.95;
+              color: var(--rb-primary-dark);
+            }
+            .invoice-status-badge {
+              display: inline-flex;
+              align-items: center;
+              justify-content: center;
+              border-radius: 999px;
+              padding: 4px 10px;
+              margin-bottom: 14px;
+              font-size: 10px;
+              font-weight: 700;
+              letter-spacing: 0.04em;
+              text-transform: uppercase;
+              border: 1px solid transparent;
+              white-space: nowrap;
+            }
+            .status-badge-gray {
+              color: #334155;
+              background: #f1f5f9;
+              border-color: #cbd5e1;
+            }
+            .status-badge-blue {
+              color: #1e3a8a;
+              background: #dbeafe;
+              border-color: #93c5fd;
+            }
+            .status-badge-green {
+              color: #065f46;
+              background: #d1fae5;
+              border-color: #86efac;
+            }
+            .status-badge-amber {
+              color: #92400e;
+              background: #fef3c7;
+              border-color: #fcd34d;
+            }
+            .status-badge-rose {
+              color: #9f1239;
+              background: #ffe4e6;
+              border-color: #fda4af;
+            }
+            .status-badge-red {
+              color: #991b1b;
+              background: #fee2e2;
+              border-color: #fca5a5;
+            }
+            .quick-stats {
+              margin-top: 18px;
+              padding-top: 14px;
+              border-top: 1px solid #d9ecef;
+              display: flex;
+              gap: 0;
+            }
+            .quick-stat {
+              display: flex;
+              align-items: flex-start;
+              gap: 10px;
+              min-width: 0;
+              flex: 1;
+              padding-right: 16px;
+              margin-right: 16px;
+              border-right: 1px solid #d9ecef;
+            }
+            .quick-stat:last-child {
+              flex: 1.2;
+            }
+            .quick-stat:last-child {
+              border-right: 0;
+              margin-right: 0;
+              padding-right: 0;
+            }
+            .quick-label {
+              display: block;
+              font-size: 9px;
+              line-height: 1.2;
+              color: var(--rb-muted);
+              text-transform: uppercase;
+              letter-spacing: 0.03em;
+            }
+            .quick-value {
+              display: block;
+              margin-top: 1px;
+              font-size: 12px;
+              line-height: 1.25;
+              font-weight: 700;
+              color: var(--rb-ink);
+              word-break: break-word;
+            }
+            .quick-value-nowrap {
+              white-space: nowrap;
+              word-break: normal;
+              font-size: 11px;
+            }
+            .line-icon {
+              flex: 0 0 auto;
+              width: 12px;
+              height: 12px;
+              margin-top: 2px;
+              color: var(--rb-primary-dark);
             }
             table {
               width: 100%;
               border-collapse: collapse;
               table-layout: fixed;
+            }
+            .table-wrap {
+              padding: 12px 16px 0;
             }
             thead {
               display: table-header-group;
@@ -864,19 +1452,24 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
             th {
               text-align: left;
               padding: 8px 10px;
-              border-bottom: 1px solid #111;
+              border-bottom: 0;
               font-size: 11px;
               text-transform: uppercase;
               letter-spacing: 0.06em;
+              background: var(--rb-primary-dark);
+              color: #fff;
             }
             td {
               padding: 10px;
-              border-bottom: 1px solid #e5e7eb;
+              border-bottom: 1px solid #eaf1f4;
               vertical-align: top;
-              font-size: 13px;
+              font-size: 12px;
+            }
+            tbody tr:nth-child(even) td {
+              background: #fbfdfe;
             }
             .item-cell {
-              width: 52%;
+              width: 46%;
               word-break: break-word;
             }
             .item-name {
@@ -885,120 +1478,200 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
             .item-meta {
               margin-top: 2px;
               font-size: 11px;
-              color: #6b7280;
+              color: var(--rb-muted);
             }
             .num-cell {
-              width: 16%;
+              width: 18%;
               text-align: right;
               white-space: nowrap;
             }
             .empty-row {
               text-align: center;
-              color: #6b7280;
+              color: var(--rb-muted);
             }
             .totals-wrap {
               margin-top: 18px;
               display: flex;
               justify-content: flex-end;
+              padding: 0 16px 14px;
             }
             .totals-box {
-              width: 280px;
-              border: 1px solid #e5e7eb;
-              border-radius: 8px;
+              width: 320px;
+              border: 1px solid var(--rb-border);
+              border-radius: 10px;
               padding: 10px 12px;
+              background: var(--rb-panel);
             }
             .totals-row {
               display: flex;
               justify-content: space-between;
               gap: 12px;
               margin: 6px 0;
-              font-size: 13px;
+              font-size: 12px;
+              color: #334155;
             }
             .totals-row.total {
-              margin-top: 10px;
-              padding-top: 10px;
-              border-top: 1px solid #d1d5db;
-              font-size: 16px;
+              margin-top: 8px;
+              padding-top: 8px;
+              border-top: 1px solid #c8d9de;
+              font-size: 15px;
               font-weight: 700;
+              color: var(--rb-primary-dark);
             }
             .qr-wrap {
-              margin-top: 10px;
+              margin-top: 2px;
               display: flex;
               justify-content: flex-end;
+              padding: 0 16px 10px;
             }
             .qr-box {
-              width: 136px;
+              width: 150px;
               text-align: center;
+              border: 1px solid var(--rb-border);
+              border-radius: 10px;
+              background: #fff;
+              padding: 9px 8px 8px;
             }
             .qr-image {
-              width: 120px;
-              height: 120px;
+              width: 110px;
+              height: 110px;
               object-fit: contain;
               display: block;
               margin: 0 auto 6px;
             }
             .qr-label {
               font-size: 10px;
-              color: #4b5563;
+              color: var(--rb-muted);
               line-height: 1.3;
             }
             .footer {
-              margin-top: 22px;
-              border-top: 1px solid #e5e7eb;
+              margin-top: 6px;
+              border-top: 1px solid var(--rb-border);
+              padding: 0 16px 14px;
+              font-size: 11px;
+              color: #475569;
+              background: #fff;
+            }
+            .footer-terms {
+              margin: 0;
+              padding: 7px 0;
+              border-bottom: 2px solid #d9ecef;
+              font-size: 10px;
+              color: var(--rb-muted);
+            }
+            .footer-inner {
+              display: flex;
+              justify-content: space-between;
+              align-items: flex-end;
+              gap: 18px;
               padding-top: 12px;
+            }
+            .footer-left {
+              min-width: 0;
+            }
+            .footer-thanks {
+              margin: 0 0 8px 0;
+              font-size: 14px;
+              font-weight: 500;
+              color: #334155;
+            }
+            .footer-company {
+              margin: 0 0 8px 0;
               font-size: 12px;
-              color: #374151;
+              font-weight: 700;
+              color: #0f172a;
+            }
+            .company-contact-line {
+              display: flex;
+              align-items: flex-start;
+              gap: 6px;
+              margin: 3px 0;
+              font-size: 11px;
+              color: #475569;
+            }
+            .company-contact-line span {
+              min-width: 0;
+              word-break: break-word;
+            }
+            .footer-empty {
+              min-width: 180px;
             }
             .notes {
               white-space: pre-wrap;
-              margin-bottom: 10px;
+              margin: 0;
+              padding: 10px 0 4px;
             }
             .generated-by {
               margin-top: 10px;
               font-size: 11px;
-              color: #6b7280;
+              color: var(--rb-muted);
             }
           </style>
         </head>
         <body>
           <main class="invoice-doc">
-            <section class="header">
-              <div class="seller-brand">
-                ${printSettings.showLogoA4 ? `<img class="seller-logo" src="${escapeHtml(printSettings.logoUrl)}" alt="Logo" />` : ''}
+            <div class="top-bar"></div>
+            <section class="header-shell">
+              <div class="header-brand">
+                ${showLogoA4
+                  ? `<img class="seller-logo" src="${escapeHtml(printSettings.logoUrl)}" alt="Logo" />`
+                  : '<div class="seller-logo-fallback">R</div>'}
                 <div class="seller-details">
-                  <div class="seller-name">${escapeHtml(sellerName)}</div>
-                  ${sellerAddress ? `<p class="seller-line">${escapeHtml(sellerAddress)}</p>` : ''}
-                  ${sellerPhone ? `<p class="seller-line">Telefon: ${escapeHtml(sellerPhone)}</p>` : ''}
-                  ${sellerEmail ? `<p class="seller-line">Emel: ${escapeHtml(sellerEmail)}</p>` : ''}
-                  ${sellerWebsite ? `<p class="seller-line">Laman: ${escapeHtml(sellerWebsite)}</p>` : ''}
-                  ${sellerFax ? `<p class="seller-line">Faks: ${escapeHtml(sellerFax)}</p>` : ''}
+                  <p class="seller-name">${escapeHtml(sellerName)}</p>
                 </div>
               </div>
-              <div class="invoice-title">
-                <h1>INVOICE</h1>
-                <div class="meta-row">No: ${escapeHtml(invoiceData.invoice_number || '-')}</div>
-                <div class="meta-row">Tarikh Invois: ${escapeHtml(invoiceDateLabel)}</div>
-                <div class="meta-row">Dicipta: ${escapeHtml(createdAtLabel)}</div>
-                <span class="status-chip ${paymentStatusClass}">${paymentStatus}</span>
+              <div class="header-divider"></div>
+              <div class="header-main">
+                <div class="invoice-to">
+                  <p class="invoice-to-title">
+                    ${iconMapPin}
+                    <span class="invoice-to-label">INVOIS KEPADA:</span>
+                    <span class="invoice-to-buyer">${escapeHtml(clientName)}</span>
+                  </p>
+                  ${clientAddress ? `<p class="invoice-to-line">${iconMapPin}<span>${escapeHtml(clientAddress)}</span></p>` : ''}
+                  ${clientEmail ? `<p class="invoice-to-line">${iconMail}<span>${escapeHtml(clientEmail)}</span></p>` : ''}
+                  ${clientPhone ? `<p class="invoice-to-line">${iconPhone}<span>${escapeHtml(clientPhone)}</span></p>` : ''}
+                </div>
+                <div class="invoice-right">
+                  <div class="invoice-title-row">
+                    <h1>INVOICE</h1>
+                    <span class="invoice-status-badge ${invoiceStatusClass}">${escapeHtml(invoiceStatusText)}</span>
+                  </div>
+                  <div class="quick-stats">
+                    <div class="quick-stat">
+                      ${iconCreditCard}
+                      <div>
+                        <span class="quick-label">JUMLAH</span>
+                        <span class="quick-value">${escapeHtml(formatCurrency(financialSummary.finalTotal || 0))}</span>
+                      </div>
+                    </div>
+                    <div class="quick-stat">
+                      ${iconCalendar}
+                      <div>
+                        <span class="quick-label">TARIKH INVOIS</span>
+                        <span class="quick-value">${escapeHtml(invoiceDateLabel)}</span>
+                      </div>
+                    </div>
+                    <div class="quick-stat">
+                      ${iconHash}
+                      <div>
+                        <span class="quick-label">NO INVOIS</span>
+                        <span class="quick-value quick-value-nowrap">${escapeHtml(invoiceData.invoice_number || '-')}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </section>
 
-            <section class="bill-to">
-              <p class="section-label">Bill To</p>
-              <p class="bill-line"><strong>${escapeHtml(clientName)}</strong></p>
-              ${clientPhone ? `<p class="bill-line">Telefon: ${escapeHtml(clientPhone)}</p>` : ''}
-              ${invoiceData.client?.email ? `<p class="bill-line">Emel: ${escapeHtml(invoiceData.client.email)}</p>` : ''}
-              ${clientAddress ? `<p class="bill-line">${escapeHtml(clientAddress)}</p>` : ''}
-            </section>
-
-            <section>
+            <section class="table-wrap">
               <table>
                 <thead>
                   <tr>
                     <th>Item</th>
-                    <th style="text-align:right;">Qty</th>
-                    <th style="text-align:right;">Unit Price</th>
-                    <th style="text-align:right;">Amount</th>
+                    <th style="text-align:right;">KUANTITI</th>
+                    <th style="text-align:right;">PER UNIT</th>
+                    <th style="text-align:right;">HARGA</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1009,10 +1682,6 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
 
             <section class="totals-wrap">
               <div class="totals-box">
-                <div class="totals-row">
-                  <span>Subtotal</span>
-                  <span>${escapeHtml(formatCurrency(invoiceData.subtotal || 0))}</span>
-                </div>
                 ${showShippingLine ? `
                   <div class="totals-row">
                     <span>Caj Pos</span>
@@ -1031,14 +1700,8 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
                     <span>- ${escapeHtml(formatCurrency(financialSummary.returnedTotal))}</span>
                   </div>
                 ` : ''}
-                ${invoiceData.payment_method ? `
-                  <div class="totals-row">
-                    <span>Kaedah Bayaran</span>
-                    <span>${escapeHtml(invoiceData.payment_method)}</span>
-                  </div>
-                ` : ''}
                 <div class="totals-row total">
-                  <span>Final Dibayar</span>
+                  <span>JUMLAH</span>
                   <span>${escapeHtml(formatCurrency(financialSummary.finalTotal || 0))}</span>
                 </div>
               </div>
@@ -1055,7 +1718,19 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
 
             <section class="footer">
               ${invoiceData.notes ? `<div class="notes"><strong>Nota:</strong> ${escapeHtml(invoiceData.notes)}</div>` : ''}
-              ${footerNote ? `<div class="notes">${escapeHtml(footerNote)}</div>` : ''}
+              <p class="footer-terms"><strong>TERMA & SYARAT:</strong> ${escapeHtml(normalizedFooterNote)}</p>
+              <div class="footer-inner">
+                <div class="footer-left">
+                  <p class="footer-thanks">Terima Kasih Mempercayai Kami</p>
+                  <p class="footer-company">${escapeHtml(sellerName)}</p>
+                  ${sellerAddress ? `<p class="company-contact-line">${iconMapPin}<span>${escapeHtml(sellerAddress)}</span></p>` : ''}
+                  ${sellerPhone ? `<p class="company-contact-line">${iconPhone}<span>${escapeHtml(sellerPhone)}</span></p>` : ''}
+                  ${sellerEmail ? `<p class="company-contact-line">${iconMail}<span>${escapeHtml(sellerEmail)}</span></p>` : ''}
+                  ${sellerWebsite ? `<p class="company-contact-line">${iconGlobe}<span>${escapeHtml(sellerWebsite)}</span></p>` : ''}
+                  ${sellerFax ? `<p class="company-contact-line">${iconCreditCard}<span>Faks: ${escapeHtml(sellerFax)}</span></p>` : ''}
+                </div>
+                <div class="footer-empty"></div>
+              </div>
               ${showGeneratedBy ? '<div class="generated-by">Generated by RareBits</div>' : ''}
             </section>
           </main>
@@ -1073,6 +1748,751 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
     }
 
     printHtmlInIframe(buildA4InvoiceHtml(invoice, { qrDataUrl }), 'invoice-a4-print');
+  };
+
+  const generateA4InvoiceBlob = async () => {
+    if (!invoice) {
+      throw new Error('Invois tidak dijumpai.');
+    }
+
+    const a4Width = 1240;
+    const marginX = 56;
+    const contentWidth = a4Width - (marginX * 2);
+    const primary = '#0ea5b7';
+    const primaryDark = '#0f8696';
+    const ink = '#0f172a';
+    const muted = '#64748b';
+    const border = '#d5e3e7';
+    const panel = '#f8fcfd';
+    const sellerName = printSettings.companyName || 'RareBits';
+    const sellerAddress = normalizeOptionalText(printSettings.address);
+    const sellerPhone = normalizeOptionalText(printSettings.phone);
+    const sellerEmail = normalizeOptionalText(printSettings.email);
+    const sellerWebsite = normalizeOptionalText(printSettings.website);
+    const sellerFax = normalizeOptionalText(printSettings.fax);
+    const showLogoA4 = Boolean(printSettings.showLogoA4 && printSettings.logoUrl);
+
+    const dataUrlToBlob = (dataUrl) => {
+      const [meta, base64] = dataUrl.split(',');
+      const mimeMatch = meta.match(/data:(.*?);base64/);
+      const mime = mimeMatch?.[1] || 'image/png';
+      const binary = atob(base64 || '');
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      return new Blob([bytes], { type: mime });
+    };
+
+    const canvasToBlob = async (canvas) => {
+      if (canvas.toBlob) {
+        const blob = await new Promise((resolve) => {
+          canvas.toBlob((result) => resolve(result), 'image/png');
+        });
+        if (blob) return blob;
+      }
+      return dataUrlToBlob(canvas.toDataURL('image/png'));
+    };
+
+    const clientName = invoice.client?.name || '-';
+    const clientEmail = invoice.client?.email || '';
+    const clientPhone = (invoice.client?.client_phones || [])
+      .map((phone) => phone?.phone_number)
+      .filter(Boolean)
+      .join(', ');
+    const clientAddress = (invoice.client?.client_addresses || [])
+      .map((address) => address?.address)
+      .filter(Boolean)
+      .join(' | ');
+    const invoiceDateLabel = invoice.invoice_date
+      ? format(new Date(invoice.invoice_date), 'dd MMM yyyy', { locale: ms })
+      : '-';
+    const invoiceStatusKey = String(invoice.status || '').toLowerCase();
+    const invoiceStatusLabelMap = {
+      draft: 'DRAF',
+      finalized: 'MUKTAMAD',
+      paid: 'DIBAYAR',
+      partially_returned: 'SEPARA PULANG',
+      returned: 'DIPULANGKAN',
+      cancelled: 'DIBATALKAN',
+    };
+    const invoiceStatusThemeMap = {
+      draft: { bg: '#f1f5f9', border: '#cbd5e1', text: '#334155' },
+      finalized: { bg: '#dbeafe', border: '#93c5fd', text: '#1e3a8a' },
+      paid: { bg: '#d1fae5', border: '#86efac', text: '#065f46' },
+      partially_returned: { bg: '#fef3c7', border: '#fcd34d', text: '#92400e' },
+      returned: { bg: '#ffe4e6', border: '#fda4af', text: '#9f1239' },
+      cancelled: { bg: '#fee2e2', border: '#fca5a5', text: '#991b1b' },
+    };
+    const invoiceStatusText = invoiceStatusLabelMap[invoiceStatusKey] || String(invoice.status || 'STATUS').toUpperCase();
+    const invoiceStatusTheme = invoiceStatusThemeMap[invoiceStatusKey] || invoiceStatusThemeMap.draft;
+    const shippingCharged = getSellerCollectedShippingCharged(invoice);
+    const financialSummary = getInvoiceFinancialSummary(invoice);
+    const showShippingLine = shippingCharged > 0;
+
+    const rows = (invoice.invoice_items || []).map((item) => {
+      const name = item.is_manual ? item.item_name : item.item?.name;
+      const category = item.is_manual ? 'Item Manual' : item.item?.category;
+      return {
+        name: name || 'Item',
+        category: category || '',
+        qty: item.quantity || 1,
+        unitPrice: item.unit_price || 0,
+        lineTotal: item.line_total || 0,
+      };
+    });
+
+    const headerMainH = 332;
+    const footerContactLines = [sellerAddress, sellerPhone, sellerEmail, sellerWebsite, sellerFax].filter(Boolean).length;
+    const footerBlockH = 132 + (footerContactLines * 18);
+
+    let y = 0;
+    y += 18; // top bar
+    y += 16;
+    y += headerMainH; // header + invoice to
+    y += 18;
+    y += 52; // table header
+    y += Math.max(rows.length, 1) * 72;
+    y += 18;
+    y += 124; // totals
+
+    let qrDataUrl = '';
+    if (printSettings.showQrA4) {
+      qrDataUrl = await getQrDataUrl(printSettings.qrUrl, 180);
+      if (qrDataUrl) y += 180;
+    }
+
+    if (invoice.notes) y += 56;
+    y += footerBlockH;
+
+    // Keep A4 export height aligned with print page size.
+    const finalHeight = Math.max(y, 1754);
+    const scale = 2;
+    const canvas = document.createElement('canvas');
+    canvas.width = a4Width * scale;
+    canvas.height = finalHeight * scale;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      throw new Error('Canvas context tidak tersedia');
+    }
+    ctx.scale(scale, scale);
+
+    const drawWrappedText = ({ text, x, y: startY, maxWidth, lineHeight, font, color = ink, align = 'left', maxLines = 999 }) => {
+      const safeText = String(text || '').trim();
+      if (!safeText) return startY;
+      ctx.save();
+      ctx.font = font;
+      ctx.fillStyle = color;
+      ctx.textAlign = align;
+      ctx.textBaseline = 'top';
+      const words = safeText.split(/\s+/);
+      const lines = [];
+      let current = '';
+      for (const word of words) {
+        const candidate = current ? `${current} ${word}` : word;
+        if (ctx.measureText(candidate).width <= maxWidth || !current) {
+          current = candidate;
+        } else {
+          lines.push(current);
+          current = word;
+          if (lines.length >= maxLines) break;
+        }
+      }
+      if (current && lines.length < maxLines) lines.push(current);
+      let yy = startY;
+      for (const line of lines) {
+        ctx.fillText(line, x, yy);
+        yy += lineHeight;
+      }
+      ctx.restore();
+      return yy;
+    };
+
+    const drawMiniIcon = ({ icon, x, y, color = primaryDark }) => {
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = 1.4;
+      if (icon === 'map') {
+        ctx.beginPath();
+        ctx.arc(x + 4, y + 4, 3.8, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(x + 4, y + 4, 1.2, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (icon === 'mail') {
+        ctx.strokeRect(x, y, 9, 7);
+        ctx.beginPath();
+        ctx.moveTo(x, y + 1);
+        ctx.lineTo(x + 4.5, y + 4);
+        ctx.lineTo(x + 9, y + 1);
+        ctx.stroke();
+      } else if (icon === 'phone') {
+        ctx.beginPath();
+        ctx.arc(x + 3.2, y + 3.2, 2.2, Math.PI * 0.2, Math.PI * 1.1);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(x + 5.4, y + 5.2);
+        ctx.lineTo(x + 8.2, y + 8);
+        ctx.stroke();
+      } else if (icon === 'globe') {
+        ctx.beginPath();
+        ctx.arc(x + 4.5, y + 4.2, 4, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(x + 0.5, y + 4.2);
+        ctx.lineTo(x + 8.5, y + 4.2);
+        ctx.stroke();
+      } else if (icon === 'card') {
+        ctx.strokeRect(x, y + 0.5, 9, 6.5);
+        ctx.beginPath();
+        ctx.moveTo(x, y + 2.6);
+        ctx.lineTo(x + 9, y + 2.6);
+        ctx.stroke();
+      }
+      ctx.restore();
+    };
+
+    const drawIconTextLine = ({ icon, text, x, y, maxWidth, font = '400 14px Arial', color = '#334155', lineHeight = 18, maxLines = 1 }) => {
+      drawMiniIcon({ icon, x, y: y + 3, color: primaryDark });
+      return drawWrappedText({
+        text,
+        x: x + 16,
+        y,
+        maxWidth: Math.max(maxWidth - 16, 20),
+        lineHeight,
+        font,
+        color,
+        maxLines,
+      });
+    };
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, a4Width, finalHeight);
+
+    // top bar
+    ctx.fillStyle = primaryDark;
+    ctx.fillRect(0, 0, a4Width, 18);
+
+        // header block (closer to reference sample)
+    const headerY = 34;
+    const headerBottomY = headerY + headerMainH;
+    const brandY = headerY + 20;
+
+    // subtle map-like backdrop
+    ctx.fillStyle = '#f8fcfd';
+    ctx.fillRect(marginX, headerY, contentWidth, headerMainH);
+    ctx.fillStyle = 'rgba(14,165,183,0.06)';
+    ctx.beginPath();
+    ctx.arc(marginX + contentWidth - 190, headerY + 28, 76, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(15,134,150,0.05)';
+    ctx.beginPath();
+    ctx.arc(marginX + contentWidth - 84, headerY + 36, 52, 0, Math.PI * 2);
+    ctx.fill();
+
+    let brandTextX = marginX;
+    if (showLogoA4) {
+      try {
+        const logoImage = await new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => resolve(img);
+          img.onerror = () => reject(new Error('Logo image load failed'));
+          img.src = printSettings.logoUrl;
+        });
+        ctx.drawImage(logoImage, marginX, brandY + 2, 54, 54);
+        brandTextX = marginX + 64;
+      } catch (error) {
+        console.warn('[InvoiceDetailsPage] A4 logo render skipped:', error);
+      }
+    } else {
+      ctx.fillStyle = '#ffffff';
+      ctx.strokeStyle = '#cfe8ec';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.roundRect?.(marginX, brandY + 2, 54, 54, 8);
+      if (ctx.roundRect) {
+        ctx.fill();
+        ctx.stroke();
+      } else {
+        ctx.fillRect(marginX, brandY + 2, 54, 54);
+        ctx.strokeRect(marginX, brandY + 2, 54, 54);
+      }
+      drawWrappedText({
+        text: 'R',
+        x: marginX + 27,
+        y: brandY + 10,
+        maxWidth: 54,
+        lineHeight: 32,
+        font: '800 34px Arial',
+        color: primaryDark,
+        align: 'center',
+        maxLines: 1,
+      });
+      brandTextX = marginX + 64;
+    }
+
+    drawWrappedText({
+      text: sellerName,
+      x: brandTextX,
+      y: brandY + 20,
+      maxWidth: contentWidth * 0.55,
+      lineHeight: 28,
+      font: '800 36px Arial',
+      color: primaryDark,
+      maxLines: 1,
+    });
+    const dividerY = headerY + 112;
+    ctx.strokeStyle = '#cfe8ec';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(marginX, dividerY);
+    ctx.lineTo(marginX + contentWidth, dividerY);
+    ctx.stroke();
+
+    const leftColW = Math.floor(contentWidth * 0.42);
+    const rightColX = marginX + leftColW + 16;
+    const rightColW = contentWidth - leftColW - 16;
+    const leftInfoTopY = dividerY + 34;
+    const rightInfoTopY = dividerY + 26;
+
+    // simple map-pin icon for "INVOICE TO" row
+    const invoiceToIconX = marginX + 7;
+    const invoiceToIconY = leftInfoTopY + 8;
+    ctx.strokeStyle = primaryDark;
+    ctx.fillStyle = primaryDark;
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.arc(invoiceToIconX, invoiceToIconY, 4.2, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(invoiceToIconX, invoiceToIconY, 1.2, 0, Math.PI * 2);
+    ctx.fill();
+
+    const invoiceToLabel = 'INVOIS KEPADA:';
+    ctx.save();
+    ctx.font = '600 11px Arial';
+    const invoiceToLabelWidth = ctx.measureText(invoiceToLabel).width;
+    ctx.restore();
+    drawWrappedText({
+      text: invoiceToLabel,
+      x: marginX + 18,
+      y: leftInfoTopY,
+      maxWidth: leftColW - 10,
+      lineHeight: 16,
+      font: '600 11px Arial',
+      color: muted,
+      maxLines: 1,
+    });
+    drawWrappedText({
+      text: clientName,
+      x: marginX + 18 + invoiceToLabelWidth + 6,
+      y: leftInfoTopY,
+      maxWidth: leftColW - 20 - invoiceToLabelWidth,
+      lineHeight: 16,
+      font: '700 11px Arial',
+      color: ink,
+      maxLines: 1,
+    });
+    let clientY = leftInfoTopY + 36;
+    if (clientAddress) {
+      clientY = drawIconTextLine({
+        icon: 'map',
+        text: clientAddress,
+        x: marginX,
+        y: clientY,
+        maxWidth: leftColW - 8,
+        font: '400 14px Arial',
+        color: '#334155',
+        lineHeight: 18,
+        maxLines: 2,
+      });
+    }
+    if (clientEmail) {
+      clientY = drawIconTextLine({
+        icon: 'mail',
+        text: clientEmail,
+        x: marginX,
+        y: clientY + 2,
+        maxWidth: leftColW - 8,
+        font: '400 14px Arial',
+        color: '#334155',
+        lineHeight: 18,
+        maxLines: 1,
+      });
+    }
+    if (clientPhone) {
+      drawIconTextLine({
+        icon: 'phone',
+        text: clientPhone,
+        x: marginX,
+        y: clientY + 2,
+        maxWidth: leftColW - 8,
+        font: '400 14px Arial',
+        color: '#334155',
+        lineHeight: 18,
+        maxLines: 1,
+      });
+    }
+
+    ctx.strokeStyle = '#cfe8ec';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(rightColX - 8, rightInfoTopY + 6);
+    ctx.lineTo(rightColX - 8, headerBottomY - 16);
+    ctx.stroke();
+
+    drawWrappedText({
+      text: 'INVOICE',
+      x: rightColX,
+      y: rightInfoTopY - 2,
+      maxWidth: rightColW,
+      lineHeight: 54,
+      font: '800 60px Arial',
+      color: primaryDark,
+      maxLines: 1,
+    });
+
+    // status badge beside "INVOICE"
+    ctx.save();
+    ctx.font = '700 11px Arial';
+    const badgeW = Math.max(96, ctx.measureText(invoiceStatusText).width + 18);
+    const badgeH = 22;
+    const badgeX = rightColX + rightColW - badgeW;
+    const badgeY = rightInfoTopY + 30;
+    ctx.fillStyle = invoiceStatusTheme.bg;
+    ctx.strokeStyle = invoiceStatusTheme.border;
+    ctx.lineWidth = 1;
+    if (ctx.roundRect) {
+      ctx.beginPath();
+      ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 999);
+      ctx.fill();
+      ctx.stroke();
+    } else {
+      ctx.fillRect(badgeX, badgeY, badgeW, badgeH);
+      ctx.strokeRect(badgeX, badgeY, badgeW, badgeH);
+    }
+    ctx.fillStyle = invoiceStatusTheme.text;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(invoiceStatusText, badgeX + (badgeW / 2), badgeY + (badgeH / 2));
+    ctx.restore();
+
+    const statY = rightInfoTopY + 108;
+    const statW = Math.floor((rightColW - 24) / 3);
+    const drawStat = (index, label, value) => {
+      const sx = rightColX + (index * (statW + 10));
+      drawWrappedText({
+        text: label,
+        x: sx,
+        y: statY,
+        maxWidth: index === 2 ? statW + 36 : statW,
+        lineHeight: 15,
+        font: '600 11px Arial',
+        color: muted,
+        maxLines: 1,
+      });
+      drawWrappedText({
+        text: value || '-',
+        x: sx,
+        y: statY + 13,
+        maxWidth: index === 2 ? statW + 36 : statW,
+        lineHeight: 20,
+        font: '700 16px Arial',
+        color: ink,
+        maxLines: 1,
+      });
+      if (index < 2) {
+        const sxEnd = sx + statW + 6;
+        ctx.strokeStyle = '#d9ecef';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(sxEnd, statY);
+        ctx.lineTo(sxEnd, statY + 34);
+        ctx.stroke();
+      }
+    };
+    drawStat(0, 'JUMLAH', formatCurrency(financialSummary.finalTotal || 0));
+    drawStat(1, 'TARIKH INVOIS', invoiceDateLabel);
+    drawStat(2, 'NO INVOIS', invoice.invoice_number || '-');
+
+    // table
+    const tableY = headerBottomY + 24;
+    const colX = [
+      marginX,
+      marginX + Math.floor(contentWidth * 0.5),
+      marginX + Math.floor(contentWidth * 0.62),
+      marginX + Math.floor(contentWidth * 0.79),
+      marginX + contentWidth,
+    ];
+    ctx.fillStyle = primaryDark;
+    ctx.fillRect(marginX, tableY, contentWidth, 52);
+    const headerLabels = ['ITEM', 'KUANTITI', 'PER UNIT', 'HARGA'];
+    headerLabels.forEach((label, idx) => {
+      const left = colX[idx] + 12;
+      const right = colX[idx + 1] - 12;
+      const align = idx === 0 ? 'left' : 'right';
+      drawWrappedText({
+        text: label,
+        x: align === 'left' ? left : right,
+        y: tableY + 14,
+        maxWidth: right - left,
+        lineHeight: 20,
+        font: '700 17px Arial',
+        color: '#ffffff',
+        align,
+        maxLines: 1,
+      });
+    });
+
+    let rowY = tableY + 52;
+    if (rows.length === 0) {
+      ctx.strokeStyle = border;
+      ctx.strokeRect(marginX, rowY, contentWidth, 72);
+      drawWrappedText({
+        text: 'Tiada item dalam invois.',
+        x: marginX + (contentWidth / 2),
+        y: rowY + 24,
+        maxWidth: contentWidth - 24,
+        lineHeight: 24,
+        font: '500 19px Arial',
+        color: muted,
+        align: 'center',
+      });
+      rowY += 72;
+    } else {
+      rows.forEach((row, idx) => {
+        ctx.fillStyle = idx % 2 === 0 ? '#ffffff' : '#fbfdfe';
+        ctx.fillRect(marginX, rowY, contentWidth, 72);
+        ctx.strokeStyle = '#eaf1f4';
+        ctx.strokeRect(marginX, rowY, contentWidth, 72);
+
+        const itemNameY = drawWrappedText({
+          text: row.name,
+          x: colX[0] + 12,
+          y: rowY + 10,
+          maxWidth: colX[1] - colX[0] - 24,
+          lineHeight: 22,
+          font: '700 18px Arial',
+          color: ink,
+          maxLines: 1,
+        });
+        if (row.category) {
+          drawWrappedText({
+            text: row.category,
+            x: colX[0] + 12,
+            y: itemNameY + 2,
+            maxWidth: colX[1] - colX[0] - 24,
+            lineHeight: 20,
+            font: '400 16px Arial',
+            color: muted,
+            maxLines: 1,
+          });
+        }
+        drawWrappedText({
+          text: String(row.qty),
+          x: colX[2] - 12,
+          y: rowY + 22,
+          maxWidth: colX[2] - colX[1] - 24,
+          lineHeight: 20,
+          font: '600 18px Arial',
+          color: ink,
+          align: 'right',
+          maxLines: 1,
+        });
+        drawWrappedText({
+          text: formatCurrency(row.unitPrice),
+          x: colX[3] - 12,
+          y: rowY + 22,
+          maxWidth: colX[3] - colX[2] - 24,
+          lineHeight: 20,
+          font: '600 18px Arial',
+          color: ink,
+          align: 'right',
+          maxLines: 1,
+        });
+        drawWrappedText({
+          text: formatCurrency(row.lineTotal),
+          x: colX[4] - 12,
+          y: rowY + 22,
+          maxWidth: colX[4] - colX[3] - 24,
+          lineHeight: 20,
+          font: '700 18px Arial',
+          color: ink,
+          align: 'right',
+          maxLines: 1,
+        });
+        rowY += 72;
+      });
+    }
+
+    // totals box
+    const totalsY = rowY + 18;
+    const totalsW = 390;
+    const totalsX = marginX + contentWidth - totalsW;
+    const totalLines = [
+      showShippingLine,
+      financialSummary.adjustmentTotal > 0,
+      financialSummary.returnedTotal > 0,
+    ].filter(Boolean).length;
+    const totalsBoxH = 34 + (totalLines * 28) + 42;
+    ctx.fillStyle = panel;
+    ctx.strokeStyle = border;
+    ctx.strokeRect(totalsX, totalsY, totalsW, totalsBoxH);
+    ctx.fillRect(totalsX + 1, totalsY + 1, totalsW - 2, totalsBoxH - 2);
+    let ty = totalsY + 16;
+    const drawTotalRow = (label, value, isGrand = false) => {
+      drawWrappedText({
+        text: label,
+        x: totalsX + 16,
+        y: ty,
+        maxWidth: totalsW - 32,
+        lineHeight: 24,
+        font: isGrand ? '700 22px Arial' : '500 18px Arial',
+        color: isGrand ? primaryDark : ink,
+        maxLines: 1,
+      });
+      drawWrappedText({
+        text: value,
+        x: totalsX + totalsW - 16,
+        y: ty,
+        maxWidth: totalsW - 32,
+        lineHeight: 24,
+        font: isGrand ? '700 22px Arial' : '600 18px Arial',
+        color: isGrand ? primaryDark : ink,
+        align: 'right',
+        maxLines: 1,
+      });
+      ty += isGrand ? 34 : 28;
+    };
+
+    if (showShippingLine) drawTotalRow('Caj Pos', formatCurrency(shippingCharged));
+    if (financialSummary.adjustmentTotal > 0) drawTotalRow('Refund (Goodwill)', `- ${formatCurrency(financialSummary.adjustmentTotal)}`);
+    if (financialSummary.returnedTotal > 0) drawTotalRow('Return/Cancel', `- ${formatCurrency(financialSummary.returnedTotal)}`);
+    drawTotalRow('JUMLAH', formatCurrency(financialSummary.finalTotal || 0), true);
+
+    // QR
+    if (qrDataUrl) {
+      try {
+        const qrImage = await new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => resolve(img);
+          img.onerror = () => reject(new Error('QR image load failed'));
+          img.src = qrDataUrl;
+        });
+        const qrSize = 150;
+        const qrX = marginX + contentWidth - qrSize;
+        const qrY = totalsY + 170;
+        ctx.drawImage(qrImage, qrX, qrY, qrSize, qrSize);
+        drawWrappedText({
+          text: printSettings.qrLabel,
+          x: qrX + (qrSize / 2),
+          y: qrY + qrSize + 8,
+          maxWidth: qrSize,
+          lineHeight: 18,
+          font: '500 14px Arial',
+          color: muted,
+          align: 'center',
+          maxLines: 2,
+        });
+      } catch (error) {
+        console.warn('[InvoiceDetailsPage] A4 QR render skipped:', error);
+      }
+    }
+
+    // footer
+    const footerStartY = finalHeight - footerBlockH;
+    const footerTermsRaw = normalizeOptionalText(printSettings.footerNotes);
+    const footerTerms = (footerTermsRaw && /polisi\s+kedai/i.test(footerTermsRaw))
+      ? 'PRODUK DIJUAL ADALAH TERTAKLUK KEPADA POLISI PENIAGA.'
+      : (footerTermsRaw || 'PRODUK DIJUAL ADALAH TERTAKLUK KEPADA POLISI PENIAGA.');
+
+    if (invoice.notes) {
+      drawWrappedText({
+        text: `Nota: ${invoice.notes}`,
+        x: marginX,
+        y: footerStartY - 34,
+        maxWidth: contentWidth,
+        lineHeight: 20,
+        font: '400 16px Arial',
+        color: muted,
+        maxLines: 2,
+      });
+    }
+
+    ctx.strokeStyle = border;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(marginX, footerStartY);
+    ctx.lineTo(marginX + contentWidth, footerStartY);
+    ctx.stroke();
+
+    drawWrappedText({
+      text: `TERMA & SYARAT: ${footerTerms}`,
+      x: marginX,
+      y: footerStartY + 10,
+      maxWidth: contentWidth,
+      lineHeight: 17,
+      font: '400 13px Arial',
+      color: muted,
+      maxLines: 2,
+    });
+
+    ctx.strokeStyle = border;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(marginX, footerStartY + 36);
+    ctx.lineTo(marginX + contentWidth, footerStartY + 36);
+    ctx.stroke();
+
+    const leftFooterX = marginX;
+    const leftFooterMaxW = contentWidth - 280;
+    const innerFooterY = footerStartY + 52;
+    drawWrappedText({
+      text: 'Terima Kasih Mempercayai Kami',
+      x: leftFooterX,
+      y: innerFooterY,
+      maxWidth: leftFooterMaxW,
+      lineHeight: 24,
+      font: '500 21px Arial',
+      color: '#334155',
+      maxLines: 1,
+    });
+    drawWrappedText({
+      text: sellerName,
+      x: leftFooterX,
+      y: innerFooterY + 22,
+      maxWidth: leftFooterMaxW,
+      lineHeight: 22,
+      font: '700 16px Arial',
+      color: '#0f172a',
+      maxLines: 1,
+    });
+
+    const footerLines = [
+      sellerAddress ? { icon: 'map', text: sellerAddress } : null,
+      sellerPhone ? { icon: 'phone', text: sellerPhone } : null,
+      sellerEmail ? { icon: 'mail', text: sellerEmail } : null,
+      sellerWebsite ? { icon: 'globe', text: sellerWebsite } : null,
+      sellerFax ? { icon: 'card', text: `Faks: ${sellerFax}` } : null,
+    ].filter(Boolean);
+
+    let contactY = innerFooterY + 46;
+    footerLines.forEach((line) => {
+      contactY = drawIconTextLine({
+        icon: line.icon,
+        text: line.text,
+        x: leftFooterX,
+        y: contactY,
+        maxWidth: leftFooterMaxW,
+        font: '400 14px Arial',
+        color: muted,
+        lineHeight: 18,
+        maxLines: 2,
+      });
+    });
+
+    return await canvasToBlob(canvas);
   };
 
   const buildThermalReceiptHtml = (invoiceData, options = {}) => {
@@ -1194,11 +2614,10 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
             ${itemsHtml}
             <div class="divider"></div>
             <div class="totals">
-              <div class="row"><span>Subtotal</span><span>${escapeHtml(formatCurrency(invoiceData.subtotal || 0))}</span></div>
               ${showShippingLine ? `<div class="row"><span>Caj Pos</span><span>${escapeHtml(formatCurrency(shippingCharged))}</span></div>` : ''}
               ${financialSummary.adjustmentTotal > 0 ? `<div class="row"><span>Refund (Goodwill)</span><span>- ${escapeHtml(formatCurrency(financialSummary.adjustmentTotal))}</span></div>` : ''}
               ${financialSummary.returnedTotal > 0 ? `<div class="row"><span>Return/Cancel</span><span>- ${escapeHtml(formatCurrency(financialSummary.returnedTotal))}</span></div>` : ''}
-              <div class="row grand"><span>Final Dibayar</span><span>${escapeHtml(formatCurrency(financialSummary.finalTotal || 0))}</span></div>
+              <div class="row grand"><span>Jumlah</span><span>${escapeHtml(formatCurrency(financialSummary.finalTotal || 0))}</span></div>
             </div>
             ${showQr ? `
               <div class="divider"></div>
@@ -1347,11 +2766,10 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
         ${itemsHtml}
         <div class="divider"></div>
         <div class="totals">
-          <div class="row"><span>Subtotal</span><span>${escapeHtml(formatCurrency(invoiceData.subtotal || 0))}</span></div>
           ${showShippingLine ? `<div class="row"><span>Caj Pos</span><span>${escapeHtml(formatCurrency(shippingCharged))}</span></div>` : ''}
           ${financialSummary.adjustmentTotal > 0 ? `<div class="row"><span>Refund (Goodwill)</span><span>- ${escapeHtml(formatCurrency(financialSummary.adjustmentTotal))}</span></div>` : ''}
           ${financialSummary.returnedTotal > 0 ? `<div class="row"><span>Return/Cancel</span><span>- ${escapeHtml(formatCurrency(financialSummary.returnedTotal))}</span></div>` : ''}
-          <div class="row grand"><span>Final Dibayar</span><span>${escapeHtml(formatCurrency(financialSummary.finalTotal || 0))}</span></div>
+          <div class="row grand"><span>Jumlah</span><span>${escapeHtml(formatCurrency(financialSummary.finalTotal || 0))}</span></div>
         </div>
         ${showQr ? `
           <div class="divider"></div>
@@ -1367,8 +2785,10 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
     `;
   };
 
-  const handleExportThermal = async () => {
-    if (!invoice) return;
+  const generateThermalInvoiceBlob = async ({ showQrFallbackToast = true } = {}) => {
+    if (!invoice) {
+      throw new Error('Invois tidak dijumpai.');
+    }
 
     const exportWidth = 384;
     const scale = 2;
@@ -1388,14 +2808,33 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
       return new Blob([bytes], { type: mime });
     };
 
+    const isTaintedCanvasError = (error) => {
+      if (!error) return false;
+      const message = String(error?.message || '').toLowerCase();
+      return error?.name === 'SecurityError' || message.includes('tainted canvases');
+    };
+
     const canvasToBlob = async (canvas) => {
       if (canvas.toBlob) {
-        const blob = await new Promise((resolve) => {
-          canvas.toBlob((result) => resolve(result), 'image/png');
-        });
-        if (blob) return blob;
+        try {
+          const blob = await new Promise((resolve, reject) => {
+            try {
+              canvas.toBlob((result) => resolve(result), 'image/png');
+            } catch (error) {
+              reject(error);
+            }
+          });
+          if (blob) return blob;
+        } catch (error) {
+          throw error;
+        }
       }
-      return dataUrlToBlob(canvas.toDataURL('image/png'));
+
+      try {
+        return dataUrlToBlob(canvas.toDataURL('image/png'));
+      } catch (error) {
+        throw error;
+      }
     };
 
     const loadImage = async (src) => {
@@ -1516,7 +2955,6 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
       });
 
       addDivider();
-      addRow('Subtotal', formatCurrency(invoice.subtotal || 0));
       const shippingCharged = getSellerCollectedShippingCharged(invoice);
       const financialSummary = getInvoiceFinancialSummary(invoice);
       if (shippingCharged > 0) {
@@ -1528,7 +2966,7 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
       if (financialSummary.returnedTotal > 0) {
         addRow('Return/Cancel', `- ${formatCurrency(financialSummary.returnedTotal)}`);
       }
-      addRow('Final Dibayar', formatCurrency(financialSummary.finalTotal || 0), { size: 27, weight: 700, lineHeight: 36 });
+      addRow('Jumlah', formatCurrency(financialSummary.finalTotal || 0), { size: 27, weight: 700, lineHeight: 36 });
 
       if (qrDataUrlForExport) {
         addDivider();
@@ -1694,94 +3132,120 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
       }
     };
 
+    const buildFallbackMobileBlob = async (triggerError) => {
+      console.error('[InvoiceDetailsPage] Export fallback to safe mobile renderer:', triggerError);
+      if (showQrFallbackToast) {
+        toast.error('Imej luaran tidak dapat diexport automatik. Sistem guna mod fallback.');
+      }
+      let qrDataUrl = '';
+      if (printSettings.showQrPaperang) {
+        qrDataUrl = await getQrDataUrl(printSettings.qrUrl, 256);
+      }
+      return await buildMobileExportBlob(qrDataUrl);
+    };
+
+    if (isMobile) {
+      let qrDataUrl = '';
+      if (printSettings.showQrPaperang) {
+        qrDataUrl = await getQrDataUrl(printSettings.qrUrl, 256);
+      }
+      return await buildMobileExportBlob(qrDataUrl);
+    }
+
+    let qrSvgMarkup = '';
+    if (printSettings.showQrPaperang) {
+      qrSvgMarkup = await getQrSvgMarkup(printSettings.qrUrl, 256);
+    }
+
     try {
-      let blob;
-
-      if (isMobile) {
-        let qrDataUrl = '';
-        if (printSettings.showQrPaperang) {
-          qrDataUrl = await getQrDataUrl(printSettings.qrUrl, 256);
-        }
-        blob = await buildMobileExportBlob(qrDataUrl);
-      } else {
-        let qrSvgMarkup = '';
-        if (printSettings.showQrPaperang) {
-          qrSvgMarkup = await getQrSvgMarkup(printSettings.qrUrl, 256);
-        }
-
-        try {
-          blob = await buildExportBlob(qrSvgMarkup);
-        } catch (error) {
-          if (!qrSvgMarkup) throw error;
-          console.error('[InvoiceDetailsPage] Paperang export with QR failed, retrying without QR:', error);
-          blob = await buildExportBlob('');
-          toast.error('QR gagal dirender untuk Paperang. Export diteruskan tanpa QR.');
-        }
+      return await buildExportBlob(qrSvgMarkup);
+    } catch (error) {
+      if (isTaintedCanvasError(error)) {
+        return await buildFallbackMobileBlob(error);
       }
 
-      const fileName = `invoice-${invoice.invoice_number || invoice.id}.png`;
-      const blobUrl = URL.createObjectURL(blob);
+      if (!qrSvgMarkup) throw error;
+      console.error('[InvoiceDetailsPage] Paperang export with QR failed, retrying without QR:', error);
+      if (showQrFallbackToast) {
+        toast.error('QR gagal dirender untuk Paperang. Export diteruskan tanpa QR.');
+      }
+
+      try {
+        return await buildExportBlob('');
+      } catch (retryError) {
+        if (isTaintedCanvasError(retryError)) {
+          return await buildFallbackMobileBlob(retryError);
+        }
+        throw retryError;
+      }
+    }
+  };
+
+  const handleExportThermal = async () => {
+    if (!invoice) return;
+
+    const isMobile = typeof navigator !== 'undefined'
+      ? /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '')
+      : false;
+
+    try {
+      const blob = await generateThermalInvoiceBlob({ showQrFallbackToast: true });
+      const fileName = getInvoiceExportFileName(invoice);
+
       if (isMobile) {
-        const mobileFile = new File([blob], fileName, { type: 'image/png' });
         const canShareFile = typeof navigator !== 'undefined'
           && typeof navigator.share === 'function'
-          && (typeof navigator.canShare !== 'function' || navigator.canShare({ files: [mobileFile] }));
+          && typeof File !== 'undefined';
 
         if (canShareFile) {
-          try {
-            await navigator.share({
-              files: [mobileFile],
-              title: invoice.invoice_number || 'Resit',
-              text: 'Resit untuk dicetak',
-            });
-            URL.revokeObjectURL(blobUrl);
-            return;
-          } catch (error) {
-            if (error?.name === 'AbortError') {
-              URL.revokeObjectURL(blobUrl);
+          const mobileFile = new File([blob], fileName, { type: 'image/png' });
+          const canSharePayload = typeof navigator.canShare !== 'function'
+            || navigator.canShare({ files: [mobileFile] });
+
+          if (canSharePayload) {
+            try {
+              await navigator.share({
+                files: [mobileFile],
+                title: invoice.invoice_number || 'Resit',
+                text: 'Resit untuk dicetak',
+              });
               return;
+            } catch (error) {
+              if (error?.name === 'AbortError') return;
+              console.error('[InvoiceDetailsPage] Mobile share failed, fallback to download:', error);
             }
-            console.error('[InvoiceDetailsPage] Mobile share failed, fallback to download:', error);
           }
         }
 
-        const link = document.createElement('a');
-        link.href = blobUrl;
-        link.download = fileName;
-        link.rel = 'noopener noreferrer';
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+        downloadBlobFile(blob, fileName);
         return;
       }
 
-      const file = new File([blob], fileName, { type: 'image/png' });
-      if (typeof navigator !== 'undefined' && navigator.share) {
-        try {
-          await navigator.share({
-            files: [file],
-            title: invoice.invoice_number || 'Resit',
-            text: 'Resit untuk dicetak',
-          });
-          URL.revokeObjectURL(blobUrl);
-          return;
-        } catch (error) {
-          if (error?.name === 'AbortError') {
-            URL.revokeObjectURL(blobUrl);
+      const canShareOnDesktop = typeof navigator !== 'undefined'
+        && typeof navigator.share === 'function'
+        && typeof File !== 'undefined';
+
+      if (canShareOnDesktop) {
+        const file = new File([blob], fileName, { type: 'image/png' });
+        const canSharePayload = typeof navigator.canShare !== 'function'
+          || navigator.canShare({ files: [file] });
+
+        if (canSharePayload) {
+          try {
+            await navigator.share({
+              files: [file],
+              title: invoice.invoice_number || 'Resit',
+              text: 'Resit untuk dicetak',
+            });
             return;
+          } catch (error) {
+            if (error?.name === 'AbortError') return;
+            console.error('[InvoiceDetailsPage] Share file failed:', error);
           }
-          console.error('[InvoiceDetailsPage] Share file failed:', error);
         }
       }
 
-      const link = document.createElement('a');
-      link.href = blobUrl;
-      link.download = fileName;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(blobUrl);
+      downloadBlobFile(blob, fileName);
     } catch (error) {
       console.error('[InvoiceDetailsPage] Export Paperang failed:', error);
       toast.error('Gagal export resit Paperang');
@@ -2332,6 +3796,15 @@ const handleDeleteInvoice = async () => {    try {      await deleteInvoice.muta
           >
             <Download className="h-5 w-5" />
             Cetak
+          </Button>
+          <Button
+            variant="outline"
+            size="default"
+            onClick={handleSendInvoiceWhatsApp}
+            className="gap-2 flex-1 sm:flex-initial h-10"
+          >
+            <Send className="h-5 w-5" />
+            Send WhatsApp
           </Button>
           <Button
             variant="outline"

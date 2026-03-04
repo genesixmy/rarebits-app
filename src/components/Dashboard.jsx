@@ -69,7 +69,8 @@ import {
 
 const getInitialDateRange = () => {
   const today = new Date();
-  const firstDayOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+  const rollingStartDate = new Date(today);
+  rollingStartDate.setDate(today.getDate() - 29);
 
   const formatDate = (date) => {
     const d = new Date(date);
@@ -84,7 +85,7 @@ const getInitialDateRange = () => {
   }
 
   return {
-    startDate: formatDate(firstDayOfMonth),
+    startDate: formatDate(rollingStartDate),
     endDate: formatDate(today)
   };
 };
