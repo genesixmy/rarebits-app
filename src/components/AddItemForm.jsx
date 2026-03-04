@@ -497,8 +497,16 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
 
 
   const platformOptions = [
-    'Carousell', 'Shopee', 'TikTok Shop', 'Lazada', 
-    'Facebook Marketplace', 'Instagram', 'Mudah.my'
+    'Carousell',
+    'Shopee',
+    'TikTok Shop',
+    'Lazada',
+    'Facebook Marketplace',
+    'Instagram',
+    'Mudah.my',
+    'Website',
+    'Event',
+    'Kedai/Stor',
   ];
 
   const handlePlatformChange = (platform, checked) => {

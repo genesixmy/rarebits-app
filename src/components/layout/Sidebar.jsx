@@ -2,7 +2,7 @@ import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { Home, Package, Receipt, Settings, Users, Wallet, FileText, Link2, Bell, Paperclip } from 'lucide-react';
+import { Home, Package, Receipt, Settings, Users, Wallet, FileText, Link2, Bell, Paperclip, BookOpen } from 'lucide-react';
 
 const Sidebar = ({ isSidebarOpen, setSidebarOpen }) => {
   const location = useLocation();
@@ -92,6 +92,25 @@ const Sidebar = ({ isSidebarOpen, setSidebarOpen }) => {
                 )}
               </div>
             ))}
+
+            <div className="mt-8 border-t border-border/70 pt-5">
+              <Button
+                asChild
+                variant="ghost"
+                onClick={() => setSidebarOpen(false)}
+                className={cn(
+                  "h-12 w-full justify-start gap-3 rounded-lg border border-dashed text-base transition-colors",
+                  isActive('/knowledge-base')
+                    ? "border-primary/30 bg-primary/10 font-semibold text-primary hover:bg-primary/15 hover:text-cyan-700"
+                    : "border-border/80 text-muted-foreground hover:border-primary/40 hover:bg-white hover:text-primary"
+                )}
+              >
+                <Link to="/knowledge-base">
+                  <BookOpen className="w-5 h-5" />
+                  Knowledge Base
+                </Link>
+              </Button>
+            </div>
           </nav>
           <div className="p-4 text-center text-xs text-muted-foreground">
             <p className="font-semibold text-sm text-foreground">RareBits Bisness</p>

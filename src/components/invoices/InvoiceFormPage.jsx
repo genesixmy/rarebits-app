@@ -160,6 +160,22 @@ const getReservationSummaryByCustomer = (item, clientNameById) => {
 
 const formatRM = (value) => `RM ${formatCurrency(value)}`;
 
+const DEFAULT_INVOICE_PLATFORM_OPTIONS = [
+  'Manual',
+  'Carousell',
+  'Shopee',
+  'TikTok Shop',
+  'Lazada',
+  'Facebook Marketplace',
+  'Instagram',
+  'Mudah.my',
+  'Website',
+  'Event',
+  'Kedai/Stor',
+];
+
+const normalizePlatformLabel = (value) => String(value || '').trim();
+
 const normalizeInvoiceFeeSnapshot = (snapshot, baseAmounts) => {
   const feeType = normalizePlatformFeeType(snapshot?.fee_type);
   const appliesTo = normalizePlatformFeeAppliesTo(snapshot?.applies_to);
@@ -217,6 +233,7 @@ const InvoiceFormPage = () => {
   const [courierPaymentMode, setCourierPaymentMode] = useState(COURIER_PAYMENT_MODES.SELLER);
   const [shippingChargedInput, setShippingChargedInput] = useState('0.00');
   const [shippingChargedError, setShippingChargedError] = useState('');
+  const [invoicePlatform, setInvoicePlatform] = useState('Manual');
   const [selectedItems, setSelectedItems] = useState([]);
   const [manualItems, setManualItems] = useState([]);
   const [showItemSelector, setShowItemSelector] = useState(false);
@@ -408,6 +425,7 @@ const InvoiceFormPage = () => {
       setCourierPaymentMode(resolveCourierPaymentModeForInvoice(existingInvoice));
       setShippingChargedInput(roundCurrencyAmount(existingInvoice.shipping_charged || 0).toFixed(2));
       setShippingChargedError('');
+      setInvoicePlatform(normalizePlatformLabel(existingInvoice.platform) || 'Manual');
       const existingFees = Array.isArray(existingInvoice.invoice_fees)
         ? [...existingInvoice.invoice_fees].sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0))
         : [];
@@ -810,10 +828,33 @@ const InvoiceFormPage = () => {
     ),
     [feeBreakdownRows]
   );
+  const invoicePlatformOptions = useMemo(() => {
+    const options = [...DEFAULT_INVOICE_PLATFORM_OPTIONS];
+    const keySet = new Set(options.map((entry) => entry.toLowerCase()));
+
+    const addOption = (rawValue) => {
+      const normalized = normalizePlatformLabel(rawValue);
+      if (!normalized) return;
+      const key = normalized.toLowerCase();
+      if (keySet.has(key)) return;
+      keySet.add(key);
+      options.push(normalized);
+    };
+
+    selectedItems.forEach((item) => {
+      const soldPlatforms = Array.isArray(item?.sold_platforms) ? item.sold_platforms : [];
+      const listingPlatforms = Array.isArray(item?.platforms) ? item.platforms : [];
+      const source = soldPlatforms.length > 0 ? soldPlatforms : listingPlatforms;
+      source.forEach(addOption);
+    });
+
+    addOption(invoicePlatform);
+    return options;
+  }, [selectedItems, invoicePlatform]);
   const platformLabel = useMemo(() => {
-    const current = String(existingInvoice?.platform || '').trim();
+    const current = normalizePlatformLabel(invoicePlatform);
     return current || 'Manual';
-  }, [existingInvoice?.platform]);
+  }, [invoicePlatform]);
   const grossProfitPreview = subtotal - totalCostPreview;
   const netProfitPreview = grossProfitPreview - platformFeeTotal;
 
@@ -2296,6 +2337,29 @@ const InvoiceFormPage = () => {
                 placeholder="Catatan atau keterangan tambahan..."
                 className="min-h-[100px] w-full rounded-lg border p-3 text-sm"
               />
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Platform Jualan Invois</CardTitle>
+              <CardDescription>Digunakan untuk pecahan graf platform di Dashboard.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              <Select
+                value={platformLabel}
+                onChange={(event) => setInvoicePlatform(event.target.value)}
+                disabled={isSettledInvoice}
+              >
+                {invoicePlatformOptions.map((platformOption) => (
+                  <option key={platformOption} value={platformOption}>
+                    {platformOption}
+                  </option>
+                ))}
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Nilai ini tidak mengubah platform item asal, hanya label platform untuk invois ini.
+              </p>
             </CardContent>
           </Card>
 

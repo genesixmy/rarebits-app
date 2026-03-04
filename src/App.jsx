@@ -21,6 +21,7 @@ import InvoiceDetailsPage from '@/components/invoices/InvoiceDetailsPage';
 import InvoiceShareRedirectPage from '@/components/invoices/InvoiceShareRedirectPage';
 import CatalogCreatePage from '@/components/catalogs/CatalogCreatePage';
 import CatalogPublicPage from '@/components/catalogs/CatalogPublicPage';
+import KnowledgeBasePage from '@/components/KnowledgeBasePage';
 import Layout from '@/components/layout/Layout';
 import { Loader2, Search } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -224,6 +225,7 @@ function App() {
   const isPublicCatalogRoute = location.pathname.startsWith('/c/') || location.pathname.startsWith('/cat/');
   const isPublicInvoiceShareRoute = location.pathname.startsWith('/i/');
   const isPublicRoute = isPublicCatalogRoute || isPublicInvoiceShareRoute;
+  const isKnowledgeBaseRoute = location.pathname === '/knowledge-base';
 
   // State for UI control
   const [searchTerm, setSearchTerm] = useState('');
@@ -1278,7 +1280,7 @@ function App() {
   const pageTitle = {
     '/': 'Papan Pemuka', '/inventory': 'Inventori', '/sales': 'Jualan',
     '/invoices': 'Invois', '/catalogs': 'Katalog', '/inventory/catalogs': 'Katalog',
-    '/clients': 'Pelanggan', '/wallet': 'Wallet', '/wallet/receipts': 'Resit Wallet', '/settings': 'Tetapan', '/reminders': 'Reminder'
+    '/clients': 'Pelanggan', '/wallet': 'Wallet', '/wallet/receipts': 'Resit Wallet', '/knowledge-base': 'Knowledge Base', '/settings': 'Tetapan', '/reminders': 'Reminder'
   }[location.pathname] || 'Papan Pemuka';
 
   return (
@@ -1289,9 +1291,9 @@ function App() {
         <AnimatePresence mode="wait">
           <motion.div
             key={location.pathname}
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -20 }}
+            initial={isKnowledgeBaseRoute ? { opacity: 0 } : { opacity: 0, y: 20 }}
+            animate={isKnowledgeBaseRoute ? { opacity: 1 } : { opacity: 1, y: 0 }}
+            exit={isKnowledgeBaseRoute ? { opacity: 0 } : { opacity: 0, y: -20 }}
             transition={{ duration: 0.2 }}
           >
             <Routes>
@@ -1417,6 +1419,7 @@ function App() {
               <Route path="/wallet" element={<WalletPage />} />
               <Route path="/wallet/account/:accountId" element={<WalletAccountPage />} />
               <Route path="/wallet/receipts" element={<WalletReceiptsPage />} />
+              <Route path="/knowledge-base" element={<KnowledgeBasePage />} />
               <Route path="/settings" element={<SettingsPage user={user} categories={categories} onUpdateCategories={() => queryClient.invalidateQueries({ queryKey: ['categories', user.id] })} onUpdateProfile={() => queryClient.invalidateQueries({ queryKey: ['profile', user.id] })} />} />
             </Routes>
           </motion.div>

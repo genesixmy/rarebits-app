@@ -21,7 +21,7 @@ const Layout = ({ user, profile, onSignOut, onAddItem, children }) => {
           onAddItem={onAddItem}
           onSignOut={onSignOut}
         />
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
+        <div className="flex-1 p-4 sm:p-6 lg:p-8">
           {children}
         </div>
       </main>
