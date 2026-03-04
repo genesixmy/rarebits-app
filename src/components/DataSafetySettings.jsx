@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Archive, Download, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Checkbox } from '@/components/ui/checkbox';
+import { SwitchToggle } from '@/components/ui/switch-toggle';
 import { useToast } from '@/components/ui/use-toast';
 import { supabase } from '@/lib/customSupabaseClient';
 import RestorePreviewSection from '@/components/RestorePreviewSection';
@@ -247,7 +247,7 @@ const DataSafetySettings = () => {
 
         <div className="rounded-xl border border-border/70 bg-background px-4 py-3">
           <div className="flex items-start gap-3">
-            <Checkbox
+            <SwitchToggle
               id="include-media-backup"
               checked={includeMedia}
               disabled={isDownloading}

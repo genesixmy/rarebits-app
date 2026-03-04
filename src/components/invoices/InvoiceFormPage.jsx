@@ -13,7 +13,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
-import { Checkbox } from '@/components/ui/checkbox';
+import { SwitchToggle } from '@/components/ui/switch-toggle';
 import { Trash2, Plus, X, ChevronLeft, ChevronDown, ChevronUp, Star } from 'lucide-react';
 import { format } from 'date-fns';
 import { ms } from 'date-fns/locale';
@@ -2327,14 +2327,8 @@ const InvoiceFormPage = () => {
                     return (
                       <label
                         key={rule.id}
-                        className={`flex items-start gap-3 rounded-lg border p-3 ${checked ? 'border-primary/40 bg-primary/5' : 'border-border/70'} ${isSettledInvoice ? 'cursor-not-allowed opacity-70' : 'cursor-pointer'}`}
+                        className={`flex items-start justify-between gap-3 rounded-lg border p-3 ${checked ? 'border-primary/40 bg-primary/5' : 'border-border/70'} ${isSettledInvoice ? 'cursor-not-allowed opacity-70' : 'cursor-pointer'}`}
                       >
-                        <Checkbox
-                          checked={checked}
-                          onCheckedChange={(next) => handleFeeRuleToggle(rule.id, next === true)}
-                          disabled={isSettledInvoice}
-                          className="mt-0.5"
-                        />
                         <span className="min-w-0">
                           <span className="block text-sm font-medium break-words">
                             {rule.name}
@@ -2344,6 +2338,13 @@ const InvoiceFormPage = () => {
                             {formatPlatformFeeRuleLabel(rule)} | {getPlatformFeeAppliesToLabel(rule.applies_to)}
                           </span>
                         </span>
+                        <SwitchToggle
+                          id={`fee-rule-${rule.id}`}
+                          checked={checked}
+                          onCheckedChange={(next) => handleFeeRuleToggle(rule.id, next)}
+                          disabled={isSettledInvoice}
+                          className="mt-0.5 shrink-0"
+                        />
                       </label>
                     );
                   })}

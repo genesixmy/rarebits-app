@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Loader2, Plus, MoreVertical, Edit, Trash2, Wallet as WalletIcon, ArrowRightLeft, Repeat, Briefcase, User, BarChart2, RefreshCw, Paperclip } from 'lucide-react';
+import { Loader2, Plus, MoreVertical, Edit, Trash2, Wallet as WalletIcon, ArrowRightLeft, Repeat, Briefcase, User, BarChart2, RefreshCw, Paperclip, Download } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
 import { supabase } from '@/lib/customSupabaseClient';
 import { useAuth } from '@/contexts/SupabaseAuthContext';
@@ -106,6 +106,17 @@ const getWalletPreviewTheme = (index) => (
   WALLET_PREVIEW_THEMES[index % WALLET_PREVIEW_THEMES.length]
 );
 
+const getReceiptPreviewKind = ({ receiptName, receiptMime }) => {
+  const mime = String(receiptMime || '').toLowerCase();
+  if (mime.startsWith('image/')) return 'image';
+  if (mime.includes('pdf')) return 'pdf';
+
+  const lowerName = String(receiptName || '').toLowerCase();
+  if (lowerName.endsWith('.pdf')) return 'pdf';
+  if (/\.(png|jpe?g|webp|gif|bmp|svg)$/.test(lowerName)) return 'image';
+  return 'unsupported';
+};
+
 const WalletPage = () => {
   const { user } = useAuth();
   const { toast } = useToast();
@@ -124,6 +135,12 @@ const WalletPage = () => {
   const [walletSort, setWalletSort] = useState('newest');
   const [displayLimit, setDisplayLimit] = useState(20);
   const [receiptFilter, setReceiptFilter] = useState('all');
+  const [isReceiptPreviewOpen, setIsReceiptPreviewOpen] = useState(false);
+  const [receiptPreviewTransaction, setReceiptPreviewTransaction] = useState(null);
+  const [receiptPreviewUrl, setReceiptPreviewUrl] = useState('');
+  const [receiptPreviewKind, setReceiptPreviewKind] = useState('unsupported');
+  const [receiptPreviewLoading, setReceiptPreviewLoading] = useState(false);
+  const [receiptPreviewError, setReceiptPreviewError] = useState('');
   const tabFilter = searchParams.get('tab') === 'expenses' ? 'expenses' : '';
 
   const { data: allWallets = [], isLoading: isLoadingWallets, isError: isWalletsError, refetch: refetchWallets, isRefetching: isRefetchingWallets } = useQuery({
@@ -231,18 +248,29 @@ const WalletPage = () => {
 
   const handleViewReceipt = async (transaction) => {
     if (!transaction?.receipt_path) return;
+
+    setIsReceiptPreviewOpen(true);
+    setReceiptPreviewTransaction(transaction);
+    setReceiptPreviewUrl('');
+    setReceiptPreviewError('');
+    setReceiptPreviewKind(getReceiptPreviewKind({
+      receiptName: transaction?.receipt_name,
+      receiptMime: transaction?.receipt_mime,
+    }));
+    setReceiptPreviewLoading(true);
+
     try {
       const signedUrl = await createTransactionReceiptSignedUrl({
         supabase,
         receiptPath: transaction.receipt_path,
+        expiresInSec: 900,
       });
-      const popup = window.open(signedUrl, '_blank', 'noopener,noreferrer');
-      if (!popup) {
-        toast({ title: 'Popup disekat', description: 'Benarkan popup untuk melihat resit.', variant: 'destructive' });
-      }
+      setReceiptPreviewUrl(signedUrl);
     } catch (error) {
-      console.error('[WalletPage] Failed to open receipt:', error);
-      toast({ title: 'Gagal membuka resit', description: error.message, variant: 'destructive' });
+      console.error('[WalletPage] Failed to prepare receipt preview:', error);
+      setReceiptPreviewError(error.message || 'Gagal menyediakan pratonton resit.');
+    } finally {
+      setReceiptPreviewLoading(false);
     }
   };
 
@@ -264,6 +292,17 @@ const WalletPage = () => {
     } catch (error) {
       console.error('[WalletPage] Failed to download receipt:', error);
       toast({ title: 'Gagal memuat turun resit', description: error.message, variant: 'destructive' });
+    }
+  };
+
+  const handleReceiptPreviewDialogChange = (nextOpen) => {
+    setIsReceiptPreviewOpen(nextOpen);
+    if (!nextOpen) {
+      setReceiptPreviewTransaction(null);
+      setReceiptPreviewUrl('');
+      setReceiptPreviewKind('unsupported');
+      setReceiptPreviewError('');
+      setReceiptPreviewLoading(false);
     }
   };
 
@@ -903,6 +942,69 @@ const WalletPage = () => {
               {deleteTransactionMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
               {isTransferLegacyType(deletingTransaction?.type) ? 'Padam Pemindahan' : 'Padam'}
             </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={isReceiptPreviewOpen} onOpenChange={handleReceiptPreviewDialogChange}>
+        <AlertDialogContent className="max-h-[92vh] w-[96vw] max-w-5xl gap-0 overflow-hidden p-0">
+          <AlertDialogHeader className="border-b px-4 py-3 text-left">
+            <AlertDialogTitle className="text-base">Pratonton Resit</AlertDialogTitle>
+            <AlertDialogDescription className="truncate text-xs">
+              {receiptPreviewTransaction?.receipt_name || receiptPreviewTransaction?.description || 'Lampiran transaksi'}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          <div className="h-[72vh] overflow-auto bg-slate-100 p-3">
+            {receiptPreviewLoading ? (
+              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Menyediakan pratonton...
+              </div>
+            ) : receiptPreviewError ? (
+              <div className="flex h-full items-center justify-center text-center text-sm text-destructive">
+                {receiptPreviewError}
+              </div>
+            ) : !receiptPreviewUrl ? (
+              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                Tiada pautan pratonton tersedia.
+              </div>
+            ) : receiptPreviewKind === 'pdf' ? (
+              <iframe
+                title={`Pratonton ${receiptPreviewTransaction?.receipt_name || 'resit'}`}
+                src={receiptPreviewUrl}
+                className="h-full w-full rounded-md border bg-white"
+              />
+            ) : receiptPreviewKind === 'image' ? (
+              <img
+                src={receiptPreviewUrl}
+                alt={receiptPreviewTransaction?.receipt_name || 'Resit'}
+                className="mx-auto max-h-full w-auto rounded-md border bg-white shadow-sm"
+              />
+            ) : (
+              <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-sm text-muted-foreground">
+                <p>Format ini belum ada pratonton dalam modal.</p>
+                <Button
+                  size="sm"
+                  onClick={() => receiptPreviewTransaction && handleDownloadReceipt(receiptPreviewTransaction)}
+                >
+                  <Download className="mr-2 h-4 w-4" />
+                  Muat Turun Fail
+                </Button>
+              </div>
+            )}
+          </div>
+
+          <AlertDialogFooter className="border-t px-4 py-3">
+            <Button
+              size="sm"
+              onClick={() => receiptPreviewTransaction && handleDownloadReceipt(receiptPreviewTransaction)}
+              disabled={!receiptPreviewTransaction}
+            >
+              <Download className="mr-2 h-4 w-4" />
+              Muat Turun
+            </Button>
+            <AlertDialogCancel className="mt-0">Tutup</AlertDialogCancel>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

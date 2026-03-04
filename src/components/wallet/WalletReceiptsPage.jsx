@@ -13,6 +13,14 @@ import { useAuth } from '@/contexts/SupabaseAuthContext';
 import { useToast } from '@/components/ui/use-toast';
 import { supabase } from '@/lib/customSupabaseClient';
 import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import {
   createTransactionReceiptSignedUrl,
   formatFileSize,
 } from '@/lib/walletTransactionReceipts';
@@ -114,6 +122,17 @@ const toCsv = (rows) => rows
     .join(','))
   .join('\n');
 
+const getPreviewKind = ({ receiptName, receiptMime }) => {
+  const mime = String(receiptMime || '').toLowerCase();
+  if (mime.startsWith('image/')) return 'image';
+  if (mime.includes('pdf')) return 'pdf';
+
+  const lowerName = String(receiptName || '').toLowerCase();
+  if (lowerName.endsWith('.pdf')) return 'pdf';
+  if (/\.(png|jpe?g|webp|gif|bmp|svg)$/.test(lowerName)) return 'image';
+  return 'unsupported';
+};
+
 const WalletReceiptsPage = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
@@ -124,6 +143,12 @@ const WalletReceiptsPage = () => {
   const [filterDateFrom, setFilterDateFrom] = useState('');
   const [filterDateTo, setFilterDateTo] = useState('');
   const [isDownloadingFiltered, setIsDownloadingFiltered] = useState(false);
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+  const [previewTransaction, setPreviewTransaction] = useState(null);
+  const [previewUrl, setPreviewUrl] = useState('');
+  const [previewKind, setPreviewKind] = useState('unsupported');
+  const [isPreviewLoading, setIsPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState('');
 
   const {
     data: receiptTransactions = [],
@@ -185,28 +210,69 @@ const WalletReceiptsPage = () => {
     setFilterDateTo('');
   };
 
-  const openReceipt = async (transaction, download = false) => {
+  const handleViewReceipt = async (transaction) => {
+    if (!transaction?.receipt_path) return;
+
+    setIsPreviewOpen(true);
+    setPreviewTransaction(transaction);
+    setPreviewUrl('');
+    setPreviewError('');
+    setPreviewKind(getPreviewKind({
+      receiptName: transaction?.receipt_name,
+      receiptMime: transaction?.receipt_mime,
+    }));
+    setIsPreviewLoading(true);
+
     try {
       const signedUrl = await createTransactionReceiptSignedUrl({
         supabase,
         receiptPath: transaction.receipt_path,
-        downloadFileName: download ? (transaction.receipt_name || `receipt-${transaction.id}`) : null,
+        expiresInSec: 900,
+      });
+      setPreviewUrl(signedUrl);
+    } catch (viewError) {
+      console.error('[WalletReceiptsPage] Failed to prepare receipt preview:', viewError);
+      setPreviewError(viewError.message || 'Gagal menyediakan pratonton resit.');
+    } finally {
+      setIsPreviewLoading(false);
+    }
+  };
+
+  const handleDownloadReceipt = async (transaction) => {
+    if (!transaction?.receipt_path) return;
+
+    try {
+      const signedUrl = await createTransactionReceiptSignedUrl({
+        supabase,
+        receiptPath: transaction.receipt_path,
+        downloadFileName: transaction.receipt_name || `receipt-${transaction.id}`,
       });
       const popup = window.open(signedUrl, '_blank', 'noopener,noreferrer');
       if (!popup) {
         toast({
           title: 'Popup disekat',
-          description: 'Benarkan popup untuk melihat atau muat turun resit.',
+          description: 'Benarkan popup untuk muat turun resit.',
           variant: 'destructive',
         });
       }
-    } catch (openError) {
-      console.error('[WalletReceiptsPage] Failed to open receipt:', openError);
+    } catch (downloadError) {
+      console.error('[WalletReceiptsPage] Failed to download receipt:', downloadError);
       toast({
-        title: download ? 'Gagal muat turun resit' : 'Gagal buka resit',
-        description: openError.message,
+        title: 'Gagal muat turun resit',
+        description: downloadError.message,
         variant: 'destructive',
       });
+    }
+  };
+
+  const handlePreviewDialogChange = (nextOpen) => {
+    setIsPreviewOpen(nextOpen);
+    if (!nextOpen) {
+      setPreviewTransaction(null);
+      setPreviewUrl('');
+      setPreviewKind('unsupported');
+      setPreviewError('');
+      setIsPreviewLoading(false);
     }
   };
 
@@ -438,11 +504,11 @@ const WalletReceiptsPage = () => {
                         <Wallet className="mr-2 h-4 w-4" />
                         Buka Wallet
                       </Button>
-                      <Button size="sm" variant="outline" onClick={() => openReceipt(tx, false)}>
+                      <Button size="sm" variant="outline" onClick={() => handleViewReceipt(tx)}>
                         <Eye className="mr-2 h-4 w-4" />
                         Lihat
                       </Button>
-                      <Button size="sm" onClick={() => openReceipt(tx, true)}>
+                      <Button size="sm" onClick={() => handleDownloadReceipt(tx)}>
                         <Download className="mr-2 h-4 w-4" />
                         Muat Turun
                       </Button>
@@ -454,6 +520,66 @@ const WalletReceiptsPage = () => {
           )}
         </CardContent>
       </Card>
+
+      <AlertDialog open={isPreviewOpen} onOpenChange={handlePreviewDialogChange}>
+        <AlertDialogContent className="max-h-[92vh] w-[96vw] max-w-5xl gap-0 overflow-hidden p-0">
+          <AlertDialogHeader className="border-b px-4 py-3 text-left">
+            <AlertDialogTitle className="text-base">Pratonton Resit</AlertDialogTitle>
+            <AlertDialogDescription className="truncate text-xs">
+              {previewTransaction?.receipt_name || previewTransaction?.description || 'Lampiran transaksi'}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          <div className="h-[72vh] overflow-auto bg-slate-100 p-3">
+            {isPreviewLoading ? (
+              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Menyediakan pratonton...
+              </div>
+            ) : previewError ? (
+              <div className="flex h-full items-center justify-center text-center text-sm text-destructive">
+                {previewError}
+              </div>
+            ) : !previewUrl ? (
+              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                Tiada pautan pratonton tersedia.
+              </div>
+            ) : previewKind === 'pdf' ? (
+              <iframe
+                title={`Pratonton ${previewTransaction?.receipt_name || 'resit'}`}
+                src={previewUrl}
+                className="h-full w-full rounded-md border bg-white"
+              />
+            ) : previewKind === 'image' ? (
+              <img
+                src={previewUrl}
+                alt={previewTransaction?.receipt_name || 'Resit'}
+                className="mx-auto max-h-full w-auto rounded-md border bg-white shadow-sm"
+              />
+            ) : (
+              <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-sm text-muted-foreground">
+                <p>Format ini belum ada pratonton dalam modal.</p>
+                <Button size="sm" onClick={() => previewTransaction && handleDownloadReceipt(previewTransaction)}>
+                  <Download className="mr-2 h-4 w-4" />
+                  Muat Turun Fail
+                </Button>
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
+            <Button
+              size="sm"
+              onClick={() => previewTransaction && handleDownloadReceipt(previewTransaction)}
+              disabled={!previewTransaction}
+            >
+              <Download className="mr-2 h-4 w-4" />
+              Muat Turun
+            </Button>
+            <AlertDialogCancel className="mt-0">Tutup</AlertDialogCancel>
+          </div>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 };

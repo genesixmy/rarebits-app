@@ -5,7 +5,7 @@ import { useToast } from '@/components/ui/use-toast';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
-import { Checkbox } from '@/components/ui/checkbox';
+import { SwitchToggle } from '@/components/ui/switch-toggle';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Loader2, Save, Upload, Trash2 } from 'lucide-react';
 import { DEFAULT_INVOICE_SETTINGS, useInvoiceSettings } from '@/hooks/useInvoiceSettings';
@@ -592,7 +592,7 @@ const InvoiceSettings = ({ userId }) => {
           </div>
 
           <div className="flex items-start gap-3 rounded-lg border p-3">
-            <Checkbox
+            <SwitchToggle
               id="show-marketplace-links"
               checked={formData.show_marketplace_links}
               onCheckedChange={(checked) => setField('show_marketplace_links', checked === true)}
@@ -619,7 +619,7 @@ const InvoiceSettings = ({ userId }) => {
               <p className="text-xs text-muted-foreground">Tetapan khusus untuk cetakan invois A4.</p>
             </div>
             <div className="flex items-start gap-3 rounded-lg border p-3">
-              <Checkbox
+              <SwitchToggle
                 id="show-logo-a4"
                 checked={formData.show_logo_a4}
                 onCheckedChange={(checked) => setField('show_logo_a4', checked === true)}
@@ -633,7 +633,7 @@ const InvoiceSettings = ({ userId }) => {
             </div>
 
             <div className="flex items-start gap-3 rounded-lg border p-3">
-              <Checkbox
+              <SwitchToggle
                 id="show-generated-by-a4"
                 checked={formData.show_generated_by_a4}
                 onCheckedChange={(checked) => setField('show_generated_by_a4', checked === true)}
@@ -646,7 +646,7 @@ const InvoiceSettings = ({ userId }) => {
             </div>
 
             <div className="flex items-start gap-3 rounded-lg border p-3">
-              <Checkbox
+              <SwitchToggle
                 id="qr-enabled-a4"
                 checked={formData.qr_enabled_a4}
                 onCheckedChange={(checked) => setField('qr_enabled_a4', checked === true)}
@@ -667,7 +667,7 @@ const InvoiceSettings = ({ userId }) => {
             </div>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <div className="flex items-start gap-3 rounded-lg border p-3">
-                <Checkbox
+                <SwitchToggle
                   id="show-logo-thermal"
                   checked={formData.show_logo_thermal}
                   onCheckedChange={(checked) => setField('show_logo_thermal', checked === true)}
@@ -677,7 +677,7 @@ const InvoiceSettings = ({ userId }) => {
                 </label>
               </div>
               <div className="flex items-start gap-3 rounded-lg border p-3">
-                <Checkbox
+                <SwitchToggle
                   id="qr-enabled-thermal"
                   checked={formData.qr_enabled_thermal}
                   onCheckedChange={(checked) => setField('qr_enabled_thermal', checked === true)}
@@ -687,7 +687,7 @@ const InvoiceSettings = ({ userId }) => {
                 </label>
               </div>
               <div className="flex items-start gap-3 rounded-lg border p-3">
-                <Checkbox
+                <SwitchToggle
                   id="thermal-show-address"
                   checked={formData.thermal_show_address}
                   onCheckedChange={(checked) => setField('thermal_show_address', checked === true)}
@@ -697,7 +697,7 @@ const InvoiceSettings = ({ userId }) => {
                 </label>
               </div>
               <div className="flex items-start gap-3 rounded-lg border p-3">
-                <Checkbox
+                <SwitchToggle
                   id="thermal-show-phone"
                   checked={formData.thermal_show_phone}
                   onCheckedChange={(checked) => setField('thermal_show_phone', checked === true)}
@@ -707,7 +707,7 @@ const InvoiceSettings = ({ userId }) => {
                 </label>
               </div>
               <div className="flex items-start gap-3 rounded-lg border p-3">
-                <Checkbox
+                <SwitchToggle
                   id="thermal-show-email"
                   checked={formData.thermal_show_email}
                   onCheckedChange={(checked) => setField('thermal_show_email', checked === true)}
@@ -717,7 +717,7 @@ const InvoiceSettings = ({ userId }) => {
                 </label>
               </div>
               <div className="flex items-start gap-3 rounded-lg border p-3">
-                <Checkbox
+                <SwitchToggle
                   id="thermal-show-website"
                   checked={formData.thermal_show_website}
                   onCheckedChange={(checked) => setField('thermal_show_website', checked === true)}
@@ -727,7 +727,7 @@ const InvoiceSettings = ({ userId }) => {
                 </label>
               </div>
               <div className="flex items-start gap-3 rounded-lg border p-3">
-                <Checkbox
+                <SwitchToggle
                   id="show-generated-by-thermal"
                   checked={formData.show_generated_by_thermal}
                   onCheckedChange={(checked) => setField('show_generated_by_thermal', checked === true)}
@@ -746,7 +746,7 @@ const InvoiceSettings = ({ userId }) => {
             </div>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <div className="flex items-start gap-3 rounded-lg border p-3">
-                <Checkbox
+                <SwitchToggle
                   id="show-logo-paperang"
                   checked={formData.show_logo_paperang}
                   onCheckedChange={(checked) => setField('show_logo_paperang', checked === true)}
@@ -756,7 +756,7 @@ const InvoiceSettings = ({ userId }) => {
                 </label>
               </div>
               <div className="flex items-start gap-3 rounded-lg border p-3">
-                <Checkbox
+                <SwitchToggle
                   id="qr-enabled-paperang"
                   checked={formData.qr_enabled_paperang}
                   onCheckedChange={(checked) => setField('qr_enabled_paperang', checked === true)}
@@ -766,7 +766,7 @@ const InvoiceSettings = ({ userId }) => {
                 </label>
               </div>
               <div className="flex items-start gap-3 rounded-lg border p-3 md:col-span-2">
-                <Checkbox
+                <SwitchToggle
                   id="show-generated-by-paperang"
                   checked={formData.show_generated_by_paperang}
                   onCheckedChange={(checked) => setField('show_generated_by_paperang', checked === true)}

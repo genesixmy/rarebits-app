@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { Checkbox } from '@/components/ui/checkbox';
+import { SwitchToggle } from '@/components/ui/switch-toggle';
 import { X, Save, Loader2, Image as ImageIcon, Trash2, Plus, Edit, User, MessageSquare, Star, GripVertical, ArrowUp, ArrowDown, Package2, BadgeDollarSign, ClipboardList, Copy, Download, FileText, ExternalLink } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
 import { useAuth } from '@/contexts/SupabaseAuthContext.jsx';
@@ -2391,9 +2392,13 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
                           <label className="block text-sm font-medium text-muted-foreground mb-3">Platform Jualan (Tempat Iklan)</label>
                           <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                             {platformOptions.map((platform) => (
-                              <div key={platform} className="flex items-center space-x-2">
-                                <Checkbox id={platform} checked={formData.platforms.includes(platform)} onCheckedChange={(checked) => handlePlatformChange(platform, checked)} />
+                              <div key={platform} className="flex items-center justify-between gap-3 rounded-lg border border-border/80 bg-background px-3 py-2">
                                 <label htmlFor={platform} className="text-sm font-medium leading-none">{platform}</label>
+                                <SwitchToggle
+                                  id={platform}
+                                  checked={formData.platforms.includes(platform)}
+                                  onCheckedChange={(checked) => handlePlatformChange(platform, checked)}
+                                />
                               </div>
                             ))}
                           </div>
@@ -2403,9 +2408,13 @@ const AddItemForm = ({ item, onSave, onCancel, categories, clients, wallets, onC
                             <label className="block text-sm font-medium text-muted-foreground mb-3">Platform Tempat Terjual</label>
                             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                               {formData.platforms.map((platform) => (
-                                <div key={`sold-${platform}`} className="flex items-center space-x-2">
-                                  <Checkbox id={`sold-${platform}`} checked={formData.sold_platforms.includes(platform)} onCheckedChange={(checked) => handleSoldPlatformChange(platform, checked)} />
+                                <div key={`sold-${platform}`} className="flex items-center justify-between gap-3 rounded-lg border border-border/80 bg-background px-3 py-2">
                                   <label htmlFor={`sold-${platform}`} className="text-sm font-medium leading-none">{platform}</label>
+                                  <SwitchToggle
+                                    id={`sold-${platform}`}
+                                    checked={formData.sold_platforms.includes(platform)}
+                                    onCheckedChange={(checked) => handleSoldPlatformChange(platform, checked)}
+                                  />
                                 </div>
                               ))}
                             </div>

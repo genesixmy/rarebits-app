@@ -13,7 +13,7 @@ const SettingsPage = ({ user, categories, onUpdateCategories, onUpdateProfile })
     <div className="space-y-6">
       <h1 className="page-title">Tetapan</h1>
       <Tabs defaultValue="profile" className="w-full">
-        <TabsList className="!grid w-full !h-auto grid-cols-2 sm:grid-cols-5 gap-1">
+        <TabsList className="!grid w-full !h-auto grid-cols-2 gap-1 rounded-xl border border-primary/20 bg-white p-1 sm:grid-cols-5">
           <TabsTrigger value="profile" className="w-full min-h-10 gap-2 rounded-lg border border-transparent text-xs transition-colors hover:border-primary/40 hover:bg-white hover:text-primary data-[state=active]:border-primary/20 data-[state=active]:bg-primary/10 data-[state=active]:font-semibold data-[state=active]:text-primary sm:text-sm">
             <User className="w-4 h-4" /> Profil
           </TabsTrigger>
