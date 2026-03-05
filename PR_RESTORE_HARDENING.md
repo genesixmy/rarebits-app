@@ -22,6 +22,29 @@
 - `supabase/migrations/20260303000052_restore_events_idempotency.sql`
 - `supabase/migrations/20260303000053_snapshot_health_monitor_security_invoker.sql`
 
+## 2026-03-05 Patch (Staging)
+- Added post-restore client name rehydration in:
+  - `supabase/functions/restore-full-backup-to-account/index.ts`
+- Added mandatory client integrity SQL gate in:
+  - `RESTORE_PRODUCTION_RUNBOOK.md`
+
+### Staging deploy
+- Function `restore-full-backup-to-account` deployed on `2026-03-05`.
+- `supabase functions list` evidence:
+  - slug: `restore-full-backup-to-account`
+  - version: `30`
+  - updated_at (UTC): `2026-03-05 06:00:23`
+
+### Pending sign-off evidence (to be appended)
+- Burn-in cycle #1/#2/#3 results
+- Corrupt ZIP negative test result
+- Missing metadata negative test result
+- SQL gate outputs:
+  - `clients_count`
+  - `invoices_with_client_id`
+  - `placeholder_clients`
+- Orphan FK checks output
+
 ## Test Evidence
 ### UI evidence (Disaster Restore)
 - Restore mode: `disaster`

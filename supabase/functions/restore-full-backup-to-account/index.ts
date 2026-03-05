@@ -48,6 +48,12 @@ type WriteRowsResult = {
   failedCount: number;
 };
 
+type ClientRehydrationHint = {
+  id: string;
+  name: string;
+  email: string | null;
+};
+
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -71,6 +77,7 @@ const ALLOWED_MEDIA_BUCKETS = new Set(["item_images", "avatars"]);
 const TRUE_VALUES = new Set(["1", "true", "yes", "y", "on"]);
 const FALSE_VALUES = new Set(["0", "false", "no", "n", "off"]);
 const LOCKED_INVOICE_STATUSES = new Set(["paid", "partially_returned", "returned"]);
+const PLACEHOLDER_CLIENT_NAME = "Pelanggan Restore";
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const UUID_GLOBAL_REGEX = /[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/ig;
 
@@ -1695,7 +1702,7 @@ const syncClientsFromInvoiceRefsIfNeeded = async (
   const rows = missingClientIds.map((id) => ({
     id,
     user_id: userId,
-    name: "Pelanggan Restore",
+    name: PLACEHOLDER_CLIENT_NAME,
     email: null,
   })) as JsonObject[];
 
@@ -1713,6 +1720,125 @@ const syncClientsFromInvoiceRefsIfNeeded = async (
       bucket: null,
       key: null,
       message: "Sebahagian sync invoice client_id -> clients gagal.",
+    }, MAX_ERRORS);
+  }
+};
+
+const mergeClientRehydrationHint = (
+  hintsByClientId: Map<string, ClientRehydrationHint>,
+  clientId: string,
+  sourceName: unknown,
+  sourceEmail: unknown,
+): void => {
+  if (!isUuid(clientId)) return;
+
+  const nextName = toString(sourceName);
+  const nextEmail = normalizeEmailKey(sourceEmail) || null;
+  if (!nextName && !nextEmail) return;
+
+  const current = hintsByClientId.get(clientId);
+  const currentName = toString(current?.name);
+  const currentNameIsPlaceholder = normalizeNameKey(currentName) === normalizeNameKey(PLACEHOLDER_CLIENT_NAME);
+  const nextNameIsPlaceholder = normalizeNameKey(nextName) === normalizeNameKey(PLACEHOLDER_CLIENT_NAME);
+
+  const mergedName = (!currentName || currentNameIsPlaceholder) && nextName && !nextNameIsPlaceholder
+    ? nextName
+    : currentName;
+  const mergedEmail = current?.email || nextEmail || null;
+
+  if (!mergedName && !mergedEmail) return;
+
+  hintsByClientId.set(clientId, {
+    id: clientId,
+    name: mergedName,
+    email: mergedEmail,
+  });
+};
+
+const rehydratePlaceholderClientsFromHints = async (
+  serviceSupabase: ReturnType<typeof createClient>,
+  userId: string,
+  hints: ClientRehydrationHint[],
+  tableExistsCache: Map<string, boolean>,
+  issues: RestoreIssue[],
+): Promise<void> => {
+  if (!await tableExists(serviceSupabase, "clients", tableExistsCache)) return;
+  if (!Array.isArray(hints) || hints.length === 0) return;
+
+  const hintById = new Map<string, ClientRehydrationHint>();
+  hints.forEach((hint) => {
+    if (!hint || typeof hint !== "object") return;
+    mergeClientRehydrationHint(
+      hintById,
+      toString((hint as Record<string, unknown>).id),
+      (hint as Record<string, unknown>).name,
+      (hint as Record<string, unknown>).email,
+    );
+  });
+  if (hintById.size === 0) return;
+
+  const { data: placeholderRows, error: placeholderError } = await serviceSupabase
+    .from("clients")
+    .select("id, user_id, name, email")
+    .eq("user_id", userId)
+    .eq("name", PLACEHOLDER_CLIENT_NAME)
+    .limit(50000);
+
+  if (placeholderError) {
+    if (isTableMissingError(placeholderError) || isMissingColumnError(placeholderError)) return;
+    throw new Error(placeholderError.message || "Gagal baca placeholder clients untuk rehydration.");
+  }
+
+  const updates = (Array.isArray(placeholderRows) ? placeholderRows : [])
+    .map((row) => {
+      const record = row as Record<string, unknown>;
+      const id = toString(record.id);
+      const hint = hintById.get(id);
+      if (!hint) return null;
+
+      const updatePatch: JsonObject = {};
+      const hintName = toString(hint.name);
+      if (hintName && normalizeNameKey(hintName) !== normalizeNameKey(PLACEHOLDER_CLIENT_NAME)) {
+        updatePatch.name = hintName;
+      }
+
+      const currentEmail = normalizeEmailKey(record.email);
+      if (!currentEmail && hint.email) {
+        updatePatch.email = hint.email;
+      }
+
+      if (Object.keys(updatePatch).length === 0) return null;
+      return { id, patch: updatePatch };
+    })
+    .filter((entry): entry is { id: string; patch: JsonObject } => Boolean(entry));
+
+  if (updates.length === 0) return;
+
+  let failedCount = 0;
+  for (const entry of updates) {
+    const { error } = await serviceSupabase
+      .from("clients")
+      .update(entry.patch)
+      .eq("user_id", userId)
+      .eq("id", entry.id);
+
+    if (error) {
+      failedCount += 1;
+      pushIssue(issues, {
+        table: "clients",
+        bucket: null,
+        key: null,
+        message: error.message || `Gagal rehydrate placeholder client id=${entry.id}.`,
+      }, MAX_ERRORS);
+    }
+  }
+
+  if (failedCount > 0) {
+    pushIssue(issues, {
+      table: "clients",
+      bucket: null,
+      key: null,
+      message: "Sebahagian rehydration nama pelanggan gagal.",
     }, MAX_ERRORS);
   }
 };
@@ -1999,6 +2125,7 @@ const restoreDataTables = async (params: {
   wouldInsertCount: number;
   tableSummaries: JsonObject[];
   issues: RestoreIssue[];
+  clientRehydrationHints: ClientRehydrationHint[];
 }> => {
   const {
     serviceSupabase,
@@ -2049,6 +2176,7 @@ const restoreDataTables = async (params: {
   const existingCustomerIds = new Set<string>();
   const existingClientPhoneKeys = new Set<string>();
   const existingClientAddressKeys = new Set<string>();
+  const clientRehydrationHintsById = new Map<string, ClientRehydrationHint>();
 
   const refreshSalesChannels = async (): Promise<void> => {
     salesChannelIds.clear();
@@ -2354,7 +2482,7 @@ const restoreDataTables = async (params: {
       const seedRows = Array.from(missingClientIdsToSeed).map((id) => ({
         id,
         user_id: newUserId,
-        name: "Pelanggan Restore",
+        name: PLACEHOLDER_CLIENT_NAME,
         email: null,
       })) as JsonObject[];
 
@@ -2452,6 +2580,8 @@ const restoreDataTables = async (params: {
 
         const sourceRow = rawRows[index] as Record<string, unknown> | undefined;
         const sourceIdCandidates = extractUuidCandidates(sourceRow, ["id", "client_id", "customer_id"]);
+        const sourceName = toString(sourceRow?.name) || toString(row.name);
+        const sourceEmail = sourceRow?.email ?? row.email;
         const sourceId = sourceIdCandidates[0] || "";
 
         if (!toString(row.id) && sourceId) {
@@ -2459,6 +2589,21 @@ const restoreDataTables = async (params: {
         }
 
         const remappedId = toString(row.id);
+        const targetHintIds = new Set<string>();
+        if (isUuid(remappedId)) targetHintIds.add(remappedId);
+        sourceIdCandidates.forEach((sourceClientId) => {
+          const mappedId = toString(globalIdMappings.get(sourceClientId));
+          if (isUuid(mappedId)) targetHintIds.add(mappedId);
+        });
+        targetHintIds.forEach((targetId) => {
+          mergeClientRehydrationHint(
+            clientRehydrationHintsById,
+            targetId,
+            sourceName,
+            sourceEmail,
+          );
+        });
+
         const emailKey = normalizeEmailKey(row.email);
 
         if (Object.prototype.hasOwnProperty.call(row, "email")) {
@@ -2939,6 +3084,7 @@ const restoreDataTables = async (params: {
     wouldInsertCount,
     tableSummaries,
     issues,
+    clientRehydrationHints: Array.from(clientRehydrationHintsById.values()),
   };
 };
 
@@ -3393,6 +3539,7 @@ Deno.serve(async (req) => {
         wouldInsertCount: 0,
         tableSummaries: [] as JsonObject[],
         issues: [] as RestoreIssue[],
+        clientRehydrationHints: [] as ClientRehydrationHint[],
       };
 
       // SAFETY-5 scope: data restore only for disaster mode.
@@ -3419,6 +3566,13 @@ Deno.serve(async (req) => {
           await syncClientsFromInvoiceRefsIfNeeded(
             serviceSupabase,
             userId,
+            tableExistsCache,
+            dataRestoreResult.issues,
+          );
+          await rehydratePlaceholderClientsFromHints(
+            serviceSupabase,
+            userId,
+            dataRestoreResult.clientRehydrationHints,
             tableExistsCache,
             dataRestoreResult.issues,
           );

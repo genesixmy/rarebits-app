@@ -67,6 +67,35 @@ order by created_at desc
 limit 5;
 ```
 
+## Mandatory Client Integrity Gate
+Run checks ini selepas setiap `disaster restore`:
+
+```sql
+select count(*) as clients_count
+from public.clients
+where user_id = '<USER_ID>';
+```
+
+```sql
+select
+  count(*) as invoices_count,
+  count(*) filter (where client_id is not null) as invoices_with_client_id
+from public.invoices
+where user_id = '<USER_ID>';
+```
+
+```sql
+select count(*) as placeholder_clients
+from public.clients
+where user_id = '<USER_ID>'
+  and name = 'Pelanggan Restore';
+```
+
+Pass criteria:
+- `clients_count > 0`
+- `invoices_with_client_id > 0`
+- `placeholder_clients = 0` (atau exception didokumentasi dengan sebab sah)
+
 ## Idempotency Test
 - Repeat same request (<15 min) with same checksum/mode/flags.
 - Expected:
