@@ -36,3 +36,23 @@
   - Burn-in happy path, idempotency replay, concurrency lock tests passed.
   - Negative tests (`corrupt ZIP`, `missing metadata`) passed with expected validation errors.
   - Mandatory client integrity gate and orphan FK checks passed.
+
+## 2026-03-05 - core-rpc-lint-fixes (staging)
+
+### Fixed
+- `create_or_update_invoice_for_sold_item`:
+  - corrected `UPDATE items SET invoice_id = ...` syntax to avoid invalid qualified target column.
+- `mark_shipment_courier_paid`:
+  - resolved ambiguous `shipment_id` conflict target by using named PK constraint.
+
+### Added
+- Compatibility shim `public.gen_random_bytes(integer)` to stabilize legacy calls in SQL functions.
+- Compatibility view `public.customers` (from `public.clients`) for legacy routines still reading `customers`.
+- Compatibility view `public.wallet_transactions` (from `public.transactions`) for legacy routines still reading `wallet_transactions`.
+- `public.refunds` compatibility columns:
+  - `user_id` (if missing)
+  - `issued_by` (if missing)
+
+### Validation
+- `npx supabase db lint --linked --schema public --fail-on error`:
+  - no error-level findings (only non-blocking warnings remain).
