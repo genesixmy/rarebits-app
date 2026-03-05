@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -407,15 +407,6 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
       ? 'all'
       : (allowedCategoryIds.length > 0 ? 'categories' : legacySelectionType);
 
-    if (
-      normalizedSelectionType === 'categories'
-      && allowedCategoryIds.length > 0
-      && categoryRules.length === 0
-      && categories.length === 0
-    ) {
-      return;
-    }
-
     setTitle(editCatalogData.title || '');
     setDescription(editCatalogData.description || '');
     setSelectionMode(normalizedSelectionType);
@@ -553,7 +544,7 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
   const updateCatalogMutation = useMutation({
     mutationFn: async () => {
       if (!userId || !catalogId) throw new Error('Katalog tidak sah');
-      if (!didHydrateEditState) throw new Error('Data katalog belum siap dimuatkan');
+      if (!didHydrateEditState) throw new Error('Data katalog sedang dimuatkan. Sila cuba sebentar lagi.');
 
       const normalizedTitle = title.trim();
       const normalizedDescription = description.trim();
@@ -664,6 +655,7 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
   });
 
   const shareUrl = createdCatalog ? `${window.location.origin}/cat/${createdCatalog.public_code}` : '';
+  const isEditHydrationPending = isEditMode && !didHydrateEditState;
   const deletingCatalogId = deleteCatalogMutation.isPending ? deleteCatalogMutation.variables?.catalogId : null;
 
   const toggleCategory = (categoryName) => {
@@ -733,11 +725,6 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
     if (!confirmed) return;
 
     deleteCatalogMutation.mutate({ catalogId: catalog.id });
-  };
-
-  const handleEditCatalog = (catalog) => {
-    if (!catalog?.id) return;
-    navigate(`/inventory/catalogs/${catalog.id}/edit`);
   };
 
   const handleVisibilityChange = (nextVisibility) => {
@@ -1211,8 +1198,8 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
                             Buang Cover
                           </Button>
                         ) : null}
-                        <Button type="button" size="sm" variant="outline" onClick={() => handleEditCatalog(catalog)}>
-                          Edit
+                        <Button type="button" size="sm" variant="outline" asChild>
+                          <Link to={`/inventory/catalogs/${catalog.id}/edit`}>Edit</Link>
                         </Button>
                         <Button type="button" size="sm" variant="outline" onClick={() => handleCopySpecificLink(catalog.public_code)}>
                           <Copy className="mr-1 h-3.5 w-3.5" />
@@ -1667,18 +1654,33 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
           <div>
             <p className="text-sm text-muted-foreground">Jumlah item dipilih</p>
             <p className="text-2xl font-bold">{selectedItemCount}</p>
+            {isEditHydrationPending ? (
+              <p className="mt-1 text-xs text-muted-foreground">Data katalog sedang dimuatkan...</p>
+            ) : null}
           </div>
           <Button
             type="button"
             className="brand-gradient brand-gradient-hover text-white"
             onClick={() => {
               if (isEditMode) {
+                if (isEditHydrationPending) {
+                  toast({
+                    title: 'Data katalog sedang dimuatkan',
+                    description: 'Sila tunggu sebentar sebelum menyimpan.',
+                  });
+                  return;
+                }
                 updateCatalogMutation.mutate();
                 return;
               }
               createCatalogMutation.mutate();
             }}
-            disabled={isUploadingCover || createCatalogMutation.isPending || updateCatalogMutation.isPending}
+            disabled={
+              isUploadingCover
+              || createCatalogMutation.isPending
+              || updateCatalogMutation.isPending
+              || isEditHydrationPending
+            }
           >
             {createCatalogMutation.isPending || updateCatalogMutation.isPending ? (
               <>
@@ -1821,8 +1823,8 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
                           Buang Cover
                         </Button>
                       ) : null}
-                      <Button type="button" size="sm" variant="outline" onClick={() => handleEditCatalog(catalog)}>
-                        Edit
+                      <Button type="button" size="sm" variant="outline" asChild>
+                        <Link to={`/inventory/catalogs/${catalog.id}/edit`}>Edit</Link>
                       </Button>
                       <Button type="button" size="sm" variant="outline" onClick={() => handleCopySpecificLink(catalog.public_code)}>
                         <Copy className="mr-1 h-3.5 w-3.5" />

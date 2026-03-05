@@ -8,6 +8,12 @@
 
 ## Preconditions
 - Latest function deployed.
+- Edge Function env configured:
+  - `ALLOWED_ORIGINS` = comma-separated production origins
+    - Example: `https://app.rarebits.my,https://admin.rarebits.my`
+    - For local dev only, boleh kosong (fallback `*`).
+  - Set via CLI:
+    - `npx supabase secrets set ALLOWED_ORIGINS="https://app.rarebits.my,https://admin.rarebits.my"`
 - Latest migrations applied:
   - `20260303000049_restore_events.sql`
   - `20260303000050_restore_locks.sql`

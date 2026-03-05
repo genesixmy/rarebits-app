@@ -1372,7 +1372,15 @@ export const useProcessRefund = () => {
       });
       queryClient.invalidateQueries({ queryKey: ['wallets', userId] });
       queryClient.invalidateQueries({ queryKey: ['transactions', userId, 'all'] });
+      queryClient.invalidateQueries({ queryKey: ['transactions'] });
+      queryClient.invalidateQueries({ queryKey: ['wallet'] });
+      queryClient.invalidateQueries({ queryKey: ['allWallets'] });
+      queryClient.invalidateQueries({ queryKey: ['wallet-receipts'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard-sales', userId] });
+      queryClient.invalidateQueries({ queryKey: ['invoice-items', userId] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['sales'] });
+      queryClient.invalidateQueries({ queryKey: ['pelanggan'] });
       
       // Dashboard queries with multiple key parameters - use predicate for fuzzy matching
       queryClient.invalidateQueries({
@@ -1395,14 +1403,22 @@ export const useProcessRefund = () => {
         console.log('[useProcessRefund] Refetching transactions...');
         await queryClient.refetchQueries({ queryKey: ['transactions', userId, 'all'] });
         console.log('[useProcessRefund] Transactions refetched');
+        await queryClient.refetchQueries({ queryKey: ['transactions'] });
+        await queryClient.refetchQueries({ queryKey: ['wallet'] });
+        await queryClient.refetchQueries({ queryKey: ['allWallets'] });
 
         console.log('[useProcessRefund] Refetching invoice details...');
         await queryClient.refetchQueries({ queryKey: ['invoice', invoiceId] });
         console.log('[useProcessRefund] Invoice refetched');
+        await queryClient.refetchQueries({ queryKey: ['invoices'] });
+        await queryClient.refetchQueries({ queryKey: ['clients'] });
+        await queryClient.refetchQueries({ queryKey: ['pelanggan'] });
 
         console.log('[useProcessRefund] Refetching items...');
         await queryClient.refetchQueries({ queryKey: ['items', userId] });
         console.log('[useProcessRefund] Items refetched');
+        await queryClient.refetchQueries({ queryKey: ['invoice-items', userId] });
+        await queryClient.refetchQueries({ queryKey: ['dashboard-sales', userId] });
 
         console.log('[useProcessRefund] Refetching dashboard refunds...');
         await queryClient.refetchQueries({
@@ -1434,6 +1450,8 @@ export const useProcessRefund = () => {
         await queryClient.refetchQueries({
           predicate: (query) => query.queryKey[0] === 'wallet-monthly-transactions-export' && query.queryKey[1] === userId
         });
+        await queryClient.refetchQueries({ queryKey: ['dashboard'] });
+        await queryClient.refetchQueries({ queryKey: ['sales'] });
         console.log('[useProcessRefund] Wallet analytics refetched');
 
         console.log('[useProcessRefund] ✅ Critical refetches complete');
@@ -1520,10 +1538,15 @@ export const useProcessInvoiceReturn = () => {
       queryClient.invalidateQueries({ queryKey: ['clients'] });
       queryClient.invalidateQueries({ queryKey: ['wallets', userId] });
       queryClient.invalidateQueries({ queryKey: ['transactions', userId, 'all'] });
+      queryClient.invalidateQueries({ queryKey: ['transactions'] });
+      queryClient.invalidateQueries({ queryKey: ['wallet'] });
+      queryClient.invalidateQueries({ queryKey: ['allWallets'] });
+      queryClient.invalidateQueries({ queryKey: ['wallet-receipts'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard-sales', userId] });
       queryClient.invalidateQueries({ queryKey: ['invoice-items', userId] });
       queryClient.invalidateQueries({ queryKey: ['dashboard'] });
       queryClient.invalidateQueries({ queryKey: ['sales'] });
+      queryClient.invalidateQueries({ queryKey: ['pelanggan'] });
       queryClient.invalidateQueries({
         predicate: (query) => query.queryKey[0] === 'client'
       });
@@ -1551,10 +1574,40 @@ export const useProcessInvoiceReturn = () => {
 
       try {
         await queryClient.refetchQueries({ queryKey: ['invoice', invoiceId] });
+        await queryClient.refetchQueries({ queryKey: ['invoices'] });
         await queryClient.refetchQueries({ queryKey: ['items', userId] });
+        await queryClient.refetchQueries({ queryKey: ['clients'] });
+        await queryClient.refetchQueries({ queryKey: ['pelanggan'] });
         await queryClient.refetchQueries({ queryKey: ['wallets', userId] });
         await queryClient.refetchQueries({ queryKey: ['transactions', userId, 'all'] });
+        await queryClient.refetchQueries({ queryKey: ['transactions'] });
+        await queryClient.refetchQueries({ queryKey: ['wallet'] });
+        await queryClient.refetchQueries({ queryKey: ['allWallets'] });
         await queryClient.refetchQueries({ queryKey: ['dashboard-sales', userId] });
+        await queryClient.refetchQueries({ queryKey: ['invoice-items', userId] });
+        await queryClient.refetchQueries({
+          predicate: (query) => query.queryKey[0] === 'dashboard-refunds' && query.queryKey[1] === userId
+        });
+        await queryClient.refetchQueries({
+          predicate: (query) => query.queryKey[0] === 'dashboard-expenses' && query.queryKey[1] === userId
+        });
+        await queryClient.refetchQueries({
+          predicate: (query) => query.queryKey[0] === 'business-wallets' && query.queryKey[1] === userId
+        });
+        await queryClient.refetchQueries({
+          predicate: (query) => query.queryKey[0] === 'wallet-cashflow-trend' && query.queryKey[1] === userId
+        });
+        await queryClient.refetchQueries({
+          predicate: (query) => query.queryKey[0] === 'wallet-cashflow-breakdown' && query.queryKey[1] === userId
+        });
+        await queryClient.refetchQueries({
+          predicate: (query) => query.queryKey[0] === 'wallet-monthly-summary' && query.queryKey[1] === userId
+        });
+        await queryClient.refetchQueries({
+          predicate: (query) => query.queryKey[0] === 'wallet-monthly-transactions-export' && query.queryKey[1] === userId
+        });
+        await queryClient.refetchQueries({ queryKey: ['dashboard'] });
+        await queryClient.refetchQueries({ queryKey: ['sales'] });
       } catch (e) {
         console.error('[useProcessInvoiceReturn] Error during critical refetch:', e);
       }

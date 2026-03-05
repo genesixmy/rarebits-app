@@ -16,10 +16,40 @@ type RestoreError = {
   message: string;
 };
 
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
+const BASE_CORS_HEADERS = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
+const parseAllowedOrigins = (): string[] => {
+  const raw = Deno.env.get("ALLOWED_ORIGINS") ?? "";
+  return raw
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+};
+
+const resolveCorsHeaders = (req?: Request): Record<string, string> => {
+  const allowedOrigins = parseAllowedOrigins();
+  const requestOrigin = req?.headers.get("origin")?.trim() || "";
+  const allowOrigin = allowedOrigins.length === 0
+    ? "*"
+    : (requestOrigin && allowedOrigins.includes(requestOrigin) ? requestOrigin : allowedOrigins[0]);
+
+  return {
+    ...BASE_CORS_HEADERS,
+    "Access-Control-Allow-Origin": allowOrigin,
+    ...(allowOrigin === "*" ? {} : { "Vary": "Origin" }),
+  };
+};
+
+const isOriginAllowed = (req: Request): boolean => {
+  const allowedOrigins = parseAllowedOrigins();
+  if (allowedOrigins.length === 0) return true;
+
+  const requestOrigin = req.headers.get("origin")?.trim();
+  if (!requestOrigin) return true;
+  return allowedOrigins.includes(requestOrigin);
 };
 
 const MAX_ERRORS = 10;
@@ -42,11 +72,11 @@ const MIME_BY_EXTENSION: Record<string, string> = {
   heif: "image/heif",
 };
 
-const jsonResponse = (payload: JsonObject, status = 200) =>
+const jsonResponse = (payload: JsonObject, status = 200, req?: Request) =>
   new Response(JSON.stringify(payload), {
     status,
     headers: {
-      ...CORS_HEADERS,
+      ...resolveCorsHeaders(req),
       "Content-Type": "application/json",
     },
   });
@@ -281,11 +311,15 @@ const isLikelyAlreadyExists = (message: string): boolean => {
 // Sandbox restore only; DB remap / overwrite flow is intentionally not implemented here.
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
-    return new Response("ok", { headers: CORS_HEADERS });
+    return new Response("ok", { headers: resolveCorsHeaders(req) });
+  }
+
+  if (!isOriginAllowed(req)) {
+    return jsonResponse({ error: "Origin tidak dibenarkan." }, 403, req);
   }
 
   if (req.method !== "POST") {
-    return jsonResponse({ error: "Method Not Allowed" }, 405);
+    return jsonResponse({ error: "Method Not Allowed" }, 405, req);
   }
 
   try {
