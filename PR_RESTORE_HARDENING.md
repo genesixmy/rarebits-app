@@ -35,15 +35,53 @@
   - version: `30`
   - updated_at (UTC): `2026-03-05 06:00:23`
 
-### Pending sign-off evidence (to be appended)
-- Burn-in cycle #1/#2/#3 results
-- Corrupt ZIP negative test result
-- Missing metadata negative test result
-- SQL gate outputs:
-  - `clients_count`
-  - `invoices_with_client_id`
-  - `placeholder_clients`
-- Orphan FK checks output
+### Staging sign-off evidence (2026-03-05)
+#### Burn-in #1 (happy path)
+- Restore mode: `disaster`
+- Idempotency key:
+  - `auto:disaster:live:wipe:6851deb8aa5688828914735d0d233cb2034ae9357fd903e22078a81139755193`
+- Result:
+  - media uploaded/skipped: `0 / 3`
+  - data inserted/skip missing parent/skip locked: `74 / 0 / 0`
+  - reconciliation DB/media: `78/78/0` and `3/3/0`
+  - phase: `completed`
+  - duration: `7575 ms`
+- Mandatory client gate:
+  - `placeholder_clients = 0`
+
+#### Burn-in #2 (idempotency replay)
+- Same request repeated.
+- Result:
+  - `replayed = true`
+  - phase: `replayed`
+  - duration: `1805 ms`
+- SQL:
+  - `event_count = 1`
+
+#### Burn-in #3 (concurrency lock)
+- Two concurrent restore attempts on same account.
+- Result:
+  - one request blocked with lock error:
+    - `Restore sedang berjalan untuk akaun ini. Sila tunggu sehingga proses semasa selesai.`
+  - one request completed successfully.
+  - SQL post-check: `active_lock = 0`
+
+#### Mandatory client integrity gate (post-restore)
+- `clients_count = 1`
+- `invoices_count = 10`
+- `invoices_with_client_id = 9` (valid, > 0)
+- `placeholder_clients = 0`
+
+#### Negative tests
+- Corrupt ZIP:
+  - `Fail zip rosak / tidak lengkap (CRC). Sila download semula backup.`
+- Missing metadata:
+  - `Ini bukan backup RareBits. metadata.json tidak dijumpai.`
+
+#### Orphan FK checks
+- `orphan_invoice_items = 0`
+- `orphan_invoice_fees = 0`
+- `orphan_shipment_invoices = 0`
 
 ## Test Evidence
 ### UI evidence (Disaster Restore)

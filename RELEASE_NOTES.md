@@ -32,4 +32,7 @@
 
 ### Notes
 - Staging function deploy completed for `restore-full-backup-to-account` version `30`.
-- Production promotion remains pending final burn-in and negative-test sign-off.
+- Staging sign-off completed:
+  - Burn-in happy path, idempotency replay, concurrency lock tests passed.
+  - Negative tests (`corrupt ZIP`, `missing metadata`) passed with expected validation errors.
+  - Mandatory client integrity gate and orphan FK checks passed.
