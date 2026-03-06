@@ -14,7 +14,7 @@ Project Ref: `girohykpugyiqzssmiio`
 
 ## Migrations
 - Local vs remote: **in sync**
-- Latest applied migration: `20260305000058`
+- Latest applied migration: `20260306000061`
 
 ## Required Secrets
 - `SUPABASE_URL`
