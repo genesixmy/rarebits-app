@@ -59,17 +59,20 @@ const BASE_CORS_HEADERS = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
+const normalizeOrigin = (value: string): string =>
+  value.trim().replace(/^['"]|['"]$/g, "").replace(/\/+$/, "");
+
 const parseAllowedOrigins = (): string[] => {
   const raw = Deno.env.get("ALLOWED_ORIGINS") ?? "";
   return raw
     .split(",")
-    .map((entry) => entry.trim())
+    .map((entry) => normalizeOrigin(entry))
     .filter(Boolean);
 };
 
 const resolveCorsHeaders = (req?: Request): Record<string, string> => {
   const allowedOrigins = parseAllowedOrigins();
-  const requestOrigin = req?.headers.get("origin")?.trim() || "";
+  const requestOrigin = normalizeOrigin(req?.headers.get("origin") ?? "");
   const allowOrigin = allowedOrigins.length === 0
     ? "*"
     : (requestOrigin && allowedOrigins.includes(requestOrigin) ? requestOrigin : allowedOrigins[0]);
@@ -85,7 +88,7 @@ const isOriginAllowed = (req: Request): boolean => {
   const allowedOrigins = parseAllowedOrigins();
   if (allowedOrigins.length === 0) return true;
 
-  const requestOrigin = req.headers.get("origin")?.trim();
+  const requestOrigin = normalizeOrigin(req.headers.get("origin") ?? "");
   if (!requestOrigin) return true;
   return allowedOrigins.includes(requestOrigin);
 };
