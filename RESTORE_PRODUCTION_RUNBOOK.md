@@ -5,6 +5,7 @@
 - Modes:
   - `self`: validate checksum against user snapshot
   - `disaster`: cross-account remap + optional wipe
+- Env baseline reference: `PRODUCTION_ENV_BASELINE.md`
 
 ## Preconditions
 - Latest function deployed.
