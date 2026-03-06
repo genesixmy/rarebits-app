@@ -555,7 +555,9 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
   const updateCatalogMutation = useMutation({
     mutationFn: async () => {
       if (!userId || !catalogId) throw new Error('Katalog tidak sah');
-      if (!didHydrateEditState) throw new Error('Data katalog sedang dimuatkan. Sila cuba sebentar lagi.');
+      if (isEditCatalogLoading) {
+        throw new Error('Data katalog sedang dimuatkan. Sila cuba sebentar lagi.');
+      }
 
       const normalizedTitle = title.trim();
       const normalizedDescription = description.trim();
