@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite --host :: --port 3000",
     "build": "node tools/generate-llms.js || true && vite build",
+    "guardrail:build": "npm run build",
+    "guardrail:sql": "npx supabase db lint --linked --schema public --fail-on error",
+    "guardrail:check": "node tools/guardrail-check.js",
     "preview": "vite preview --host :: --port 3000",
     "start": "npm run preview",
     "cli": "node ../../cli/index.js",
