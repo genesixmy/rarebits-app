@@ -545,17 +545,29 @@ export const useCreateInvoice = () => {
       return refreshedInvoice || invoice;
     },
     onSuccess: async () => {
-      // Invalidate all related queries
+      // Invalidate related query families first
       queryClient.invalidateQueries({ queryKey: ['invoices'] });
       queryClient.invalidateQueries({ queryKey: ['items'] });
       queryClient.invalidateQueries({ queryKey: ['uninvoiced-items'] });
       queryClient.invalidateQueries({ queryKey: ['available-items'] });
+      queryClient.invalidateQueries({ queryKey: ['clients'] });
+      queryClient.invalidateQueries({ queryKey: ['wallets', userId] });
+      queryClient.invalidateQueries({ queryKey: ['transactions', userId, 'all'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['sales'] });
 
-      // Add delay to ensure server-side operations complete before refetch
-      // Don't wait for refetch, let it happen in background
-
-      // Force refetch of all queries to ensure UI updates
-      queryClient.refetchQueries({ type: 'all' });
+      // Refetch only high-impact domains to avoid noisy global refetch.
+      await Promise.allSettled([
+        queryClient.refetchQueries({ queryKey: ['invoices'] }),
+        queryClient.refetchQueries({ queryKey: ['items'] }),
+        queryClient.refetchQueries({ queryKey: ['available-items'] }),
+        queryClient.refetchQueries({ queryKey: ['uninvoiced-items'] }),
+        queryClient.refetchQueries({ queryKey: ['clients'] }),
+        queryClient.refetchQueries({ queryKey: ['wallets', userId] }),
+        queryClient.refetchQueries({ queryKey: ['transactions', userId, 'all'] }),
+        queryClient.refetchQueries({ queryKey: ['dashboard'] }),
+        queryClient.refetchQueries({ queryKey: ['sales'] }),
+      ]);
     },
     onError: (error) => {
       console.error('[useCreateInvoice] Error:', error);

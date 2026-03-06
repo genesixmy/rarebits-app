@@ -1688,9 +1688,14 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
               }
               createCatalogMutation.mutate();
             }}
-            disabled={isUploadingCover || createCatalogMutation.isPending || updateCatalogMutation.isPending}
+            disabled={isEditHydrationPending || isUploadingCover || createCatalogMutation.isPending || updateCatalogMutation.isPending}
           >
-            {createCatalogMutation.isPending || updateCatalogMutation.isPending ? (
+            {isEditMode && isEditHydrationPending ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Menunggu Data Katalog...
+              </>
+            ) : createCatalogMutation.isPending || updateCatalogMutation.isPending ? (
               <>
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                 {isEditMode ? 'Menyimpan Perubahan...' : 'Mencipta Katalog...'}
