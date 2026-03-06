@@ -1288,7 +1288,7 @@ function App() {
       <Helmet><title>RareBits - {pageTitle}</title></Helmet>
       
       <Layout user={user} profile={profile} onSignOut={signOut} onAddItem={() => { setEditingItem(null); setShowAddForm(true); }}>
-        <AnimatePresence mode="wait">
+        <AnimatePresence mode="wait" initial={false}>
           <motion.div
             key={location.pathname}
             initial={isKnowledgeBaseRoute ? { opacity: 0 } : { opacity: 0, y: 20 }}

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -113,6 +113,7 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
   const [updatingCoverCatalogId, setUpdatingCoverCatalogId] = useState(null);
   const [removingCoverCatalogId, setRemovingCoverCatalogId] = useState(null);
   const [didHydrateEditState, setDidHydrateEditState] = useState(false);
+  const previousCatalogIdRef = useRef(catalogId);
 
   const categoryOptions = useMemo(() => {
     const names = new Set(
@@ -373,76 +374,86 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
   useEffect(() => {
     if (!isEditMode || !editCatalogData || didHydrateEditState) return;
 
-    const normalizedSelectionTypeRaw = (editCatalogData.selection_type || 'manual').toLowerCase();
-    const legacySelectionType = normalizedSelectionTypeRaw === 'category'
-      ? 'categories'
-      : normalizedSelectionTypeRaw;
-    const includeAllItems = editCatalogData.include_all_items === true;
-    const allowedCategoryIds = Array.isArray(editCatalogData.allowed_category_ids)
-      ? editCatalogData.allowed_category_ids.filter(Boolean)
-      : [];
-    const itemIds = Array.isArray(editCatalogData.manual_item_ids)
-      ? editCatalogData.manual_item_ids.filter(Boolean)
-      : [];
+    try {
+      const normalizedSelectionTypeRaw = (editCatalogData.selection_type || 'manual').toLowerCase();
+      const legacySelectionType = normalizedSelectionTypeRaw === 'category'
+        ? 'categories'
+        : normalizedSelectionTypeRaw;
+      const includeAllItems = editCatalogData.include_all_items === true;
+      const allowedCategoryIds = Array.isArray(editCatalogData.allowed_category_ids)
+        ? editCatalogData.allowed_category_ids.filter(Boolean)
+        : [];
+      const itemIds = Array.isArray(editCatalogData.manual_item_ids)
+        ? editCatalogData.manual_item_ids.filter(Boolean)
+        : [];
 
-    const categoryIdToName = new Map(
-      (Array.isArray(categories) ? categories : [])
-        .filter((category) => category?.id && typeof category?.name === 'string')
-        .map((category) => [category.id, category.name.trim()])
-    );
+      const categoryIdToName = new Map(
+        (Array.isArray(categories) ? categories : [])
+          .filter((category) => category?.id && typeof category?.name === 'string')
+          .map((category) => [category.id, category.name.trim()])
+      );
 
-    const categoryRulesFromIds = allowedCategoryIds
-      .map((categoryId) => categoryIdToName.get(categoryId))
-      .filter((name) => typeof name === 'string' && name.trim());
+      const categoryRulesFromIds = allowedCategoryIds
+        .map((categoryId) => categoryIdToName.get(categoryId))
+        .filter((name) => typeof name === 'string' && name.trim());
 
-    const fallbackCategoryRules = Array.isArray(editCatalogData.selected_categories)
-      ? editCatalogData.selected_categories.filter((name) => typeof name === 'string' && name.trim())
-      : [];
+      const fallbackCategoryRules = Array.isArray(editCatalogData.selected_categories)
+        ? editCatalogData.selected_categories.filter((name) => typeof name === 'string' && name.trim())
+        : [];
 
-    const categoryRules = categoryRulesFromIds.length > 0
-      ? categoryRulesFromIds
-      : fallbackCategoryRules;
+      const categoryRules = categoryRulesFromIds.length > 0
+        ? categoryRulesFromIds
+        : fallbackCategoryRules;
 
-    const normalizedSelectionType = includeAllItems
-      ? 'all'
-      : (allowedCategoryIds.length > 0 ? 'categories' : legacySelectionType);
+      const normalizedSelectionType = includeAllItems
+        ? 'all'
+        : (allowedCategoryIds.length > 0 ? 'categories' : legacySelectionType);
 
-    setTitle(editCatalogData.title || '');
-    setDescription(editCatalogData.description || '');
-    setSelectionMode(normalizedSelectionType);
-    setHideCatalogPrice(editCatalogData.show_prices === false);
-    setVisibility(editCatalogData.visibility === 'unlisted' ? 'unlisted' : 'public');
-    setAccessCode(editCatalogData.access_code || '');
-    setHasExpiry(Boolean(editCatalogData.expires_at));
-    setExpiresAt(editCatalogData.expires_at ? new Date(editCatalogData.expires_at).toISOString().slice(0, 16) : '');
-    setCoverImageUrl(editCatalogData.cover_image_url || '');
-    setCoverMode('upload');
-    setCoverInputKey((prev) => prev + 1);
+      const parsedExpiresAt = editCatalogData.expires_at ? new Date(editCatalogData.expires_at) : null;
+      const hasValidExpiryDate = parsedExpiresAt && !Number.isNaN(parsedExpiresAt.getTime());
 
-    if (normalizedSelectionType === 'manual') {
-      setManualSelectedItemIds(itemIds);
-      setSelectedCategories([]);
-    } else if (normalizedSelectionType === 'categories') {
-      const derivedCategories = categoryRules.length > 0
-        ? categoryRules
-        : Array.from(new Set(
-          items
-            .filter((item) => itemIds.includes(item.id))
-            .map((item) => (typeof item?.category === 'string' ? item.category.trim() : ''))
-            .filter(Boolean)
-        ));
-      setSelectedCategories(derivedCategories);
-      setManualSelectedItemIds(itemIds);
-    } else {
-      setSelectedCategories([]);
-      setManualSelectedItemIds(itemIds);
+      setTitle(editCatalogData.title || '');
+      setDescription(editCatalogData.description || '');
+      setSelectionMode(normalizedSelectionType);
+      setHideCatalogPrice(editCatalogData.show_prices === false);
+      setVisibility(editCatalogData.visibility === 'unlisted' ? 'unlisted' : 'public');
+      setAccessCode(editCatalogData.access_code || '');
+      setHasExpiry(Boolean(hasValidExpiryDate));
+      setExpiresAt(hasValidExpiryDate ? parsedExpiresAt.toISOString().slice(0, 16) : '');
+      setCoverImageUrl(editCatalogData.cover_image_url || '');
+      setCoverMode('upload');
+      setCoverInputKey((prev) => prev + 1);
+
+      if (normalizedSelectionType === 'manual') {
+        setManualSelectedItemIds(itemIds);
+        setSelectedCategories([]);
+      } else if (normalizedSelectionType === 'categories') {
+        const derivedCategories = categoryRules.length > 0
+          ? categoryRules
+          : Array.from(new Set(
+            items
+              .filter((item) => itemIds.includes(item.id))
+              .map((item) => (typeof item?.category === 'string' ? item.category.trim() : ''))
+              .filter(Boolean)
+          ));
+        setSelectedCategories(derivedCategories);
+        setManualSelectedItemIds(itemIds);
+      } else {
+        setSelectedCategories([]);
+        setManualSelectedItemIds(itemIds);
+      }
+    } catch (error) {
+      console.error('[CatalogCreatePage] Gagal hydrate data edit katalog:', error);
+    } finally {
+      setDidHydrateEditState(true);
     }
-
-    setDidHydrateEditState(true);
   }, [categories, didHydrateEditState, editCatalogData, isEditMode, items]);
 
   useEffect(() => {
-    setDidHydrateEditState(false);
+    if (previousCatalogIdRef.current !== catalogId) {
+      previousCatalogIdRef.current = catalogId;
+      setDidHydrateEditState(false);
+    }
   }, [catalogId]);
 
   const createCatalogMutation = useMutation({
@@ -1675,12 +1686,7 @@ const CatalogCreatePage = ({ userId, items = [], categories = [] }) => {
               }
               createCatalogMutation.mutate();
             }}
-            disabled={
-              isUploadingCover
-              || createCatalogMutation.isPending
-              || updateCatalogMutation.isPending
-              || isEditHydrationPending
-            }
+            disabled={isUploadingCover || createCatalogMutation.isPending || updateCatalogMutation.isPending}
           >
             {createCatalogMutation.isPending || updateCatalogMutation.isPending ? (
               <>
