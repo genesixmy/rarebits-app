@@ -22,6 +22,11 @@ import InvoiceShareRedirectPage from '@/components/invoices/InvoiceShareRedirect
 import CatalogCreatePage from '@/components/catalogs/CatalogCreatePage';
 import CatalogPublicPage from '@/components/catalogs/CatalogPublicPage';
 import KnowledgeBasePage from '@/components/KnowledgeBasePage';
+import PluginsPage from '@/components/plugins/PluginsPage';
+import TournamentPluginPage from '@/components/plugins/TournamentPluginPage';
+import TournamentDetailPage from '@/plugins/tournament/pages/TournamentDetailPage';
+import TournamentPublicPage from '@/plugins/tournament/pages/TournamentPublicPage';
+import PluginUnavailablePage from '@/plugins/runtime/PluginUnavailablePage';
 import Layout from '@/components/layout/Layout';
 import { Loader2, Search } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -46,6 +51,7 @@ import { supabase } from '@/lib/customSupabaseClient';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toSnakeCase } from '@/lib/utils';
 import { createAutoInvoiceForSoldItem } from '@/hooks/useInvoices';
+import { canAccessPlugin } from '@/plugins/runtime/pluginRuntime';
 
 // Functions to fetch data, now outside the component
 const fetchProfile = async (userId) => {
@@ -224,7 +230,8 @@ function App() {
   const { editingItem, showAddForm, setEditingItem, setShowAddForm, clearEditingState } = useEditingState();
   const isPublicCatalogRoute = location.pathname.startsWith('/c/') || location.pathname.startsWith('/cat/');
   const isPublicInvoiceShareRoute = location.pathname.startsWith('/i/');
-  const isPublicRoute = isPublicCatalogRoute || isPublicInvoiceShareRoute;
+  const isPublicTournamentRoute = location.pathname.startsWith('/tournament/');
+  const isPublicRoute = isPublicCatalogRoute || isPublicInvoiceShareRoute || isPublicTournamentRoute;
   const isKnowledgeBaseRoute = location.pathname === '/knowledge-base';
 
   // State for UI control
@@ -1255,6 +1262,7 @@ function App() {
           <Route path="/c/:publicCode" element={<CatalogPublicPage />} />
           <Route path="/cat/:publicCode" element={<CatalogPublicPage />} />
           <Route path="/i/:shareCode" element={<InvoiceShareRedirectPage />} />
+          <Route path="/tournament/:publicCode" element={<TournamentPublicPage />} />
         </Routes>
       </>
     );
@@ -1277,11 +1285,32 @@ function App() {
     );
   }
 
-  const pageTitle = {
-    '/': 'Papan Pemuka', '/inventory': 'Inventori', '/sales': 'Jualan',
-    '/invoices': 'Invois', '/catalogs': 'Katalog', '/inventory/catalogs': 'Katalog',
-    '/clients': 'Pelanggan', '/wallet': 'Wallet', '/wallet/receipts': 'Resit Wallet', '/knowledge-base': 'Panduan', '/settings': 'Tetapan', '/reminders': 'Peringatan'
-  }[location.pathname] || 'Papan Pemuka';
+  const canAccessTournamentPlugin = canAccessPlugin('tournament');
+
+  const pageTitle = (() => {
+    if (location.pathname.startsWith('/plugins/tournament')) return 'Tournament Plugin';
+    if (location.pathname.startsWith('/wallet/account/')) return 'Akaun Wallet';
+    if (location.pathname.startsWith('/clients/')) return 'Butiran Pelanggan';
+    if (location.pathname.startsWith('/invoices/')) return 'Invois';
+    if (location.pathname.startsWith('/catalogs/')) return 'Katalog';
+    if (location.pathname.startsWith('/inventory/catalogs/')) return 'Katalog';
+
+    return {
+      '/': 'Papan Pemuka',
+      '/inventory': 'Inventori',
+      '/sales': 'Jualan',
+      '/invoices': 'Invois',
+      '/catalogs': 'Katalog',
+      '/inventory/catalogs': 'Katalog',
+      '/clients': 'Pelanggan',
+      '/wallet': 'Wallet',
+      '/wallet/receipts': 'Resit Wallet',
+      '/knowledge-base': 'Panduan',
+      '/plugins': 'Plugin Center',
+      '/settings': 'Tetapan',
+      '/reminders': 'Peringatan',
+    }[location.pathname] || 'Papan Pemuka';
+  })();
 
   return (
     <>
@@ -1420,6 +1449,19 @@ function App() {
               <Route path="/wallet/account/:accountId" element={<WalletAccountPage />} />
               <Route path="/wallet/receipts" element={<WalletReceiptsPage />} />
               <Route path="/knowledge-base" element={<KnowledgeBasePage />} />
+              <Route path="/plugins" element={<PluginsPage />} />
+              <Route
+                path="/plugins/tournament"
+                element={canAccessTournamentPlugin ? <TournamentPluginPage /> : <PluginUnavailablePage pluginSlug="tournament" />}
+              />
+              <Route
+                path="/plugins/tournament/create"
+                element={canAccessTournamentPlugin ? <TournamentPluginPage /> : <PluginUnavailablePage pluginSlug="tournament" />}
+              />
+              <Route
+                path="/plugins/tournament/:tournamentId"
+                element={canAccessTournamentPlugin ? <TournamentDetailPage /> : <PluginUnavailablePage pluginSlug="tournament" />}
+              />
               <Route path="/settings" element={<SettingsPage user={user} categories={categories} onUpdateCategories={() => queryClient.invalidateQueries({ queryKey: ['categories', user.id] })} onUpdateProfile={() => queryClient.invalidateQueries({ queryKey: ['profile', user.id] })} />} />
             </Routes>
           </motion.div>

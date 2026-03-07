@@ -2,7 +2,8 @@ import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { Home, Package, Receipt, Settings, Users, Wallet, FileText, Link2, Bell, Paperclip, BookOpen } from 'lucide-react';
+import { Home, Package, Receipt, Settings, Users, Wallet, FileText, Link2, Bell, Paperclip, BookOpen, Puzzle, Trophy, Plus } from 'lucide-react';
+import { getEnabledPluginSidebarSections } from '@/plugins/runtime/pluginRuntime';
 
 const Sidebar = ({ isSidebarOpen, setSidebarOpen }) => {
   const location = useLocation();
@@ -11,7 +12,7 @@ const Sidebar = ({ isSidebarOpen, setSidebarOpen }) => {
     return location.pathname.startsWith(path);
   };
 
-  const navItems = [
+  const coreNavItems = [
     { path: '/', label: 'Papan Pemuka', icon: <Home className="w-5 h-5" /> },
     {
       path: '/inventory',
@@ -36,6 +37,50 @@ const Sidebar = ({ isSidebarOpen, setSidebarOpen }) => {
     { path: '/settings', label: 'Tetapan', icon: <Settings className="w-5 h-5" /> },
   ];
 
+  const pluginSidebarSections = getEnabledPluginSidebarSections();
+  const showPluginSections = pluginSidebarSections.length > 0;
+
+  const pluginIconMap = {
+    plus: <Plus className="w-4 h-4" />,
+    trophy: <Trophy className="w-4 h-4" />,
+    puzzle: <Puzzle className="w-4 h-4" />,
+  };
+
+  const renderSectionTitle = (title) => (
+    <p className="px-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/80">
+      {title}
+    </p>
+  );
+
+  const renderNavButton = ({ path, label, icon, isChild = false, variant = 'core' }) => (
+    <Button
+      asChild
+      variant="ghost"
+      onClick={() => setSidebarOpen(false)}
+      className={cn(
+        isChild
+          ? "h-10 w-full justify-start gap-2 rounded-lg border border-transparent text-sm transition-colors"
+          : "h-12 w-full justify-start gap-3 rounded-lg border border-transparent text-base transition-colors",
+        variant === 'system'
+          ? (
+            isActive(path)
+              ? "border-primary/30 bg-primary/10 font-semibold text-primary hover:bg-primary/15 hover:text-cyan-700"
+              : "border-border/80 text-muted-foreground hover:border-primary/40 hover:bg-white hover:text-primary"
+          )
+          : (
+            isActive(path)
+              ? "border-primary/20 bg-primary/10 font-semibold text-primary hover:bg-primary/15 hover:text-cyan-700"
+              : "text-muted-foreground hover:border-primary/40 hover:bg-white hover:text-primary"
+          )
+      )}
+    >
+      <Link to={path}>
+        {icon}
+        {label}
+      </Link>
+    </Button>
+  );
+
   return (
     <>
       <aside className={cn(
@@ -47,69 +92,75 @@ const Sidebar = ({ isSidebarOpen, setSidebarOpen }) => {
             <h1 className="text-3xl font-bold gradient-text">RAREBITS</h1>
             <p className="text-sm text-muted-foreground mt-1">Sistem Pengurusan Jualan</p>
           </div>
-          <nav className="flex-1 px-4 py-2 space-y-2">
-            {navItems.map(item => (
-              <div key={item.path} className="space-y-1">
-                <Button
-                  asChild
-                  variant="ghost"
-                  onClick={() => setSidebarOpen(false)}
-                  className={cn(
-                    "h-12 w-full justify-start gap-3 rounded-lg border border-transparent text-base transition-colors",
-                    isActive(item.path)
-                      ? "border-primary/20 bg-primary/10 font-semibold text-primary hover:bg-primary/15 hover:text-cyan-700"
-                      : "text-muted-foreground hover:border-primary/40 hover:bg-white hover:text-primary"
-                  )}
-                >
-                  <Link to={item.path}>
-                    {item.icon}
-                    {item.label}
-                  </Link>
-                </Button>
+          <nav className="flex-1 overflow-y-auto px-4 py-2">
+            <div className="space-y-2">
+              {renderSectionTitle('Core Features')}
+              {coreNavItems.map((item) => (
+                <div key={item.path} className="space-y-1">
+                  {renderNavButton({
+                    path: item.path,
+                    label: item.label,
+                    icon: item.icon,
+                  })}
 
-                {Array.isArray(item.children) && item.children.length > 0 && (
-                  <div className="space-y-1 pl-7">
-                    {item.children.map((child) => (
-                      <Button
-                        asChild
-                        key={child.path}
-                        variant="ghost"
-                        onClick={() => setSidebarOpen(false)}
-                        className={cn(
-                          "h-10 w-full justify-start gap-2 rounded-lg border border-transparent text-sm transition-colors",
-                          isActive(child.path)
-                            ? "border-primary/20 bg-primary/10 font-semibold text-primary hover:bg-primary/15 hover:text-cyan-700"
-                            : "text-muted-foreground hover:border-primary/40 hover:bg-white hover:text-primary"
-                        )}
-                      >
-                        <Link to={child.path}>
-                          {child.icon}
-                          {child.label}
-                        </Link>
-                      </Button>
-                    ))}
+                  {Array.isArray(item.children) && item.children.length > 0 ? (
+                    <div className="space-y-1 pl-7">
+                      {item.children.map((child) => (
+                        <div key={child.path}>
+                          {renderNavButton({
+                            path: child.path,
+                            label: child.label,
+                            icon: child.icon,
+                            isChild: true,
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+
+            {showPluginSections ? (
+              <div className="mt-6 space-y-4 border-t border-border/70 pt-5">
+                {pluginSidebarSections.map((section) => (
+                  <div key={section.pluginSlug} className="space-y-1">
+                    {renderSectionTitle(section.label)}
+                    <div className="space-y-1 pl-2">
+                      {section.items.map((item) => (
+                        <div key={item.key}>
+                          {renderNavButton({
+                            path: item.route,
+                            label: item.label,
+                            icon: pluginIconMap[item.icon] || pluginIconMap.puzzle,
+                            isChild: true,
+                          })}
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                )}
+                ))}
               </div>
-            ))}
+            ) : null}
 
-            <div className="mt-8 border-t border-border/70 pt-5">
-              <Button
-                asChild
-                variant="ghost"
-                onClick={() => setSidebarOpen(false)}
-                className={cn(
-                  "h-12 w-full justify-start gap-3 rounded-lg border border-dashed text-base transition-colors",
-                  isActive('/knowledge-base')
-                    ? "border-primary/30 bg-primary/10 font-semibold text-primary hover:bg-primary/15 hover:text-cyan-700"
-                    : "border-border/80 text-muted-foreground hover:border-primary/40 hover:bg-white hover:text-primary"
-                )}
-              >
-                <Link to="/knowledge-base">
-                  <BookOpen className="w-5 h-5" />
-                  Panduan
-                </Link>
-              </Button>
+            <div className="mt-6 space-y-2 border-t border-border/70 pt-5">
+              {renderSectionTitle('Plugins')}
+              {renderNavButton({
+                path: '/plugins',
+                label: 'Plugin Center',
+                icon: <Puzzle className="w-5 h-5" />,
+                variant: 'system',
+              })}
+            </div>
+
+            <div className="mt-6 space-y-2 border-t border-border/70 pt-5">
+              {renderSectionTitle('Panduan')}
+              {renderNavButton({
+                path: '/knowledge-base',
+                label: 'Panduan',
+                icon: <BookOpen className="w-5 h-5" />,
+                variant: 'system',
+              })}
             </div>
           </nav>
           <div className="p-4 text-center text-xs text-muted-foreground">

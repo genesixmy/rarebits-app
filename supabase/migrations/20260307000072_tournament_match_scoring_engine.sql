@@ -1,0 +1,192 @@
+-- SAFETY-13
+-- Single elimination scoring foundation (BO1/BO3/BO5), public payload alignment.
+
+ALTER TABLE IF EXISTS public.tournament_bracket_matches
+  ADD COLUMN IF NOT EXISTS score_a INTEGER NULL,
+  ADD COLUMN IF NOT EXISTS score_b INTEGER NULL;
+
+ALTER TABLE IF EXISTS public.tournament_bracket_matches
+  DROP CONSTRAINT IF EXISTS tournament_bracket_matches_score_non_negative;
+
+ALTER TABLE IF EXISTS public.tournament_bracket_matches
+  ADD CONSTRAINT tournament_bracket_matches_score_non_negative
+  CHECK (
+    (score_a IS NULL OR score_a >= 0)
+    AND (score_b IS NULL OR score_b >= 0)
+  );
+
+ALTER TABLE IF EXISTS public.tournament_bracket_matches
+  DROP CONSTRAINT IF EXISTS tournament_bracket_matches_score_pair_required;
+
+ALTER TABLE IF EXISTS public.tournament_bracket_matches
+  ADD CONSTRAINT tournament_bracket_matches_score_pair_required
+  CHECK (
+    (score_a IS NULL AND score_b IS NULL)
+    OR (score_a IS NOT NULL AND score_b IS NOT NULL)
+  );
+
+DROP FUNCTION IF EXISTS public.get_tournament_public_view(TEXT);
+
+CREATE OR REPLACE FUNCTION public.get_tournament_public_view(p_public_code TEXT)
+RETURNS JSONB
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+WITH selected_tournament AS (
+  SELECT
+    t.id,
+    t.name,
+    t.public_code,
+    t.category,
+    t.bracket_type,
+    t.status,
+    t.event_date,
+    t.venue,
+    t.max_players,
+    t.match_format,
+    t.round_time_minutes,
+    t.created_at,
+    t.updated_at
+  FROM public.tournaments t
+  WHERE t.public_code = p_public_code
+  LIMIT 1
+),
+selected_runs AS (
+  SELECT
+    r.id,
+    r.tournament_id,
+    r.bracket_type,
+    r.status,
+    r.total_rounds,
+    r.participant_count,
+    r.champion_name,
+    r.champion_seed_number,
+    r.completed_at,
+    r.created_at,
+    r.updated_at
+  FROM public.tournament_bracket_runs r
+  JOIN selected_tournament t
+    ON t.id = r.tournament_id
+  WHERE r.status IN ('prepared', 'draft', 'completed')
+),
+selected_display_run AS (
+  SELECT *
+  FROM selected_runs r
+  ORDER BY
+    CASE
+      WHEN r.status IN ('prepared', 'draft') THEN 0
+      WHEN r.status = 'completed' THEN 1
+      ELSE 2
+    END,
+    r.updated_at DESC,
+    r.created_at DESC,
+    r.id DESC
+  LIMIT 1
+),
+matches_payload AS (
+  SELECT COALESCE(
+    jsonb_agg(
+      jsonb_build_object(
+        'round_index', m.round_index,
+        'match_index', m.match_index,
+        'seed_a', m.seed_a,
+        'seed_b', m.seed_b,
+        'participant_a_name', m.participant_a_name,
+        'participant_b_name', m.participant_b_name,
+        'match_status', m.match_status,
+        'score_a', m.score_a,
+        'score_b', m.score_b,
+        'winner_participant_name', m.winner_participant_name,
+        'winner_seed_number', m.winner_seed_number,
+        'winner_source_slot', m.winner_source_slot,
+        'completed_at', m.completed_at
+      )
+      ORDER BY m.round_index, m.match_index
+    ),
+    '[]'::jsonb
+  ) AS matches
+  FROM public.tournament_bracket_matches m
+  JOIN selected_display_run r
+    ON r.id = m.run_id
+),
+runs_payload AS (
+  SELECT COALESCE(
+    jsonb_agg(
+      jsonb_build_object(
+        'id', r.id,
+        'bracket_type', r.bracket_type,
+        'status', r.status,
+        'total_rounds', r.total_rounds,
+        'participant_count', r.participant_count,
+        'champion_name', r.champion_name,
+        'champion_seed_number', r.champion_seed_number,
+        'completed_at', r.completed_at,
+        'created_at', r.created_at,
+        'updated_at', r.updated_at
+      )
+      ORDER BY
+        CASE
+          WHEN r.status IN ('prepared', 'draft') THEN 0
+          WHEN r.status = 'completed' THEN 1
+          ELSE 2
+        END,
+        r.updated_at DESC,
+        r.created_at DESC
+    ),
+    '[]'::jsonb
+  ) AS runs
+  FROM selected_runs r
+)
+SELECT CASE
+  WHEN EXISTS (SELECT 1 FROM selected_tournament) THEN (
+    jsonb_build_object(
+      'tournament',
+      (
+        SELECT jsonb_build_object(
+          'name', t.name,
+          'public_code', t.public_code,
+          'category', t.category,
+          'bracket_type', t.bracket_type,
+          'status', t.status,
+          'event_date', t.event_date,
+          'venue', t.venue,
+          'max_players', t.max_players,
+          'match_format', t.match_format,
+          'round_time_minutes', t.round_time_minutes,
+          'created_at', t.created_at,
+          'updated_at', t.updated_at
+        )
+        FROM selected_tournament t
+      ),
+      'display_run',
+      (
+        SELECT CASE
+          WHEN r.id IS NULL THEN NULL
+          ELSE jsonb_build_object(
+            'id', r.id,
+            'bracket_type', r.bracket_type,
+            'status', r.status,
+            'total_rounds', r.total_rounds,
+            'participant_count', r.participant_count,
+            'champion_name', r.champion_name,
+            'champion_seed_number', r.champion_seed_number,
+            'completed_at', r.completed_at,
+            'created_at', r.created_at,
+            'updated_at', r.updated_at
+          )
+        END
+        FROM selected_display_run r
+      ),
+      'runs',
+      (SELECT runs FROM runs_payload),
+      'matches',
+      (SELECT matches FROM matches_payload)
+    )
+  )
+  ELSE NULL
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_tournament_public_view(TEXT) TO anon, authenticated;

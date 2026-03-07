@@ -66,5 +66,21 @@ export const queryKeys = {
     dashboardTodayByUser: (userId) => ["dashboard-reminders-today", userId],
     dashboardOccurrencesByUser: (userId) => ["dashboard-reminder-occurrences", userId],
   },
-};
 
+  tournament: {
+    templates: () => ["tournament-templates"],
+    listByUser: (userId) => ["tournaments", userId],
+    detailById: (tournamentId) => ["tournament", tournamentId],
+    participantsByTournament: (tournamentId, userId) => ["tournament-participants", tournamentId, userId],
+    bracketSnapshotByTournament: (tournamentId, userId) => ["tournament-bracket-snapshot", tournamentId, userId],
+    bracketRunByTournament: (tournamentId, userId) => ["tournament-bracket-run", tournamentId, userId],
+    runHistoryByTournament: (tournamentId, userId) => ["tournament-run-history", tournamentId, userId],
+    runAuditEventsRoot: (tournamentId, userId) => ["tournament-run-audit-events", tournamentId, userId],
+    runAuditEventsByTournament: (tournamentId, userId, limit = 30) => ["tournament-run-audit-events", tournamentId, userId, limit],
+    bracketMatchesRoot: () => ["tournament-bracket-matches"],
+    bracketMatchesByRun: (runId, userId) => ["tournament-bracket-matches", runId, userId],
+    runCompletionSummary: (tournamentId, userId) => ["tournament-run-completion-summary", tournamentId, userId],
+    canStartNewRunFromSnapshot: (tournamentId, userId) => ["tournament-start-new-run-eligibility", tournamentId, userId],
+    publicView: (publicCode) => ["tournament-public-view", publicCode],
+  },
+};
